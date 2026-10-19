@@ -82,7 +82,7 @@ Reproduce the stream collision cleanup errors:
 python3 tests/create/check_create.py . --revision bdc861b6 --build-dir build/create-tests-stream-before
 ```
 
-This baseline passes 77/92 cases. Five collisions return with the base
+In the original 92-case matrix, this baseline passes 77/92 cases. Five collisions return with the base
 file's directory lock held, one temporary uppercase buffer still allocated
 and a discarded ADS FCB on the dirty queue. Ten injected failures also
 leave an unpublished ADS FCB dirty. The production flush path interprets
@@ -100,10 +100,39 @@ before the collision recheck. The tests also require successful creates
 to remain dirty and reclaim all discarded allocations and resources.
 These assertions examine dirty-list eligibility, not actual disk writes.
 
+Reproduce cached-stream reopening failures:
+
+```sh
+python3 tests/create/check_create.py . --revision 09bb62c0 --build-dir build/create-tests-reopen-before
+```
+
+This baseline passes 94/112 cases. Fourteen cached-stream create attempts
+terminate with SIGSEGV after the production reaper clears their fileref.
+Three direct stream opens leak the xattr data buffer on metadata errors;
+a fourth leaks an FCB reference when another fileref wins publication.
+
+The new cases use production `open_fcb_stream` and `open_fileref_child`,
+not a mock reopening result. The fixture constructs a real stream FCB,
+closes its real fileref and runs production reapers. Warm cases retain an
+independent FCB hold; cold cases also evict that FCB. Reopening must return
+one referenced fileref with the original cached xattr name, seven bytes of
+known stream data and the correct file size. The discarded create FCB
+shares that cache key and must be removed before opening the existing
+stream, otherwise its empty data can shadow the real stream.
+
+Coverage includes case folding, paging allocation, directory bases,
+distinct-name controls, uppercase and allocation failures, xattr read
+failure, metadata lookup and validation failures, and deterministic
+competing fileref publication. Metadata failures must release the read
+buffer; losing publication must release the acquired FCB reference. The
+callback models that interleaving and does not run concurrent threads.
+Returned references, parent holds, cache buckets, initialized resources
+and all tracked allocations must balance after normal reaping.
+
 The harness extracts the actual `file_create2`, `create_stream`, FCB and
 fileref constructors, dirty-queue insertion, reference releases, cache
-reapers, directory-entry creation and lookup, child fileref opening, FCB
-cache insertion and software CRC32C.
+reapers, directory-entry creation and lookup, child fileref opening,
+stream FCB reconstruction, FCB cache insertion and software CRC32C.
 It checks successful file/directory/stream creation, nonpaged allocation,
 preallocation, case folding, existing-file collision, and injected errors
 in conversion, allocation, security, EA parsing, extension and metadata
@@ -120,7 +149,9 @@ fixture teardown is separate from reference and child-ownership checks.
 
 Windows locks, lookaside storage, security assignment, access checks,
 name conversion, EA parsing, file extension, stream base lookup and
-disk/FCB opening are host models. Conversion fixtures use ASCII names. Dirty completion does
+ordinary FCB opening, xattr reads and tree lookups are host models.
+Stream FCB reconstruction and fileref publication use production code.
+Conversion fixtures use ASCII names. Dirty completion does
 not run the flush worker, persistence, or actual transaction rollback.
 The test calls the creation helpers directly and models their callers'
 returned-reference releases; it does not drive the outer create dispatch
@@ -128,10 +159,9 @@ or Windows handle-close code. Sanitizer results cover host memory, not
 Windows pool behavior or concurrency. Windows runtime testing is still
 required.
 
-These tests drive the creation helpers directly. Separate existing defects
-remain in end-to-end stream collision handling: a cached stream without
-a live fileref is dereferenced by the collision helper, and the outer
-`file_create` stream branch does not forward a collision fileref to its
-`existing_fileref` output. These paths are outside this matrix and need
-separate regression coverage. The missing-base access-denied path also
-retains a name buffer; that separate cleanup defect is unchanged.
+These tests drive the creation helpers directly. The outer `file_create`
+stream branch still does not forward a collision fileref to its
+`existing_fileref` output; outer dispatch needs separate regression
+coverage. Stream FCB cache matching still uses the ADS hash without the
+full xattr name. The missing-base access-denied path also retains a copied
+name buffer. These pre-existing defects are unchanged.

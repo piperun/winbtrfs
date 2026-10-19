@@ -67,6 +67,9 @@ static NTSTATUS open_fcb_stream(_Requires_lock_held_(_Curr_->tree_lock) _Require
     fcb->adshash = crc32;
     fcb->adsxattr = xattr;
 
+    fcb->adsdata.Buffer = (char*)xattrdata;
+    fcb->adsdata.Length = fcb->adsdata.MaximumLength = xattrlen;
+
     // find XATTR_ITEM overhead and hence calculate maximum length
 
     searchkey.objectid = parent->inode;
@@ -95,9 +98,6 @@ static NTSTATUS open_fcb_stream(_Requires_lock_held_(_Curr_->tree_lock) _Require
     overhead = tp.item->size - xattrlen;
 
     fcb->adsmaxlen = Vcb->superblock.nodesize - sizeof(struct btrfs_header) - sizeof(struct btrfs_item) - overhead;
-
-    fcb->adsdata.Buffer = (char*)xattrdata;
-    fcb->adsdata.Length = fcb->adsdata.MaximumLength = xattrlen;
 
     fcb->Header.IsFastIoPossible = fast_io_possible(fcb);
     fcb->Header.AllocationSize.QuadPart = xattrlen;
@@ -236,6 +236,8 @@ NTSTATUS open_fileref_child(_Requires_lock_held_(_Curr_->tree_lock) _Requires_ex
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
+        sf2->fcb = fcb;
+
         ExAcquireResourceExclusiveLite(&sf->fcb->nonpaged->dir_children_lock, true);
 
         if (dc->fileref) {
@@ -243,7 +245,6 @@ NTSTATUS open_fileref_child(_Requires_lock_held_(_Curr_->tree_lock) _Requires_ex
             sf2 = dc->fileref;
             increase_fileref_refcount(sf2);
         } else {
-            sf2->fcb = fcb;
             sf2->parent = (struct _file_ref*)sf;
             sf2->dc = dc;
             dc->fileref = sf2;
@@ -254,7 +255,7 @@ NTSTATUS open_fileref_child(_Requires_lock_held_(_Curr_->tree_lock) _Requires_ex
         ExReleaseResourceLite(&sf->fcb->nonpaged->dir_children_lock);
 
         if (duff_fr)
-            ExFreeToPagedLookasideList(&Vcb->fileref_lookaside, duff_fr);
+            reap_fileref(Vcb, duff_fr);
     } else {
         root* subvol;
         uint64_t inode;

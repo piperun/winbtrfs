@@ -7,7 +7,7 @@ static const char* scenario;
 static void host_log(const char* format, ...) { (void)format; }
 enum fault_kind { NONE, POOL, FCB_ALLOC, NP_ALLOC, FILEREF_ALLOC, SECURITY, EA_ERROR,
                   EXTEND_ERROR, UTF8_ERROR, UPPERCASE_ERROR, TREE_ERROR, ACCESS_ERROR,
-                  OPEN_ERROR, NAME_ERROR, REOPEN_ERROR };
+                  OPEN_ERROR, NAME_ERROR, REOPEN_ERROR, XATTR_ERROR };
 typedef struct {
     const char* name;
     bool stream, missing_base, directory, paging, insensitive, preallocate, existing_entry, full, readonly;
@@ -18,6 +18,7 @@ typedef struct {
     const WCHAR *existing_name, *requested_name;
     bool hash_collision, reaped_entry, existing_directory, install_during_open, existing_stream;
     const WCHAR *stream_name, *cached_stream_name;
+    bool reaped_stream, cold_stream, reopen_only, install_stream, bad_stream_key, short_stream_item;
 } test_case;
 static const test_case* current;
 static device_extension volume;
@@ -27,6 +28,11 @@ static fcb_nonpaged directory_np, base_np, stream_np;
 static file_ref directory_ref, base_ref, stream_ref;
 static dir_child collision_dc, stream_dc;
 static WCHAR *cached_name, *cached_name_uc, *stream_cached_name, *stream_cached_uc;
+static char* stream_utf8;
+static fcb* warm_stream_fcb;
+static file_ref* installed_stream_ref;
+static unsigned stream_reads;
+static const uint8_t stream_payload[]={'p','a','y','l','o','a','d'};
 static LIST_ENTRY *directory_hash[256], *directory_hash_uc[256], *base_hash[256], *base_hash_uc[256];
 static fcb fcbs[4];
 static fcb_nonpaged nonpaged[4];
@@ -210,7 +216,9 @@ static NTSTATUS find_item(device_extension* vcb, root* r, traverse_ptr* tp, stru
     CHECK(vcb == &volume && r == &subvol && !exact && request == &irp && key->type == BTRFS_XATTR_ITEM_KEY);
     if (hit(TREE_ERROR)) return STATUS_IO_DEVICE_ERROR;
     static struct { struct btrfs_key key; uint32_t size; } item;
-    item.key=*key; item.size=current->full ? 4096 : 0;
+    item.key=*key; item.size=current->full ? 4096 : stream_reads ? 32 : 0;
+    if (stream_reads && current->bad_stream_key) item.key.offset++;
+    if (stream_reads && current->short_stream_item) item.size=sizeof(stream_payload)-1;
     tp->item=(void*)&item; return STATUS_SUCCESS;
 }
 static int keycmp(struct btrfs_key a, struct btrfs_key b) { return a.objectid != b.objectid || a.type != b.type || a.offset != b.offset; }
@@ -245,10 +253,27 @@ static NTSTATUS open_fcb(device_extension* vcb, root* r, uint64_t inode, uint8_t
     }
     InterlockedIncrement(&base_fcb.refcount); *out=&base_fcb; return STATUS_SUCCESS;
 }
-static NTSTATUS open_fcb_stream(device_extension* vcb, dir_child* dc, fcb* parent, fcb** out, PIRP request) {
-    (void)vcb; (void)dc; (void)parent; (void)out; (void)request;
-    CHECK(false); return STATUS_UNSUCCESSFUL; // not exercised by ordinary creation
+static bool get_xattr(device_extension* vcb, root* r, uint64_t inode, char* name, uint32_t crc,
+                       uint8_t** data, uint16_t* length, PIRP request) {
+    CHECK(vcb == &volume && r == &subvol && inode == base_fcb.inode && request == &irp);
+    CHECK(volume.fcb_lock.held && !base_np.dir_children_lock.held);
+    CHECK(!memcmp(name,"user.",5) && strlen(name) == 5u+stream_dc.utf8.Length);
+    CHECK(!memcmp(name+5,stream_dc.utf8.Buffer,stream_dc.utf8.Length));
+    CHECK(crc == calc_crc32c(0xfffffffe,(uint8_t*)name,strlen(name)));
+    stream_reads++;
+    if (hit(XATTR_ERROR)) return false;
+    *length=sizeof(stream_payload); *data=allocate(*length,"xattr"); memcpy(*data,stream_payload,*length);
+    if (current->install_stream) {
+        CHECK(warm_stream_fcb && !stream_dc.fileref);
+        installed_stream_ref=create_fileref(vcb); CHECK(installed_stream_ref);
+        installed_stream_ref->fcb=warm_stream_fcb; InterlockedIncrement(&warm_stream_fcb->refcount);
+        installed_stream_ref->parent=&base_ref; increase_fileref_refcount(&base_ref);
+        installed_stream_ref->dc=&stream_dc; stream_dc.fileref=installed_stream_ref;
+        InsertTailList(&base_ref.children,&installed_stream_ref->list_entry);
+    }
+    return true;
 }
+#include "open_fcb_stream.inc"
 #include "open_fileref_child.inc"
 #include "file_create2.inc"
 #include "create_stream.inc"
@@ -300,11 +325,13 @@ static void setup(void) {
     }
     if (current->existing_stream) {
         CHECK(have_base && !current->missing_base);
-        setup_fcb(&stream_fcb,&stream_np,base_fcb.type,base_fcb.inode,NULL,NULL);
-        stream_fcb.ads=true; stream_fcb.adsdata.Length=7;
-        stream_ref.fcb=&stream_fcb; stream_ref.refcount=1; stream_ref.parent=&base_ref;
-        InitializeListHead(&stream_ref.children); stream_ref.dc=&stream_dc;
-        increase_fileref_refcount(&base_ref); InsertTailList(&base_ref.children,&stream_ref.list_entry);
+        if (!current->reaped_stream) {
+            setup_fcb(&stream_fcb,&stream_np,base_fcb.type,base_fcb.inode,NULL,NULL);
+            stream_fcb.ads=true; stream_fcb.adsdata.Length=sizeof(stream_payload);
+            stream_ref.fcb=&stream_fcb; stream_ref.refcount=1; stream_ref.parent=&base_ref;
+            InitializeListHead(&stream_ref.children); stream_ref.dc=&stream_dc;
+            increase_fileref_refcount(&base_ref); InsertTailList(&base_ref.children,&stream_ref.list_entry);
+        }
         const WCHAR* name=current->cached_stream_name ? current->cached_stream_name : (const WCHAR*)L"extra";
         unsigned length=0; while (name[length]) length++;
         CHECK(length && length < 64);
@@ -315,8 +342,38 @@ static void setup(void) {
         }
         stream_dc.name=(UNICODE_STRING){length*sizeof(WCHAR),length*sizeof(WCHAR),stream_cached_name};
         stream_dc.name_uc=(UNICODE_STRING){length*sizeof(WCHAR),length*sizeof(WCHAR),stream_cached_uc};
-        stream_dc.index=0; stream_dc.size=7; stream_dc.fileref=&stream_ref;
+        stream_dc.index=0; stream_dc.size=sizeof(stream_payload); stream_dc.fileref=&stream_ref;
+        stream_utf8=malloc(length); CHECK(stream_utf8);
+        for (unsigned i=0;i<length;i++) { CHECK(name[i] < 128); stream_utf8[i]=(char)name[i]; }
+        stream_dc.utf8=(ANSI_STRING){length,length,stream_utf8};
         InsertHeadList(&base_fcb.dir_children_index,&stream_dc.list_entry_index);
+        if (current->reaped_stream) {
+            preparing=true;
+            // Construct and close a real cached stream, retaining a separate
+            // FCB hold only in warm-cache cases. Production reapers clear dc.
+            fcb* prior=create_fcb(&volume,PagedPool); CHECK(prior);
+            prior->Vcb=&volume; prior->subvol=&subvol; prior->inode=base_fcb.inode;
+            prior->hash=base_fcb.hash; prior->type=base_fcb.type; prior->ads=true;
+            prior->adsxattr.Length=5+length; prior->adsxattr.MaximumLength=6+length;
+            prior->adsxattr.Buffer=allocate(6+length,"fixture");
+            memcpy(prior->adsxattr.Buffer,"user.",5); memcpy(prior->adsxattr.Buffer+5,stream_utf8,length);
+            prior->adsxattr.Buffer[5+length]=0;
+            prior->adshash=calc_crc32c(0xfffffffe,(uint8_t*)prior->adsxattr.Buffer,5+length);
+            prior->adsdata.Length=prior->adsdata.MaximumLength=sizeof(stream_payload);
+            prior->adsdata.Buffer=allocate(sizeof(stream_payload),"fixture");
+            memcpy(prior->adsdata.Buffer,stream_payload,sizeof(stream_payload));
+            prior->Header.FileSize.QuadPart=sizeof(stream_payload);
+            add_fcb_to_subvol(prior); InsertTailList(&volume.all_fcbs,&prior->list_entry_all);
+            if (!current->cold_stream) { warm_stream_fcb=prior; InterlockedIncrement(&prior->refcount); }
+            file_ref* closed=create_fileref(&volume); CHECK(closed);
+            closed->fcb=prior; closed->parent=&base_ref; increase_fileref_refcount(&base_ref);
+            closed->dc=&stream_dc; stream_dc.fileref=closed;
+            InsertTailList(&base_ref.children,&closed->list_entry);
+            free_fileref(closed); reap_filerefs(&volume); reap_fcbs(&volume);
+            CHECK(!stream_dc.fileref && base_ref.refcount == 1);
+            CHECK(!warm_stream_fcb || warm_stream_fcb->refcount == 1);
+            preparing=false;
+        }
     }
     if (current->reaped_entry) {
         // Reap a real, closed fileref while its directory entry remains cached.
@@ -378,7 +435,9 @@ static void run(void) {
     FILE_FULL_EA_INFORMATION ea={0};
     file_ref *result=NULL, *parent=&directory_ref;
     volume.fcb_lock.held=1; // caller holds this across creation and child lookup
-    NTSTATUS status=current->stream ? create_stream(&volume,&result,&parent,&name,&stream,&irp,
+    NTSTATUS status=current->reopen_only ? open_fileref_child(&volume,&base_ref,&stream,!current->insensitive,true,true,
+                                                                           current->paging ? NonPagedPool : PagedPool,&result,&irp)
+        : current->stream ? create_stream(&volume,&result,&parent,&name,&stream,&irp,
                           current->directory ? FILE_DIRECTORY_FILE : 0,current->paging ? NonPagedPool : PagedPool,!current->insensitive,&rollback)
         : file_create2(&irp,&volume,&name,&directory_ref,current->directory ? FILE_DIRECTORY_FILE : 0,
                        current->fault == EA_ERROR ? &ea : NULL,current->fault == EA_ERROR ? sizeof(ea) : 0,&result,!current->insensitive,&rollback);
@@ -408,8 +467,10 @@ static void run(void) {
     if (current->existing_stream) {
         unsigned entries=0;
         for (LIST_ENTRY* le=base_fcb.dir_children_index.Flink;le != &base_fcb.dir_children_index;le=le->Flink) entries++;
-        CHECK(entries == (NT_SUCCESS(status) ? 2u : 1u));
-        CHECK(stream_dc.fileref == &stream_ref && stream_dc.size == 7 && stream_fcb.adsdata.Length == 7);
+        CHECK(entries == (NT_SUCCESS(status) && !current->reopen_only ? 2u : 1u));
+        CHECK(stream_dc.size == sizeof(stream_payload));
+        if (!current->reaped_stream) CHECK(stream_dc.fileref == &stream_ref && stream_fcb.adsdata.Length == sizeof(stream_payload));
+        else if (!result || (NT_SUCCESS(status) && !current->reopen_only)) CHECK(!stream_dc.fileref);
         const WCHAR* original=current->cached_stream_name ? current->cached_stream_name : (const WCHAR*)L"extra";
         CHECK(!memcmp(stream_dc.name.Buffer,original,stream_dc.name.Length));
         if (status == STATUS_OBJECT_NAME_COLLISION) {
@@ -429,7 +490,19 @@ static void run(void) {
     CHECK(faults == (current->fault == NONE ? 0u : 1u));
     CHECK(!access_state.SubjectSecurityContext && !volume.fcb_lock.held);
     CHECK(!directory_np.resource.held && !directory_np.dir_children_lock.held && !base_np.resource.held && !base_np.dir_children_lock.held);
-    if (NT_SUCCESS(status)) {
+    if ((current->reaped_stream && status == STATUS_OBJECT_NAME_COLLISION) || (current->reopen_only && NT_SUCCESS(status))) {
+        CHECK(result && result == stream_dc.fileref && result->parent == &base_ref && result->dc == &stream_dc);
+        CHECK(result->refcount == (current->install_stream ? 2 : 1));
+        if (current->install_stream) { CHECK(result == installed_stream_ref); free_fileref(installed_stream_ref); }
+        if (warm_stream_fcb) CHECK(result->fcb == warm_stream_fcb);
+        CHECK(result->fcb->ads && !result->fcb->deleted && !result->fcb->dirty && !result->dirty);
+        CHECK(result->fcb->adsdata.Length == sizeof(stream_payload));
+        CHECK(!memcmp(result->fcb->adsdata.Buffer,stream_payload,sizeof(stream_payload)));
+        CHECK(result->fcb->adsxattr.Length == 5+stream_dc.utf8.Length);
+        CHECK(!memcmp(result->fcb->adsxattr.Buffer+5,stream_utf8,stream_dc.utf8.Length));
+        CHECK(result->fcb->Header.FileSize.QuadPart == sizeof(stream_payload));
+        CHECK(IsListEmpty(&rollback)); free_fileref(result);
+    } else if (NT_SUCCESS(status)) {
         CHECK(result && result->fcb->dirty && result->dirty && result->refcount == 2);
         CHECK(result->parent == (current->stream ? parent : &directory_ref));
         CHECK(!result->fcb->deleted && result->dc && result->dc->fileref == result);
@@ -472,15 +545,17 @@ static void run(void) {
         fprintf(stderr,"%s: parent FCB refs: directory=%d, base=%d (expected 1 for each fixture parent)\n",
                 scenario,directory_fcb.refcount,have_base ? base_fcb.refcount : 1);
     CHECK(directory_fcb.refcount == 1 && (!have_base || base_fcb.refcount == 1));
-    CHECK(directory_ref.refcount == (have_base && !current->reaped_entry ? 2 : 1) && (!have_base || base_ref.refcount == (current->existing_stream ? 2 : 1)));
+    CHECK(directory_ref.refcount == (have_base && !current->reaped_entry ? 2 : 1) && (!have_base || base_ref.refcount == (current->existing_stream && !current->reaped_stream ? 2 : 1)));
     if (current->reaped_entry) {
         CHECK(!collision_dc.fileref && !base_fcb.fileref);
         bool opened=status == STATUS_OBJECT_NAME_COLLISION || current->fault == REOPEN_ERROR || current->fault == FILEREF_ALLOC;
         CHECK(reopen_calls == (opened ? 1u : 0u));
     }
-    if (current->existing_stream) CHECK(stream_ref.refcount == 1 && stream_fcb.refcount == 1);
+    if (current->existing_stream && !current->reaped_stream) CHECK(stream_ref.refcount == 1 && stream_fcb.refcount == 1);
+    if (current->reaped_stream) CHECK(!stream_dc.fileref);
     CHECK(subvol.fcbs.Flink == cache_head && subvol.fcbs.Blink == cache_tail);
     CHECK(!memcmp(buckets,subvol.fcbs_ptrs,sizeof(buckets)));
+    if (warm_stream_fcb) { CHECK(warm_stream_fcb->refcount == 1); free_fcb(warm_stream_fcb); reap_fcbs(&volume); }
     CHECK(volume.fcb_lookaside.allocations == volume.fcb_lookaside.returns);
     CHECK(volume.fcb_np_lookaside.allocations == volume.fcb_np_lookaside.returns);
     CHECK(volume.fileref_lookaside.allocations == volume.fileref_lookaside.returns);
@@ -494,7 +569,7 @@ static void run(void) {
     }
     for (unsigned i=0;i<pool_count;i++) { CHECK(!pools[i].live); free(pools[i].p); }
     CHECK(!volume.dirty_fcbs_lock.held && !volume.dirty_filerefs_lock.held);
-    free(cached_name); free(cached_name_uc); free(stream_cached_name); free(stream_cached_uc);
+    free(cached_name); free(cached_name_uc); free(stream_cached_name); free(stream_cached_uc); free(stream_utf8);
     printf("PASS %s\n",scenario);
 }
 int main(int argc, char** argv) {
@@ -549,6 +624,26 @@ int main(int argc, char** argv) {
         {.name="cached-insensitive-distinct",.existing_entry=true,.reaped_entry=true,.insensitive=true,.requested_name=L"bravo"},
         {.name="cached-hash-collision",.existing_entry=true,.reaped_entry=true,.insensitive=true,.existing_name=L"572BSHK",.requested_name=L"AFNB7ZH",.hash_collision=true},
         {.name="cached-hash-collision-length",.existing_entry=true,.reaped_entry=true,.insensitive=true,.existing_name=L"6KKS16",.requested_name=L"IM921VL31U",.hash_collision=true},
+        {.name="reaped-stream-warm",.stream=true,.existing_stream=true,.reaped_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="reaped-stream-warm-insensitive",.stream=true,.existing_stream=true,.reaped_stream=true,.insensitive=true,.stream_name=L"ExTrA",.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="reaped-stream-cold",.stream=true,.existing_stream=true,.reaped_stream=true,.cold_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="reaped-stream-cold-insensitive",.stream=true,.existing_stream=true,.reaped_stream=true,.cold_stream=true,.insensitive=true,.cached_stream_name=L"eXtRa",.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="reaped-stream-paging",.stream=true,.existing_stream=true,.reaped_stream=true,.cold_stream=true,.paging=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="reaped-stream-directory-base",.stream=true,.existing_stream=true,.reaped_stream=true,.existing_directory=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="reaped-stream-uppercase-error",.stream=true,.existing_stream=true,.reaped_stream=true,.insensitive=true,.fault=UPPERCASE_ERROR,.index=2,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="reaped-stream-xattr-name-error",.stream=true,.existing_stream=true,.reaped_stream=true,.fault=POOL,.allocator="open_fcb_stream",.index=1,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="reaped-stream-fcb-error",.stream=true,.existing_stream=true,.reaped_stream=true,.fault=FCB_ALLOC,.index=2,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="reaped-stream-nonpaged-error",.stream=true,.existing_stream=true,.reaped_stream=true,.fault=NP_ALLOC,.index=2,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="reaped-stream-read-error",.stream=true,.existing_stream=true,.reaped_stream=true,.fault=XATTR_ERROR,.expected=STATUS_INTERNAL_ERROR},
+        {.name="reaped-stream-metadata-error",.stream=true,.existing_stream=true,.reaped_stream=true,.fault=TREE_ERROR,.index=2,.expected=STATUS_IO_DEVICE_ERROR},
+        {.name="reaped-stream-fileref-error",.stream=true,.existing_stream=true,.reaped_stream=true,.fault=FILEREF_ALLOC,.index=2,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="reaped-stream-publication",.stream=true,.existing_stream=true,.reaped_stream=true,.install_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="reaped-stream-distinct-sensitive",.stream=true,.existing_stream=true,.reaped_stream=true,.cold_stream=true,.stream_name=L"EXTRA"},
+        {.name="reaped-stream-distinct-insensitive",.stream=true,.existing_stream=true,.reaped_stream=true,.insensitive=true,.stream_name=L"bravo"},
+        {.name="open-stream-metadata-error",.stream=true,.existing_stream=true,.reaped_stream=true,.reopen_only=true,.fault=TREE_ERROR,.expected=STATUS_IO_DEVICE_ERROR},
+        {.name="open-stream-wrong-key",.stream=true,.existing_stream=true,.reaped_stream=true,.reopen_only=true,.bad_stream_key=true,.expected=STATUS_INTERNAL_ERROR},
+        {.name="open-stream-short-item",.stream=true,.existing_stream=true,.reaped_stream=true,.reopen_only=true,.short_stream_item=true,.expected=STATUS_INTERNAL_ERROR},
+        {.name="open-stream-publication",.stream=true,.existing_stream=true,.reaped_stream=true,.reopen_only=true,.install_stream=true},
         {.name="stream-collision-sensitive",.stream=true,.existing_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="stream-collision-insensitive",.stream=true,.existing_stream=true,.insensitive=true,.stream_name=L"ExTrA",.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="stream-collision-cached-upper",.stream=true,.existing_stream=true,.insensitive=true,.cached_stream_name=L"EXTRA",.expected=STATUS_OBJECT_NAME_COLLISION},

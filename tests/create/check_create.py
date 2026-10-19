@@ -43,6 +43,7 @@ streams = read("src/stream-create.c", optional=True) or create
 marker = "static NTSTATUS create_stream(" if "static NTSTATUS create_stream(" in streams else "NTSTATUS create_stream("
 (out / "create_stream.inc").write_text(license_header + function(streams, marker))
 opening = read("src/fileref-open.c", optional=True) or create
+(out / "open_fcb_stream.inc").write_text(license_header + function(opening, "static NTSTATUS open_fcb_stream("))
 for name, marker in [("create_fcb", "fcb* create_fcb("),
                      ("create_fileref", "file_ref* create_fileref("),
                      ("add_dir_child", "NTSTATUS add_dir_child("),

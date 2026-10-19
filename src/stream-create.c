@@ -323,7 +323,8 @@ NTSTATUS create_stream(_Requires_lock_held_(_Curr_->tree_lock) _Requires_exclusi
     if (existing_dc) {
         file_ref* existing_fileref = existing_dc->fileref;
 
-        increase_fileref_refcount(existing_fileref);
+        if (existing_fileref)
+            increase_fileref_refcount(existing_fileref);
         ExReleaseResourceLite(&parfileref->fcb->nonpaged->dir_children_lock);
 
         ExFreePool(dc->utf8.Buffer);
@@ -331,8 +332,19 @@ NTSTATUS create_stream(_Requires_lock_held_(_Curr_->tree_lock) _Requires_exclusi
         ExFreePool(dc->name_uc.Buffer);
         ExFreePool(dc);
         reap_fileref(Vcb, fileref);
-        free_fileref(parfileref);
+        // The unpublished FCB has the same cache key as the existing stream.
+        reap_fcb(fcb);
 
+        if (!existing_fileref) {
+            Status = open_fileref_child(Vcb, parfileref, stream, case_sensitive, true, true, pool_type, &existing_fileref, Irp);
+            if (!NT_SUCCESS(Status)) {
+                ERR("open_fileref_child returned %08lx\n", Status);
+                free_fileref(parfileref);
+                return Status;
+            }
+        }
+
+        free_fileref(parfileref);
         *pfileref = existing_fileref;
 
         return STATUS_OBJECT_NAME_COLLISION;
