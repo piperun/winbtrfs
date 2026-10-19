@@ -163,8 +163,9 @@ Reproduce ADS FCB cache hash collisions:
 python3 tests/create/check_create.py . --revision 34559bd4 --build-dir build/create-tests-ads-before
 ```
 
-This baseline passes 141/155 cases. All 135 earlier cases pass. Fourteen
-new cases return another stream's cached FCB and its 12-byte payload
+In the original 155-case matrix, this baseline passes 141/155 cases.
+All 135 earlier cases pass. Fourteen new cases return another stream's
+cached FCB and its 12-byte payload
 instead of the requested stream's seven bytes. The fixture uses real
 CRC32C collisions with seed `0xfffffffe` over the complete UTF-8 xattr
 name, including the `user.` prefix. Production CRC32C verifies every pair:
@@ -189,7 +190,36 @@ capacity, competing fileref publication, and xattr-read, metadata and
 fileref-allocation failures. The other cached FCB retains its original
 name, data, size and reference count after the requested stream is closed
 and reaped. The same ownership, cache, resource and allocation checks
-apply to all 155 scenarios.
+apply to the expanded matrix.
+
+Reproduce the missing-base filename leak on access denial:
+
+```sh
+python3 tests/create/check_create.py . --revision 862e0fdb --build-dir build/create-tests-denied-before
+```
+
+This baseline passes 160/169 cases. Nine denied base-file creation attempts
+retain their copied filename after returning `STATUS_ACCESS_DENIED`.
+The cases exercise direct stream creation and outer dispatch, acquired and
+borrowed lookup parents, paging allocation, case-insensitive requests, and
+short, long and non-ASCII UTF-16 filenames. Tracked retained allocations
+are 8, 10 or 124 bytes, matching each copied filename's byte length.
+
+The parent access check is denied while the parent resource and subject
+context are held. Before returning, production code must release both
+and free the copied filename exactly once. Denial must return no fileref,
+allocate no FCB or fileref, leave the namespace and dirty queues empty,
+and send no notifications. The outer caller must release its own copied
+path and any acquired parent hold as well.
+
+Five neighboring controls cover filename-copy allocation failure directly
+and through outer dispatch, invalid base names, failure to assign the new
+base's security descriptor, and denial of stream access after successful
+base creation. These checks preserve the existing error precedence and
+exercise the other filename cleanup paths. Together with all 155 earlier
+cases, all 169 scenarios must balance tracked allocations, references and
+resources. The non-ASCII denial case checks the UTF-16 copy's ownership;
+it does not exercise the host model's ASCII-only UTF-8 conversion.
 
 The harness extracts the actual `file_create2`, `create_stream`, FCB and
 fileref constructors, dirty-queue insertion, reference releases, cache
@@ -221,6 +251,3 @@ Windows IRP/handle-close dispatch. ECP discovery is disabled, LXSS detection
 is modeled false, and share-access operations are counted host services. Sanitizer results cover host memory, not
 Windows pool behavior or concurrency. Windows runtime testing is still
 required.
-
-The missing-base access-denied path still retains a copied filename
-buffer. That pre-existing defect is unchanged.

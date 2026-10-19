@@ -42,6 +42,7 @@ static fcb_nonpaged nonpaged[4];
 static file_ref refs[4];
 static bool leases[3][4];
 static unsigned faults, fault_attempts, utf_calls, uppercase_calls, destroyed, created_resources, notifications;
+static unsigned access_checks;
 static bool have_base, preparing;
 static unsigned reopen_calls;
 static file_ref* installed_ref;
@@ -204,6 +205,11 @@ static void* IoGetFileObjectGenericMapping(void) { return NULL; }
 static bool SeAccessCheck(void* sd, int* context, bool locked, unsigned desired, unsigned previous, void* privilege,
                           void* mapping, int mode, ACCESS_MASK* granted, NTSTATUS* status) {
     (void)sd; CHECK(*context == 1 && locked && desired && !previous && !privilege && !mapping && mode == UserMode);
+    access_checks++;
+    if (current->stream && current->missing_base && access_checks == 1) {
+        CHECK(directory_np.resource.held);
+        CHECK(desired == (current->directory ? FILE_ADD_SUBDIRECTORY : FILE_ADD_FILE));
+    }
     if (hit(ACCESS_ERROR)) { *status=STATUS_ACCESS_DENIED; return false; }
     *granted=desired; *status=STATUS_SUCCESS; return true;
 }
@@ -408,6 +414,7 @@ static void setup(void) {
     if (current->dispatch && !current->insensitive) irp.stack.Flags |= SL_CASE_SENSITIVE;
 }
 #include "ads_cache_test.inc"
+#include "missing_base_test.inc"
 
 static void drain_dirty(void) {
     while (!IsListEmpty(&volume.dirty_fcbs)) {
@@ -462,6 +469,7 @@ static void run(void) {
         fprintf(stderr,"%s: status=%#x, expected=%#x, returned existing=%u\n",
                 scenario,(unsigned)status,(unsigned)current->expected,result == &base_ref);
     CHECK(status == current->expected);
+    check_missing_base_denial(result,&name,status,&rollback);
     check_ads_result(result);
     if (current->existing_entry) {
         unsigned entries=0;
@@ -592,6 +600,7 @@ static void run(void) {
 }
 int main(int argc, char** argv) {
     static const test_case cases[]={
+        #include "missing_base_cases.inc"
         #include "ads_cache_cases.inc"
         {.name="dispatch-stream-live",.dispatch=true,.stream=true,.existing_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="dispatch-stream-live-borrowed",.dispatch=true,.loaded_related=true,.stream=true,.existing_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},

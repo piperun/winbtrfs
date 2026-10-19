@@ -1,0 +1,16 @@
+#define MISSING_BASE_DENIED .stream=true,.missing_base=true,.fault=ACCESS_ERROR,.expected=STATUS_ACCESS_DENIED
+{.name="missing-base-denied",MISSING_BASE_DENIED},
+{.name="missing-base-denied-nonpaged",MISSING_BASE_DENIED,.paging=true},
+{.name="missing-base-denied-casefold",MISSING_BASE_DENIED,.insensitive=true},
+{.name="missing-base-denied-long",MISSING_BASE_DENIED,.requested_name=L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"},
+{.name="missing-base-denied-unicode",MISSING_BASE_DENIED,.requested_name=L"caf\u00e9"},
+{.name="dispatch-missing-base-denied",MISSING_BASE_DENIED,.dispatch=true},
+{.name="dispatch-missing-base-denied-borrowed",MISSING_BASE_DENIED,.dispatch=true,.loaded_related=true},
+{.name="dispatch-missing-base-denied-nonpaged",MISSING_BASE_DENIED,.dispatch=true,.paging=true},
+{.name="dispatch-missing-base-denied-casefold",MISSING_BASE_DENIED,.dispatch=true,.insensitive=true},
+#undef MISSING_BASE_DENIED
+{.name="missing-base-copy-failure",.stream=true,.missing_base=true,.fault=POOL,.allocator="create_stream",.index=1,.expected=STATUS_INSUFFICIENT_RESOURCES},
+{.name="dispatch-missing-base-copy-failure",.stream=true,.missing_base=true,.dispatch=true,.fault=POOL,.allocator="create_stream",.index=1,.expected=STATUS_INSUFFICIENT_RESOURCES},
+{.name="missing-base-invalid-name",.stream=true,.missing_base=true,.fault=NAME_ERROR,.index=2,.expected=STATUS_OBJECT_NAME_INVALID},
+{.name="missing-base-later-access-denied",.stream=true,.missing_base=true,.fault=ACCESS_ERROR,.index=2,.expected=STATUS_ACCESS_DENIED},
+{.name="dispatch-missing-base-security-failure",.stream=true,.missing_base=true,.dispatch=true,.fault=SECURITY,.expected=STATUS_ACCESS_DENIED},

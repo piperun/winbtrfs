@@ -81,6 +81,7 @@ NTSTATUS create_stream(_Requires_lock_held_(_Curr_->tree_lock) _Requires_exclusi
                            &granted_access, &Status)) {
             ExReleaseResourceLite(parfileref->fcb->Header.Resource);
             SeUnlockSubjectContext(&IrpSp->Parameters.Create.SecurityContext->AccessState->SubjectSecurityContext);
+            ExFreePool(fpus2.Buffer);
             return Status;
         }
 
