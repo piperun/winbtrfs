@@ -2248,9 +2248,6 @@ static NTSTATUS file_create2(_In_ PIRP Irp, _Requires_exclusive_lock_held_(_Curr
     ANSI_STRING utf8as;
     LIST_ENTRY* lastle = NULL;
     file_ref* existing_fileref = NULL;
-#ifdef DEBUG_FCB_REFCOUNTS
-    LONG rc;
-#endif
 
     if (parfileref->fcb == Vcb->dummy_fcb)
         return STATUS_ACCESS_DENIED;
@@ -2398,12 +2395,6 @@ static NTSTATUS file_create2(_In_ PIRP Irp, _Requires_exclusive_lock_held_(_Curr
     fcb->atts = IrpSp->Parameters.Create.FileAttributes & ~FILE_ATTRIBUTE_NORMAL;
     fcb->atts_changed = fcb->atts != defda;
 
-#ifdef DEBUG_FCB_REFCOUNTS
-    rc = InterlockedIncrement(&parfileref->fcb->refcount);
-    WARN("fcb %p: refcount now %i\n", parfileref->fcb, rc);
-#else
-    InterlockedIncrement(&parfileref->fcb->refcount);
-#endif
     fcb->subvol = parfileref->fcb->subvol;
     fcb->inode = inode;
     fcb->type = type;
@@ -2708,9 +2699,6 @@ static NTSTATUS create_stream(_Requires_lock_held_(_Curr_->tree_lock) _Requires_
     dir_child* dc;
     dir_child* existing_dc = NULL;
     ACCESS_MASK granted_access;
-#ifdef DEBUG_FCB_REFCOUNTS
-    LONG rc;
-#endif
 
     TRACE("fpus = %.*S\n", (int)(fpus->Length / sizeof(WCHAR)), fpus->Buffer);
     TRACE("stream = %.*S\n", (int)(stream->Length / sizeof(WCHAR)), stream->Buffer);
@@ -2836,12 +2824,6 @@ static NTSTATUS create_stream(_Requires_lock_held_(_Curr_->tree_lock) _Requires_
     fcb->Header.FileSize.QuadPart = 0;
     fcb->Header.ValidDataLength.QuadPart = 0;
 
-#ifdef DEBUG_FCB_REFCOUNTS
-    rc = InterlockedIncrement(&parfileref->fcb->refcount);
-    WARN("fcb %p: refcount now %i\n", parfileref->fcb, rc);
-#else
-    InterlockedIncrement(&parfileref->fcb->refcount);
-#endif
     fcb->subvol = parfileref->fcb->subvol;
     fcb->inode = parfileref->fcb->inode;
     fcb->hash = parfileref->fcb->hash;
