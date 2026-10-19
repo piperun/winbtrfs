@@ -16,16 +16,17 @@ typedef struct {
     unsigned index;
     NTSTATUS expected;
     const WCHAR *existing_name, *requested_name;
-    bool hash_collision, reaped_entry, existing_directory, install_during_open;
+    bool hash_collision, reaped_entry, existing_directory, install_during_open, existing_stream;
+    const WCHAR *stream_name, *cached_stream_name;
 } test_case;
 static const test_case* current;
 static device_extension volume;
 static root subvol;
-static fcb directory_fcb, base_fcb;
-static fcb_nonpaged directory_np, base_np;
-static file_ref directory_ref, base_ref;
-static dir_child collision_dc;
-static WCHAR *cached_name, *cached_name_uc;
+static fcb directory_fcb, base_fcb, stream_fcb;
+static fcb_nonpaged directory_np, base_np, stream_np;
+static file_ref directory_ref, base_ref, stream_ref;
+static dir_child collision_dc, stream_dc;
+static WCHAR *cached_name, *cached_name_uc, *stream_cached_name, *stream_cached_uc;
 static LIST_ENTRY *directory_hash[256], *directory_hash_uc[256], *base_hash[256], *base_hash_uc[256];
 static fcb fcbs[4];
 static fcb_nonpaged nonpaged[4];
@@ -38,7 +39,7 @@ static file_ref* installed_ref;
 static ACCESS_STATE access_state;
 static SECURITY_CONTEXT security_context={&access_state};
 static IRP irp={.RequestorMode=UserMode};
-static struct { void* p; size_t size; bool live; } pools[64];
+static struct { void* p; size_t size; bool live; const char* caller; } pools[64];
 static unsigned pool_count;
 static struct { const char* caller; unsigned calls; } allocators[16];
 static unsigned allocator_count;
@@ -63,7 +64,10 @@ static bool ExIsResourceAcquiredSharedLite(ERESOURCE* lock) { return lock->held 
 static int32_t InterlockedIncrement(int32_t* n) { return ++*n; }
 static int32_t InterlockedDecrement(int32_t* n) { CHECK(*n > 0); return --*n; }
 static int64_t InterlockedIncrement64(int64_t* n) { return ++*n; }
-static void increase_fileref_refcount(file_ref* ref) { InterlockedIncrement(&ref->refcount); }
+static void increase_fileref_refcount(file_ref* ref) {
+    if (ref == &stream_ref) CHECK(base_np.dir_children_lock.held);
+    InterlockedIncrement(&ref->refcount);
+}
 #ifdef DEBUG_FCB_REFCOUNTS
 #define free_fcb(f) _free_fcb(f,__func__)
 #endif
@@ -85,7 +89,7 @@ static void* allocate(size_t size, const char* caller) {
     if (!strcmp(caller,"create_fcb") && hit(FCB_ALLOC)) return NULL;
     CHECK(pool_count < 64);
     void* p=calloc(1,size); CHECK(p);
-    pools[pool_count].p=p; pools[pool_count].size=size; pools[pool_count++].live=true;
+    pools[pool_count].p=p; pools[pool_count].size=size; pools[pool_count].caller=caller; pools[pool_count++].live=true;
     return p;
 }
 #define ExAllocatePoolWithTag(p,n,t) allocate(n,__func__)
@@ -294,6 +298,26 @@ static void setup(void) {
         InsertTailList(&directory_fcb.dir_children_index,&collision_dc.list_entry_index);
         insert_dir_child_into_hash_lists(&directory_fcb,&collision_dc);
     }
+    if (current->existing_stream) {
+        CHECK(have_base && !current->missing_base);
+        setup_fcb(&stream_fcb,&stream_np,base_fcb.type,base_fcb.inode,NULL,NULL);
+        stream_fcb.ads=true; stream_fcb.adsdata.Length=7;
+        stream_ref.fcb=&stream_fcb; stream_ref.refcount=1; stream_ref.parent=&base_ref;
+        InitializeListHead(&stream_ref.children); stream_ref.dc=&stream_dc;
+        increase_fileref_refcount(&base_ref); InsertTailList(&base_ref.children,&stream_ref.list_entry);
+        const WCHAR* name=current->cached_stream_name ? current->cached_stream_name : (const WCHAR*)L"extra";
+        unsigned length=0; while (name[length]) length++;
+        CHECK(length && length < 64);
+        stream_cached_name=malloc(length*sizeof(WCHAR)); stream_cached_uc=malloc(length*sizeof(WCHAR));
+        CHECK(stream_cached_name && stream_cached_uc);
+        for (unsigned i=0;i<length;i++) {
+            stream_cached_name[i]=name[i]; stream_cached_uc[i]=name[i] >= 'a' && name[i] <= 'z' ? name[i]-32 : name[i];
+        }
+        stream_dc.name=(UNICODE_STRING){length*sizeof(WCHAR),length*sizeof(WCHAR),stream_cached_name};
+        stream_dc.name_uc=(UNICODE_STRING){length*sizeof(WCHAR),length*sizeof(WCHAR),stream_cached_uc};
+        stream_dc.index=0; stream_dc.size=7; stream_dc.fileref=&stream_ref;
+        InsertHeadList(&base_fcb.dir_children_index,&stream_dc.list_entry_index);
+    }
     if (current->reaped_entry) {
         // Reap a real, closed fileref while its directory entry remains cached.
         // The fixture keeps an independent FCB hold, as another hardlink could.
@@ -327,7 +351,7 @@ static void drain_dirty(void) {
 static void release_cached_entries(fcb* parent) {
     while (!IsListEmpty(&parent->dir_children_index)) {
         dir_child* dc=CONTAINING_RECORD(RemoveHeadList(&parent->dir_children_index),dir_child,list_entry_index);
-        if (dc == &collision_dc) continue;
+        if (dc == &collision_dc || dc == &stream_dc) continue;
         CHECK(!dc->fileref);
         ExFreePool(dc->utf8.Buffer); ExFreePool(dc->name.Buffer); ExFreePool(dc->name_uc.Buffer); ExFreePool(dc);
     }
@@ -337,10 +361,13 @@ static void run(void) {
     LIST_ENTRY *cache_head=subvol.fcbs.Flink, *cache_tail=subvol.fcbs.Blink;
     LIST_ENTRY* buckets[256]; memcpy(buckets,subvol.fcbs_ptrs,sizeof(buckets));
     const WCHAR* requested=current->requested_name ? current->requested_name : (const WCHAR*)L"alpha";
-    WCHAR chars[64], stream_chars[]={'e','x','t','r','a'};
+    WCHAR chars[64], stream_chars[64];
+    const WCHAR* stream_requested=current->stream_name ? current->stream_name : (const WCHAR*)L"extra";
+    unsigned stream_length=0;
+    while (stream_requested[stream_length]) { CHECK(stream_length < 64); stream_chars[stream_length]=stream_requested[stream_length]; stream_length++; }
     unsigned length=0;
     while (requested[length]) { CHECK(length < 64); chars[length]=requested[length]; length++; }
-    UNICODE_STRING name={length*sizeof(WCHAR),sizeof(chars),chars}, stream={sizeof(stream_chars),sizeof(stream_chars),stream_chars};
+    UNICODE_STRING name={length*sizeof(WCHAR),sizeof(chars),chars}, stream={stream_length*sizeof(WCHAR),sizeof(stream_chars),stream_chars};
     if (current->hash_collision) {
         WCHAR upper[64];
         for (unsigned i=0;i<length;i++) upper[i]=chars[i] >= 'a' && chars[i] <= 'z' ? chars[i]-32 : chars[i];
@@ -378,6 +405,26 @@ static void run(void) {
             CHECK(directory_fcb.dir_children_hash_uc.Flink == &collision_dc.list_entry_hash_uc && collision_dc.list_entry_hash_uc.Flink == &directory_fcb.dir_children_hash_uc);
         }
     }
+    if (current->existing_stream) {
+        unsigned entries=0;
+        for (LIST_ENTRY* le=base_fcb.dir_children_index.Flink;le != &base_fcb.dir_children_index;le=le->Flink) entries++;
+        CHECK(entries == (NT_SUCCESS(status) ? 2u : 1u));
+        CHECK(stream_dc.fileref == &stream_ref && stream_dc.size == 7 && stream_fcb.adsdata.Length == 7);
+        const WCHAR* original=current->cached_stream_name ? current->cached_stream_name : (const WCHAR*)L"extra";
+        CHECK(!memcmp(stream_dc.name.Buffer,original,stream_dc.name.Length));
+        if (status == STATUS_OBJECT_NAME_COLLISION) {
+            unsigned uppercase_leaks=0, dirty_streams=0;
+            for (LIST_ENTRY* le=volume.dirty_fcbs.Flink;le != &volume.dirty_fcbs;le=le->Flink) {
+                fcb* child=CONTAINING_RECORD(le,fcb,list_entry_dirty); if (child->ads) dirty_streams++;
+            }
+            for (unsigned i=0;i<pool_count;i++) if (pools[i].live && !strcmp(pools[i].caller,"uppercase")) uppercase_leaks++;
+            if (base_np.dir_children_lock.held || uppercase_leaks || dirty_streams)
+                fprintf(stderr,"%s: collision cleanup: directory lock=%u, uppercase buffers=%u, dirty discarded streams=%u\n",
+                        scenario,base_np.dir_children_lock.held,uppercase_leaks,dirty_streams);
+            CHECK(!base_np.dir_children_lock.held && !uppercase_leaks && !dirty_streams);
+            CHECK(!notifications && !base_fcb.inode_item_changed && !base_fcb.dirty);
+        }
+    }
     if (!current->stream) CHECK(directory_fcb.inode_item.size == (NT_SUCCESS(status) ? name.Length : 0));
     CHECK(faults == (current->fault == NONE ? 0u : 1u));
     CHECK(!access_state.SubjectSecurityContext && !volume.fcb_lock.held);
@@ -392,6 +439,10 @@ static void run(void) {
             CHECK(result->dc->name.Length == name.Length && !memcmp(result->dc->name.Buffer,requested,name.Length));
         }
         free_fileref(result); // release the caller's returned fileref
+    } else if (status == STATUS_OBJECT_NAME_COLLISION && current->stream) {
+        CHECK(result == &stream_ref && result->refcount == 2 && result->fcb == &stream_fcb);
+        CHECK(parent == &base_ref && base_ref.refcount == 2);
+        CHECK(IsListEmpty(&rollback)); free_fileref(result);
     } else if (status == STATUS_OBJECT_NAME_COLLISION) {
         CHECK(result && result == collision_dc.fileref && result->fcb == &base_fcb);
         CHECK(result->parent == &directory_ref && result->dc == &collision_dc);
@@ -409,18 +460,25 @@ static void run(void) {
             if (attempted != &directory_fcb) CHECK(attempted->deleted);
         }
     }
+    if (current->stream && !NT_SUCCESS(status)) {
+        // A discarded ADS shares the existing stream's inode and xattr name.
+        // A dirty deleted ADS would make flush_fcb delete that xattr.
+        for (LIST_ENTRY* le=volume.dirty_fcbs.Flink;le != &volume.dirty_fcbs;le=le->Flink)
+            CHECK(!CONTAINING_RECORD(le,fcb,list_entry_dirty)->ads);
+    }
     // Model completed persistence, then run the actual cache reapers.
     drain_dirty(); reap_filerefs(&volume); reap_fcbs(&volume);
     if (directory_fcb.refcount != 1 || (have_base && base_fcb.refcount != 1))
         fprintf(stderr,"%s: parent FCB refs: directory=%d, base=%d (expected 1 for each fixture parent)\n",
                 scenario,directory_fcb.refcount,have_base ? base_fcb.refcount : 1);
     CHECK(directory_fcb.refcount == 1 && (!have_base || base_fcb.refcount == 1));
-    CHECK(directory_ref.refcount == (have_base && !current->reaped_entry ? 2 : 1) && (!have_base || base_ref.refcount == 1));
+    CHECK(directory_ref.refcount == (have_base && !current->reaped_entry ? 2 : 1) && (!have_base || base_ref.refcount == (current->existing_stream ? 2 : 1)));
     if (current->reaped_entry) {
         CHECK(!collision_dc.fileref && !base_fcb.fileref);
         bool opened=status == STATUS_OBJECT_NAME_COLLISION || current->fault == REOPEN_ERROR || current->fault == FILEREF_ALLOC;
         CHECK(reopen_calls == (opened ? 1u : 0u));
     }
+    if (current->existing_stream) CHECK(stream_ref.refcount == 1 && stream_fcb.refcount == 1);
     CHECK(subvol.fcbs.Flink == cache_head && subvol.fcbs.Blink == cache_tail);
     CHECK(!memcmp(buckets,subvol.fcbs_ptrs,sizeof(buckets)));
     CHECK(volume.fcb_lookaside.allocations == volume.fcb_lookaside.returns);
@@ -436,7 +494,7 @@ static void run(void) {
     }
     for (unsigned i=0;i<pool_count;i++) { CHECK(!pools[i].live); free(pools[i].p); }
     CHECK(!volume.dirty_fcbs_lock.held && !volume.dirty_filerefs_lock.held);
-    free(cached_name); free(cached_name_uc);
+    free(cached_name); free(cached_name_uc); free(stream_cached_name); free(stream_cached_uc);
     printf("PASS %s\n",scenario);
 }
 int main(int argc, char** argv) {
@@ -491,6 +549,18 @@ int main(int argc, char** argv) {
         {.name="cached-insensitive-distinct",.existing_entry=true,.reaped_entry=true,.insensitive=true,.requested_name=L"bravo"},
         {.name="cached-hash-collision",.existing_entry=true,.reaped_entry=true,.insensitive=true,.existing_name=L"572BSHK",.requested_name=L"AFNB7ZH",.hash_collision=true},
         {.name="cached-hash-collision-length",.existing_entry=true,.reaped_entry=true,.insensitive=true,.existing_name=L"6KKS16",.requested_name=L"IM921VL31U",.hash_collision=true},
+        {.name="stream-collision-sensitive",.stream=true,.existing_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="stream-collision-insensitive",.stream=true,.existing_stream=true,.insensitive=true,.stream_name=L"ExTrA",.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="stream-collision-cached-upper",.stream=true,.existing_stream=true,.insensitive=true,.cached_stream_name=L"EXTRA",.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="stream-collision-nonpaged",.stream=true,.existing_stream=true,.paging=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="stream-collision-directory-base",.stream=true,.existing_stream=true,.existing_directory=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="stream-distinct-sensitive",.stream=true,.existing_stream=true,.stream_name=L"EXTRA"},
+        {.name="stream-distinct-insensitive",.stream=true,.existing_stream=true,.insensitive=true,.stream_name=L"bravo"},
+        {.name="stream-distinct-longer",.stream=true,.existing_stream=true,.insensitive=true,.stream_name=L"extralonger"},
+        {.name="stream-distinct-shorter",.stream=true,.existing_stream=true,.insensitive=true,.stream_name=L"ext"},
+        {.name="stream-collision-uppercase-failure",.stream=true,.existing_stream=true,.fault=UPPERCASE_ERROR,.index=1,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="stream-collision-name-failure",.stream=true,.existing_stream=true,.fault=POOL,.allocator="create_stream",.index=4,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="stream-collision-fileref-failure",.stream=true,.existing_stream=true,.fault=FILEREF_ALLOC,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="stream-success",.stream=true}, {.name="stream-casefold",.stream=true,.insensitive=true},
         {.name="stream-nonpaged",.stream=true,.paging=true},
         {.name="stream-missing-base",.stream=true,.missing_base=true},

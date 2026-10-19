@@ -57,8 +57,8 @@ Reproduce the cached-entry collision gap after the uppercase fix:
 python3 tests/create/check_create.py . --revision e0435e1c --build-dir build/create-tests-cached-before
 ```
 
-This baseline passes 53/80 cases: 12 cached-entry collision failures and
-15 failures because rejected attempts remain marked live. The 12 collision
+In the original 80-case matrix, this baseline passes 53/80 cases:
+12 cached-entry collision failures and 15 failures because rejected attempts remain marked live. The 12 collision
 cases fail after production `reap_filerefs` clears the existing entry's fileref. Creation must still
 reject that cached name and return a referenced fileref for the existing
 inode. The fixture keeps an independent FCB hold, as another hardlink can.
@@ -75,6 +75,30 @@ allow distinct names and both real hash collisions after reaping. Failed
 reopens must return no fileref and must never attempt entry insertion.
 Rejected ordinary creations must also leave their dirty attempted inode
 marked deleted, so the flush worker cannot persist an unlinked live inode.
+
+Reproduce the stream collision cleanup errors:
+
+```sh
+python3 tests/create/check_create.py . --revision bdc861b6 --build-dir build/create-tests-stream-before
+```
+
+This baseline passes 77/92 cases. Five collisions return with the base
+file's directory lock held, one temporary uppercase buffer still allocated
+and a discarded ADS FCB on the dirty queue. Ten injected failures also
+leave an unpublished ADS FCB dirty. The production flush path interprets
+a dirty deleted ADS FCB as deletion of its named xattr, so a failed attempt
+must never enter that queue. The fixed helper queues the FCB only after
+insertion succeeds and frees all three temporary entry-name buffers on
+collision, releasing the directory lock after referencing the existing
+fileref.
+
+The fixture caches a stream with a live fileref and checks the existing
+entry, spelling, length, references and FCB cache buckets after duplicate
+attempt cleanup. Cases cover sensitive and insensitive names, nonpaged
+allocation, a directory base file, different names and lengths, and failure
+before the collision recheck. The tests also require successful creates
+to remain dirty and reclaim all discarded allocations and resources.
+These assertions examine dirty-list eligibility, not actual disk writes.
 
 The harness extracts the actual `file_create2`, `create_stream`, FCB and
 fileref constructors, dirty-queue insertion, reference releases, cache
@@ -104,6 +128,10 @@ or Windows handle-close code. Sanitizer results cover host memory, not
 Windows pool behavior or concurrency. Windows runtime testing is still
 required.
 
-The stream duplicate-entry collision cleanup path has a separate
-pre-existing defect and is outside this matrix. The missing-base access-denied path
-also retains a name buffer; that separate cleanup defect is unchanged.
+These tests drive the creation helpers directly. Separate existing defects
+remain in end-to-end stream collision handling: a cached stream without
+a live fileref is dereferenced by the collision helper, and the outer
+`file_create` stream branch does not forward a collision fileref to its
+`existing_fileref` output. These paths are outside this matrix and need
+separate regression coverage. The missing-base access-denied path also
+retains a name buffer; that separate cleanup defect is unchanged.

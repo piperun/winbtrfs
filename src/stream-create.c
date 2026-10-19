@@ -242,8 +242,6 @@ NTSTATUS create_stream(_Requires_lock_held_(_Curr_->tree_lock) _Requires_exclusi
     parfileref->fcb->subvol->fcbs_version++;
     release_fcb_lock(Vcb);
 
-    mark_fcb_dirty(fcb);
-
     fileref = create_fileref(Vcb);
     if (!fileref) {
         ERR("out of memory\n");
@@ -323,14 +321,19 @@ NTSTATUS create_stream(_Requires_lock_held_(_Curr_->tree_lock) _Requires_exclusi
     }
 
     if (existing_dc) {
+        file_ref* existing_fileref = existing_dc->fileref;
+
+        increase_fileref_refcount(existing_fileref);
+        ExReleaseResourceLite(&parfileref->fcb->nonpaged->dir_children_lock);
+
         ExFreePool(dc->utf8.Buffer);
         ExFreePool(dc->name.Buffer);
+        ExFreePool(dc->name_uc.Buffer);
         ExFreePool(dc);
         reap_fileref(Vcb, fileref);
         free_fileref(parfileref);
 
-        increase_fileref_refcount(existing_dc->fileref);
-        *pfileref = existing_dc->fileref;
+        *pfileref = existing_fileref;
 
         return STATUS_OBJECT_NAME_COLLISION;
     }
@@ -346,6 +349,7 @@ NTSTATUS create_stream(_Requires_lock_held_(_Curr_->tree_lock) _Requires_exclusi
 
     ExReleaseResourceLite(&parfileref->fcb->nonpaged->dir_children_lock);
 
+    mark_fcb_dirty(fcb);
     mark_fileref_dirty(fileref);
 
     ExAcquireResourceExclusiveLite(parfileref->fcb->Header.Resource, true);
