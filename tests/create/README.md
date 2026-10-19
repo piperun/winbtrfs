@@ -106,7 +106,7 @@ Reproduce cached-stream reopening failures:
 python3 tests/create/check_create.py . --revision 09bb62c0 --build-dir build/create-tests-reopen-before
 ```
 
-This baseline passes 94/112 cases. Fourteen cached-stream create attempts
+In the original 112-case matrix, this baseline passes 94/112 cases. Fourteen cached-stream create attempts
 terminate with SIGSEGV after the production reaper clears their fileref.
 Three direct stream opens leak the xattr data buffer on metadata errors;
 a fourth leaks an FCB reference when another fileref wins publication.
@@ -128,6 +128,34 @@ buffer; losing publication must release the acquired FCB reference. The
 callback models that interleaving and does not run concurrent threads.
 Returned references, parent holds, cache buckets, initialized resources
 and all tracked allocations must balance after normal reaping.
+
+Reproduce collision forwarding and parent-ownership failures in the caller:
+
+```sh
+python3 tests/create/check_create.py . --revision f5c4cc7d --build-dir build/create-tests-dispatch-before
+```
+
+This baseline passes 116/135 cases. All 112 earlier helper cases pass.
+Eleven dispatch collisions return no existing fileref, including live and
+reaped streams, case folding, paging allocation, directory bases and
+`:$DATA` suffixes. Eight success/error paths leave parent references
+unbalanced: the caller overwrites its original lookup parent, then frees
+the stream parent under the original parent's ownership rules.
+
+The harness now runs production `file_create` as well as the creation
+helpers. It verifies that collisions return a caller-owned existing
+fileref without creating a CCB, assigning a FileObject or setting share
+access. Both acquired lookup parents and borrowed related parents are
+covered, including relative `:stream` paths. Successful new streams on
+existing and newly created bases must also balance references, as must
+errors before and after base lookup. Ordinary file creation and collision
+are controls. Success cases build real CCBs, then modeled handle closure
+releases their storage and fileref holds before production cache reaping.
+
+The original lookup parent stays separate from `create_stream`'s output
+parent. The helper returns an extra parent hold on success; the caller
+releases that hold once, transfers collision filerefs unchanged, and
+cleans up the original lookup parent according to its own ownership.
 
 The harness extracts the actual `file_create2`, `create_stream`, FCB and
 fileref constructors, dirty-queue insertion, reference releases, cache
@@ -153,15 +181,13 @@ ordinary FCB opening, xattr reads and tree lookups are host models.
 Stream FCB reconstruction and fileref publication use production code.
 Conversion fixtures use ASCII names. Dirty completion does
 not run the flush worker, persistence, or actual transaction rollback.
-The test calls the creation helpers directly and models their callers'
-returned-reference releases; it does not drive the outer create dispatch
-or Windows handle-close code. Sanitizer results cover host memory, not
+The test runs file creation dispatch and helpers, modeling returned-reference
+releases and handle closure. It does not run `open_file`, `open_file2` or
+Windows IRP/handle-close dispatch. ECP discovery is disabled, LXSS detection
+is modeled false, and share-access operations are counted host services. Sanitizer results cover host memory, not
 Windows pool behavior or concurrency. Windows runtime testing is still
 required.
 
-These tests drive the creation helpers directly. The outer `file_create`
-stream branch still does not forward a collision fileref to its
-`existing_fileref` output; outer dispatch needs separate regression
-coverage. Stream FCB cache matching still uses the ADS hash without the
-full xattr name. The missing-base access-denied path also retains a copied
-name buffer. These pre-existing defects are unchanged.
+Stream FCB cache matching still uses the ADS hash without the full xattr
+name. The missing-base access-denied path also retains a copied filename
+buffer. Those pre-existing defects are unchanged.

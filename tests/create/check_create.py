@@ -42,6 +42,12 @@ marker = "static NTSTATUS file_create2(" if "static NTSTATUS file_create2(" in o
 streams = read("src/stream-create.c", optional=True) or create
 marker = "static NTSTATUS create_stream(" if "static NTSTATUS create_stream(" in streams else "NTSTATUS create_stream("
 (out / "create_stream.inc").write_text(license_header + function(streams, marker))
+dispatch = read("src/create-dispatch.c", optional=True) or create
+marker = "static NTSTATUS file_create(" if "static NTSTATUS file_create(" in dispatch else "NTSTATUS file_create("
+(out / "file_create.inc").write_text(license_header + function(dispatch, marker))
+start = dispatch.index("// Windows 10\n#define ATOMIC_CREATE")
+end = dispatch.index("\n", dispatch.index("static const GUID GUID_ECP_CREATE_REDIRECTION", start))
+(out / "create_ecp.inc").write_text(license_header + dispatch[start:end] + "\n")
 opening = read("src/fileref-open.c", optional=True) or create
 (out / "open_fcb_stream.inc").write_text(license_header + function(opening, "static NTSTATUS open_fcb_stream("))
 for name, marker in [("create_fcb", "fcb* create_fcb("),

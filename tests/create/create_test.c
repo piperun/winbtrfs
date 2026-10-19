@@ -19,6 +19,7 @@ typedef struct {
     bool hash_collision, reaped_entry, existing_directory, install_during_open, existing_stream;
     const WCHAR *stream_name, *cached_stream_name;
     bool reaped_stream, cold_stream, reopen_only, install_stream, bad_stream_key, short_stream_item;
+    bool dispatch, loaded_related, relative_stream, data_suffix;
 } test_case;
 static const test_case* current;
 static device_extension volume;
@@ -43,7 +44,7 @@ static bool have_base, preparing;
 static unsigned reopen_calls;
 static file_ref* installed_ref;
 static ACCESS_STATE access_state;
-static SECURITY_CONTEXT security_context={&access_state};
+static SECURITY_CONTEXT security_context={.AccessState=&access_state,.DesiredAccess=FILE_WRITE_DATA};
 static IRP irp={.RequestorMode=UserMode};
 static struct { void* p; size_t size; bool live; const char* caller; } pools[64];
 static unsigned pool_count;
@@ -206,9 +207,16 @@ static bool SeAccessCheck(void* sd, int* context, bool locked, unsigned desired,
 }
 static NTSTATUS open_fileref(device_extension* vcb, file_ref** out, PUNICODE_STRING name, file_ref* related, bool parent,
                              void* a, void* b, POOL_TYPE pool, bool sensitive, PIRP request) {
-    CHECK(vcb == &volume && name && related == &directory_ref && !parent && !a && !b && pool == PagedPool && request == &irp);
+    CHECK(vcb == &volume && name && !a && !b && request == &irp);
     CHECK(sensitive == !current->insensitive);
     if (hit(OPEN_ERROR)) return STATUS_IO_DEVICE_ERROR;
+    if (parent) {
+        CHECK(current->dispatch && !current->loaded_related);
+        CHECK(pool == (current->paging ? NonPagedPool : PagedPool));
+        file_ref* found=current->relative_stream ? &base_ref : &directory_ref;
+        increase_fileref_refcount(found); *out=found; return STATUS_SUCCESS;
+    }
+    CHECK(pool == PagedPool && (related == &directory_ref || (current->dispatch && current->relative_stream && related == &base_ref)));
     if (current->missing_base) return STATUS_OBJECT_NAME_NOT_FOUND;
     CHECK(have_base); increase_fileref_refcount(&base_ref); *out=&base_ref; return STATUS_SUCCESS;
 }
@@ -277,6 +285,7 @@ static bool get_xattr(device_extension* vcb, root* r, uint64_t inode, char* name
 #include "open_fileref_child.inc"
 #include "file_create2.inc"
 #include "create_stream.inc"
+#include "dispatch_test.inc"
 
 static void setup_fcb(fcb* node, fcb_nonpaged* np, uint8_t type, uint64_t inode, LIST_ENTRY** hash, LIST_ENTRY** uc) {
     node->Vcb=&volume; node->subvol=&subvol; node->type=type; node->inode=inode; node->refcount=1;
@@ -394,6 +403,7 @@ static void setup(void) {
     irp.stack.Parameters.Create.FileAttributes=FILE_ATTRIBUTE_NORMAL;
     if (current->paging) irp.stack.Flags=SL_OPEN_PAGING_FILE;
     if (current->preallocate) irp.Overlay.AllocationSize.QuadPart=8192;
+    if (current->dispatch && !current->insensitive) irp.stack.Flags |= SL_CASE_SENSITIVE;
 }
 static void drain_dirty(void) {
     while (!IsListEmpty(&volume.dirty_fcbs)) {
@@ -435,7 +445,8 @@ static void run(void) {
     FILE_FULL_EA_INFORMATION ea={0};
     file_ref *result=NULL, *parent=&directory_ref;
     volume.fcb_lock.held=1; // caller holds this across creation and child lookup
-    NTSTATUS status=current->reopen_only ? open_fileref_child(&volume,&base_ref,&stream,!current->insensitive,true,true,
+    NTSTATUS status=current->dispatch ? dispatch_create(&name,&stream,&result,&parent,&rollback)
+        : current->reopen_only ? open_fileref_child(&volume,&base_ref,&stream,!current->insensitive,true,true,
                                                                            current->paging ? NonPagedPool : PagedPool,&result,&irp)
         : current->stream ? create_stream(&volume,&result,&parent,&name,&stream,&irp,
                           current->directory ? FILE_DIRECTORY_FILE : 0,current->paging ? NonPagedPool : PagedPool,!current->insensitive,&rollback)
@@ -506,7 +517,7 @@ static void run(void) {
         CHECK(result && result->fcb->dirty && result->dirty && result->refcount == 2);
         CHECK(result->parent == (current->stream ? parent : &directory_ref));
         CHECK(!result->fcb->deleted && result->dc && result->dc->fileref == result);
-        if (current->stream) { CHECK(result->fcb->ads); free_fileref(parent); }
+        if (current->stream) { CHECK(result->fcb->ads); if (!current->dispatch) free_fileref(parent); }
         else {
             CHECK(result->fcb->type == (current->directory ? BTRFS_FT_DIR : BTRFS_FT_REG_FILE));
             CHECK(result->dc->name.Length == name.Length && !memcmp(result->dc->name.Buffer,requested,name.Length));
@@ -574,6 +585,29 @@ static void run(void) {
 }
 int main(int argc, char** argv) {
     static const test_case cases[]={
+        {.name="dispatch-stream-live",.dispatch=true,.stream=true,.existing_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="dispatch-stream-live-borrowed",.dispatch=true,.loaded_related=true,.stream=true,.existing_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="dispatch-stream-relative",.dispatch=true,.loaded_related=true,.relative_stream=true,.stream=true,.existing_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="dispatch-stream-relative-acquired",.dispatch=true,.relative_stream=true,.stream=true,.existing_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="dispatch-stream-new-relative-acquired",.dispatch=true,.relative_stream=true,.stream=true},
+        {.name="dispatch-stream-insensitive",.dispatch=true,.stream=true,.existing_stream=true,.insensitive=true,.stream_name=L"ExTrA",.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="dispatch-stream-data-suffix",.dispatch=true,.stream=true,.existing_stream=true,.data_suffix=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="dispatch-stream-paging",.dispatch=true,.stream=true,.existing_stream=true,.paging=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="dispatch-stream-warm",.dispatch=true,.stream=true,.existing_stream=true,.reaped_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="dispatch-stream-cold",.dispatch=true,.stream=true,.existing_stream=true,.reaped_stream=true,.cold_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="dispatch-stream-cold-relative",.dispatch=true,.loaded_related=true,.relative_stream=true,.stream=true,.existing_stream=true,.reaped_stream=true,.cold_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="dispatch-stream-read-failure",.dispatch=true,.stream=true,.existing_stream=true,.reaped_stream=true,.fault=XATTR_ERROR,.expected=STATUS_INTERNAL_ERROR},
+        {.name="dispatch-stream-uppercase-failure",.dispatch=true,.stream=true,.existing_stream=true,.fault=UPPERCASE_ERROR,.index=1,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="dispatch-stream-base-open-failure",.dispatch=true,.stream=true,.fault=OPEN_ERROR,.index=2,.expected=STATUS_IO_DEVICE_ERROR},
+        {.name="dispatch-stream-parent-open-failure",.dispatch=true,.stream=true,.fault=OPEN_ERROR,.expected=STATUS_IO_DEVICE_ERROR},
+        {.name="dispatch-stream-new",.dispatch=true,.stream=true},
+        {.name="dispatch-stream-new-borrowed",.dispatch=true,.loaded_related=true,.stream=true},
+        {.name="dispatch-stream-new-relative",.dispatch=true,.loaded_related=true,.relative_stream=true,.stream=true},
+        {.name="dispatch-stream-directory-base",.dispatch=true,.stream=true,.existing_stream=true,.existing_directory=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="dispatch-stream-missing-base",.dispatch=true,.stream=true,.missing_base=true},
+        {.name="dispatch-stream-missing-base-borrowed",.dispatch=true,.loaded_related=true,.stream=true,.missing_base=true},
+        {.name="dispatch-file-collision",.dispatch=true,.existing_entry=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="dispatch-file-new",.dispatch=true},
         {.name="file-success"}, {.name="directory-success",.directory=true},
         {.name="file-casefold",.insensitive=true}, {.name="file-paging",.paging=true},
         {.name="file-preallocate",.preallocate=true},

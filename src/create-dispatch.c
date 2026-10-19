@@ -199,11 +199,19 @@ NTSTATUS file_create(PIRP Irp, _Requires_lock_held_(_Curr_->tree_lock) _Requires
     }
 
     if (stream.Length > 0) {
-        Status = create_stream(Vcb, &fileref, &parfileref, &fpus, &stream, Irp, options, pool_type, IrpSp->Flags & SL_CASE_SENSITIVE, rollback);
-        if (!NT_SUCCESS(Status)) {
+        file_ref* stream_parent = parfileref;
+
+        Status = create_stream(Vcb, &fileref, &stream_parent, &fpus, &stream, Irp, options, pool_type, IrpSp->Flags & SL_CASE_SENSITIVE, rollback);
+        if (Status == STATUS_OBJECT_NAME_COLLISION) {
+            *existing_fileref = fileref;
+            goto end;
+        } else if (!NT_SUCCESS(Status)) {
             ERR("create_stream returned %08lx\n", Status);
             goto end;
         }
+
+        // The new stream owns its parent hold; release the extra returned hold.
+        free_fileref(stream_parent);
 
         IoSetShareAccess(IrpSp->Parameters.Create.SecurityContext->DesiredAccess, IrpSp->Parameters.Create.ShareAccess,
                          FileObject, &fileref->fcb->share_access);

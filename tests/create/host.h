@@ -111,7 +111,7 @@ typedef struct _dir_child {
     file_ref* fileref;
     LIST_ENTRY list_entry_index, list_entry_hash, list_entry_hash_uc;
 } dir_child;
-typedef struct _fcb_nonpaged { ERESOURCE resource, paging_resource, dir_children_lock; int HeaderMutex; } fcb_nonpaged;
+typedef struct _fcb_nonpaged { ERESOURCE resource, paging_resource, dir_children_lock; int HeaderMutex, segment_object; } fcb_nonpaged;
 typedef struct { void* csum; LIST_ENTRY list_entry; } extent;
 typedef struct { UNICODE_STRING name; ANSI_STRING utf8; LIST_ENTRY list_entry; } hardlink;
 typedef struct { LIST_ENTRY list_entry; } xattr;
@@ -124,7 +124,8 @@ struct _fcb {
     int32_t refcount;
     struct btrfs_inode_item inode_item;
     bool created, sd_dirty, inode_item_changed, prop_compression_changed, atts_changed;
-    bool ads, dirty;
+    bool ads, dirty, case_sensitive;
+    int share_access;
     unsigned prop_compression, adshash, adsmaxlen;
     bool deleted;
     void* sd;
@@ -149,20 +150,27 @@ struct _file_ref {
     fcb* fcb;
     file_ref* parent;
     dir_child* dc;
-    bool created, dirty;
+    bool created, dirty, deleted;
+    int32_t open_count;
     int32_t refcount;
     LIST_ENTRY children, list_entry;
     LIST_ENTRY list_entry_dirty;
     LIST_ENTRY list_entry_reap;
     ANSI_STRING oldutf8;
 };
-typedef struct { file_ref* fileref; ULONG access; bool user_set_change_time, user_set_write_time; } ccb;
-typedef struct { fcb* FsContext; ccb* FsContext2; } FILE_OBJECT, *PFILE_OBJECT;
+typedef struct {
+    file_ref* fileref; ULONG access; bool user_set_change_time, user_set_write_time;
+    unsigned NodeType, NodeSize, disposition, options, query_dir_offset;
+    UNICODE_STRING query_string;
+    bool has_wildcard, specific_file, case_sensitive, reserving, lxss;
+} ccb;
+typedef struct { fcb* FsContext; ccb* FsContext2; void* SectionObjectPointer; } FILE_OBJECT, *PFILE_OBJECT;
 struct _device_extension {
     ERESOURCE fileref_lock, fcb_lock;
     ERESOURCE dirty_fcbs_lock, dirty_filerefs_lock;
     bool readonly;
     bool need_write;
+    int32_t open_files;
     fcb* volume_fcb;
     fcb* dummy_fcb;
     struct { bool nodatacow; } options;
@@ -176,11 +184,21 @@ typedef struct { struct { struct btrfs_key key; uint32_t size; } *item; } traver
 typedef struct { unsigned type; struct { fcb* parent; dir_child* dc; } dir_child; LIST_ENTRY list_entry; } rollback_item;
 #define ROLLBACK_ADD_DIR_CHILD 1
 typedef struct { int SubjectSecurityContext; } ACCESS_STATE;
-typedef struct { ACCESS_STATE* AccessState; } SECURITY_CONTEXT;
-typedef struct { unsigned Flags; struct { struct { unsigned FileAttributes; SECURITY_CONTEXT* SecurityContext; } Create; } Parameters; } IO_STACK_LOCATION, *PIO_STACK_LOCATION;
-typedef struct { int RequestorMode; IO_STACK_LOCATION stack; struct { LARGE_INTEGER AllocationSize; } Overlay; } IRP, *PIRP;
+typedef struct { ACCESS_STATE* AccessState; unsigned DesiredAccess; } SECURITY_CONTEXT;
+typedef struct { unsigned Flags; struct { struct { unsigned FileAttributes, EaLength, ShareAccess; SECURITY_CONTEXT* SecurityContext; } Create; } Parameters; } IO_STACK_LOCATION, *PIO_STACK_LOCATION;
+typedef struct { int RequestorMode; IO_STACK_LOCATION stack; struct { LARGE_INTEGER AllocationSize; } Overlay; struct { void* SystemBuffer; } AssociatedIrp; } IRP, *PIRP;
 typedef struct { unsigned unused; } FILE_FULL_EA_INFORMATION;
 #define IoGetCurrentIrpStackLocation(irp) (&(irp)->stack)
+typedef int64_t LONGLONG, USN;
+typedef struct { ULONG Data1; USHORT Data2, Data3; uint8_t Data4[8]; } GUID;
+typedef struct { ULONG ReparseTag; } REPARSE_DATA_BUFFER, *PREPARSE_DATA_BUFFER;
+typedef struct { int unused; } ECP_LIST;
+#define STATUS_CANNOT_DELETE ((int32_t)0xc0000121)
+#define FILE_DELETE_ON_CLOSE 0x1000
+#define BTRFS_NODE_TYPE_CCB 0x502
+#define FILE_CS_FLAG_CASE_SENSITIVE_DIR 1
+#define IO_REPARSE_TAG_SYMLINK 0xa000000c
+#define SL_CASE_SENSITIVE 0x20
 #define S_IFDIR __S_IFDIR
 #define S_IFREG __S_IFREG
 #define FILE_ATTRIBUTE_REPARSE_POINT 0x400
