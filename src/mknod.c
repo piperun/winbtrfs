@@ -66,9 +66,9 @@ NTSTATUS mknod(device_extension* Vcb, PFILE_OBJECT FileObject, void* data, ULONG
     ccb* parccb;
     file_ref *parfileref, *fileref;
     UNICODE_STRING name;
-    root* subvol;
-    uint64_t inode;
-    dir_child* dc;
+    root* existing_subvol = NULL;
+    uint64_t existing_inode = 0;
+    dir_child* dc = NULL;
     LARGE_INTEGER time;
     struct btrfs_timespec now;
     ANSI_STRING utf8;
@@ -166,7 +166,7 @@ NTSTATUS mknod(device_extension* Vcb, PFILE_OBJECT FileObject, void* data, ULONG
     name.Length = name.MaximumLength = bmn->namelen;
     name.Buffer = bmn->name;
 
-    Status = find_file_in_dir(&name, parfcb, &subvol, &inode, &dc, true);
+    Status = find_file_in_dir(&name, parfcb, &existing_subvol, &existing_inode, &dc, true);
     if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND) {
         ERR("find_file_in_dir returned %08lx\n", Status);
         goto end;
@@ -306,7 +306,7 @@ NTSTATUS mknod(device_extension* Vcb, PFILE_OBJECT FileObject, void* data, ULONG
         } else {
             uint32_t hash = calc_crc32c(0xffffffff, (uint8_t*)&bmn->inode, sizeof(uint64_t));
 
-            Status = check_inode_used(Vcb, subvol, bmn->inode, hash, Irp);
+            Status = check_inode_used(Vcb, parfcb->subvol, bmn->inode, hash, Irp);
             if (NT_SUCCESS(Status)) { // STATUS_SUCCESS means inode found
                 release_fcb_lock(Vcb);
                 ExReleaseResourceLite(&Vcb->fileref_lock);
@@ -327,7 +327,6 @@ NTSTATUS mknod(device_extension* Vcb, PFILE_OBJECT FileObject, void* data, ULONG
         }
     }
 
-    fcb->inode = inode;
     fcb->type = bmn->type;
 
     if (fcb->type == BTRFS_FT_DIR) {
