@@ -89,6 +89,7 @@ set(SRC_FILES src/balance.c
     src/crc32c.c
     src/create.c
     src/file-create.c
+    src/fileref-open.c
     src/stream-create.c
     src/devctrl.c
     src/dirctrl.c
