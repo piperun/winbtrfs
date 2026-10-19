@@ -10,11 +10,13 @@ enum fault_kind { NONE, POOL, FCB_ALLOC, NP_ALLOC, FILEREF_ALLOC, SECURITY, EA_E
                   OPEN_ERROR, NAME_ERROR };
 typedef struct {
     const char* name;
-    bool stream, missing_base, directory, paging, insensitive, preallocate, collision, full, readonly;
+    bool stream, missing_base, directory, paging, insensitive, preallocate, existing_entry, full, readonly;
     enum fault_kind fault;
     const char* allocator;
     unsigned index;
     NTSTATUS expected;
+    const WCHAR *existing_name, *requested_name;
+    bool hash_collision;
 } test_case;
 static const test_case* current;
 static device_extension volume;
@@ -23,6 +25,7 @@ static fcb directory_fcb, base_fcb;
 static fcb_nonpaged directory_np, base_np;
 static file_ref directory_ref, base_ref;
 static dir_child collision_dc;
+static WCHAR *cached_name, *cached_name_uc;
 static LIST_ENTRY *directory_hash[256], *directory_hash_uc[256], *base_hash[256], *base_hash_uc[256];
 static fcb fcbs[4];
 static fcb_nonpaged nonpaged[4];
@@ -233,19 +236,28 @@ static void setup(void) {
     setup_fcb(&directory_fcb,&directory_np,BTRFS_FT_DIR,256,directory_hash,directory_hash_uc);
     directory_ref.fcb=&directory_fcb; directory_ref.refcount=1; InitializeListHead(&directory_ref.children);
     volume.root_fileref=&directory_ref;
-    have_base=(current->stream && !current->missing_base) || current->collision;
+    have_base=(current->stream && !current->missing_base) || current->existing_entry;
     if (have_base) {
         setup_fcb(&base_fcb,&base_np,BTRFS_FT_REG_FILE,500,base_hash,base_hash_uc);
         base_ref.fcb=&base_fcb; base_ref.refcount=1; base_ref.parent=&directory_ref; InitializeListHead(&base_ref.children);
         InsertTailList(&directory_ref.children,&base_ref.list_entry); increase_fileref_refcount(&directory_ref);
         if (current->readonly) base_fcb.atts=FILE_ATTRIBUTE_READONLY;
     }
-    if (current->collision) {
-        static WCHAR lower[]={'a','l','p','h','a'}, upper[]={'A','L','P','H','A'};
-        collision_dc.name=(UNICODE_STRING){10,10,lower}; collision_dc.name_uc=(UNICODE_STRING){10,10,upper};
+    if (current->existing_entry) {
+        const WCHAR* existing=current->existing_name ? current->existing_name : (const WCHAR*)L"alpha";
+        unsigned length=0; while (existing[length]) length++;
+        CHECK(length && length < 64);
+        cached_name=malloc(length*sizeof(WCHAR)); cached_name_uc=malloc(length*sizeof(WCHAR));
+        CHECK(cached_name && cached_name_uc);
+        for (unsigned i=0;i<length;i++) {
+            cached_name[i]=existing[i];
+            cached_name_uc[i]=existing[i] >= 'a' && existing[i] <= 'z' ? existing[i]-32 : existing[i];
+        }
+        collision_dc.name=(UNICODE_STRING){length*sizeof(WCHAR),length*sizeof(WCHAR),cached_name};
+        collision_dc.name_uc=(UNICODE_STRING){length*sizeof(WCHAR),length*sizeof(WCHAR),cached_name_uc};
         collision_dc.index=2; collision_dc.fileref=&base_ref;
-        collision_dc.hash=calc_crc32c(0xffffffff,(uint8_t*)lower,sizeof(lower));
-        collision_dc.hash_uc=calc_crc32c(0xffffffff,(uint8_t*)upper,sizeof(upper));
+        collision_dc.hash=calc_crc32c(0xffffffff,(uint8_t*)cached_name,collision_dc.name.Length);
+        collision_dc.hash_uc=calc_crc32c(0xffffffff,(uint8_t*)cached_name_uc,collision_dc.name_uc.Length);
         InsertTailList(&directory_fcb.dir_children_index,&collision_dc.list_entry_index);
         insert_dir_child_into_hash_lists(&directory_fcb,&collision_dc);
     }
@@ -276,8 +288,17 @@ static void run(void) {
     setup();
     LIST_ENTRY *cache_head=subvol.fcbs.Flink, *cache_tail=subvol.fcbs.Blink;
     LIST_ENTRY* buckets[256]; memcpy(buckets,subvol.fcbs_ptrs,sizeof(buckets));
-    WCHAR chars[]={'a','l','p','h','a'}, stream_chars[]={'e','x','t','r','a'};
-    UNICODE_STRING name={sizeof(chars),sizeof(chars),chars}, stream={sizeof(stream_chars),sizeof(stream_chars),stream_chars};
+    const WCHAR* requested=current->requested_name ? current->requested_name : (const WCHAR*)L"alpha";
+    WCHAR chars[64], stream_chars[]={'e','x','t','r','a'};
+    unsigned length=0;
+    while (requested[length]) { CHECK(length < 64); chars[length]=requested[length]; length++; }
+    UNICODE_STRING name={length*sizeof(WCHAR),sizeof(chars),chars}, stream={sizeof(stream_chars),sizeof(stream_chars),stream_chars};
+    if (current->hash_collision) {
+        WCHAR upper[64];
+        for (unsigned i=0;i<length;i++) upper[i]=chars[i] >= 'a' && chars[i] <= 'z' ? chars[i]-32 : chars[i];
+        CHECK(collision_dc.hash_uc == calc_crc32c(0xffffffff,(uint8_t*)upper,name.Length));
+        CHECK(collision_dc.name_uc.Length != name.Length || memcmp(cached_name_uc,upper,name.Length));
+    }
     LIST_ENTRY rollback; InitializeListHead(&rollback);
     FILE_FULL_EA_INFORMATION ea={0};
     file_ref *result=NULL, *parent=&directory_ref;
@@ -285,7 +306,23 @@ static void run(void) {
                           current->directory ? FILE_DIRECTORY_FILE : 0,current->paging ? NonPagedPool : PagedPool,!current->insensitive,&rollback)
         : file_create2(&irp,&volume,&name,&directory_ref,current->directory ? FILE_DIRECTORY_FILE : 0,
                        current->fault == EA_ERROR ? &ea : NULL,current->fault == EA_ERROR ? sizeof(ea) : 0,&result,!current->insensitive,&rollback);
+    if (status != current->expected)
+        fprintf(stderr,"%s: status=%#x, expected=%#x, returned existing=%u\n",
+                scenario,(unsigned)status,(unsigned)current->expected,result == &base_ref);
     CHECK(status == current->expected);
+    if (current->existing_entry) {
+        unsigned entries=0;
+        for (LIST_ENTRY* le=directory_fcb.dir_children_index.Flink;le != &directory_fcb.dir_children_index;le=le->Flink) entries++;
+        CHECK(entries == (NT_SUCCESS(status) ? 2u : 1u));
+        CHECK(collision_dc.fileref == &base_ref);
+        const WCHAR* existing=current->existing_name ? current->existing_name : (const WCHAR*)L"alpha";
+        CHECK(!memcmp(collision_dc.name.Buffer,existing,collision_dc.name.Length));
+        if (!NT_SUCCESS(status)) {
+            CHECK(directory_fcb.dir_children_hash.Flink == &collision_dc.list_entry_hash && collision_dc.list_entry_hash.Flink == &directory_fcb.dir_children_hash);
+            CHECK(directory_fcb.dir_children_hash_uc.Flink == &collision_dc.list_entry_hash_uc && collision_dc.list_entry_hash_uc.Flink == &directory_fcb.dir_children_hash_uc);
+        }
+    }
+    if (!current->stream) CHECK(directory_fcb.inode_item.size == (NT_SUCCESS(status) ? name.Length : 0));
     CHECK(faults == (current->fault == NONE ? 0u : 1u));
     CHECK(!access_state.SubjectSecurityContext && !volume.fcb_lock.held);
     CHECK(!directory_np.resource.held && !directory_np.dir_children_lock.held && !base_np.resource.held && !base_np.dir_children_lock.held);
@@ -294,7 +331,10 @@ static void run(void) {
         CHECK(result->parent == (current->stream ? parent : &directory_ref));
         CHECK(!result->fcb->deleted && result->dc && result->dc->fileref == result);
         if (current->stream) { CHECK(result->fcb->ads); free_fileref(parent); }
-        else CHECK(result->fcb->type == (current->directory ? BTRFS_FT_DIR : BTRFS_FT_REG_FILE));
+        else {
+            CHECK(result->fcb->type == (current->directory ? BTRFS_FT_DIR : BTRFS_FT_REG_FILE));
+            CHECK(result->dc->name.Length == name.Length && !memcmp(result->dc->name.Buffer,requested,name.Length));
+        }
         free_fileref(result); // release the caller's returned fileref
     } else if (status == STATUS_OBJECT_NAME_COLLISION) {
         CHECK(result == &base_ref); free_fileref(result);
@@ -321,6 +361,7 @@ static void run(void) {
     }
     for (unsigned i=0;i<pool_count;i++) { CHECK(!pools[i].live); free(pools[i].p); }
     CHECK(!volume.dirty_fcbs_lock.held && !volume.dirty_filerefs_lock.held);
+    free(cached_name); free(cached_name_uc);
     printf("PASS %s\n",scenario);
 }
 int main(int argc, char** argv) {
@@ -346,7 +387,19 @@ int main(int argc, char** argv) {
         {.name="file-entry-utf8",.fault=POOL,.allocator="add_dir_child",.index=3,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="file-entry-name",.fault=POOL,.allocator="add_dir_child",.index=4,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="file-entry-uppercase",.fault=UPPERCASE_ERROR,.index=1,.expected=STATUS_INSUFFICIENT_RESOURCES},
-        {.name="file-collision",.collision=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="file-collision",.existing_entry=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="insensitive-lower-lower",.existing_entry=true,.insensitive=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="insensitive-lower-upper",.existing_entry=true,.insensitive=true,.requested_name=L"ALPHA",.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="insensitive-lower-mixed",.existing_entry=true,.insensitive=true,.requested_name=L"AlPhA",.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="insensitive-mixed-lower",.existing_entry=true,.insensitive=true,.existing_name=L"aLpHa",.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="insensitive-upper-lower",.existing_entry=true,.insensitive=true,.existing_name=L"ALPHA",.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="insensitive-directory",.existing_entry=true,.insensitive=true,.directory=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="insensitive-paging",.existing_entry=true,.insensitive=true,.paging=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="sensitive-case-distinct",.existing_entry=true,.requested_name=L"ALPHA"},
+        {.name="insensitive-distinct",.existing_entry=true,.insensitive=true,.requested_name=L"bravo"},
+        {.name="insensitive-conversion-error",.existing_entry=true,.insensitive=true,.fault=UPPERCASE_ERROR,.index=1,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="insensitive-hash-collision",.existing_entry=true,.insensitive=true,.existing_name=L"572BSHK",.requested_name=L"AFNB7ZH",.hash_collision=true},
+        {.name="insensitive-hash-collision-length",.existing_entry=true,.insensitive=true,.existing_name=L"6KKS16",.requested_name=L"IM921VL31U",.hash_collision=true},
         {.name="stream-success",.stream=true}, {.name="stream-casefold",.stream=true,.insensitive=true},
         {.name="stream-nonpaged",.stream=true,.paging=true},
         {.name="stream-missing-base",.stream=true,.missing_base=true},

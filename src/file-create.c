@@ -620,7 +620,7 @@ NTSTATUS file_create2(_In_ PIRP Irp, _Requires_exclusive_lock_held_(_Curr_->fcb_
             while (le != &parfileref->fcb->dir_children_hash_uc) {
                 dc = CONTAINING_RECORD(le, dir_child, list_entry_hash_uc);
 
-                if (dc->hash_uc == dc_hash && dc->name.Length == fpusuc.Length && RtlCompareMemory(dc->name.Buffer, fpusuc.Buffer, fpusuc.Length) == fpusuc.Length) {
+                if (dc->hash_uc == dc_hash && dc->name_uc.Length == fpusuc.Length && RtlCompareMemory(dc->name_uc.Buffer, fpusuc.Buffer, fpusuc.Length) == fpusuc.Length) {
                     existing_fileref = dc->fileref;
                     break;
                 } else if (dc->hash_uc > dc_hash)
