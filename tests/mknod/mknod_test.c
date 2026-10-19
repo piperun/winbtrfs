@@ -1,5 +1,6 @@
-/* Regression for WinBtrfs mknod inode ownership. Real source routines are
- * extracted by check_mknod.py; Windows object/metadata services are mocked. */
+/* Regression for WinBtrfs mknod identity, ownership and security arguments.
+ * Real source routines are extracted by check_mknod.py;
+ * Windows object/metadata services are mocked. */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -186,6 +187,8 @@ static IRP request_irp = { .RequestorMode = 1 };
 static dir_child name_collision;
 static LIST_ENTRY *parent_hash[256], *parent_hash_uc[256];
 static unsigned faults, fcb_calls, reaps, fileref_calls, tree_calls, notifications, privilege_calls;
+static unsigned security_calls;
+static char parent_security_descriptor;
 static unsigned mknod_allocs, child_allocs;
 static bool inserted;
 static unsigned destroyed_resources;
@@ -307,8 +310,13 @@ static void SeReleaseSubjectContext(SECURITY_SUBJECT_CONTEXT* context) { CHECK(*
 static void* IoGetFileObjectGenericMapping(void) { return NULL; }
 static NTSTATUS SeAssignSecurityEx(void* parent, void* explicit_sd, void** out, void* guid, bool directory,
                                     unsigned flags, SECURITY_SUBJECT_CONTEXT* context, void* mapping, int pool) {
-    (void)parent; (void)directory;
+    CHECK(security_calls++ == 0 && parent == &parent_security_descriptor);
+    CHECK(out == &child_fcb.sd && parent_resource.held == 1);
     CHECK(!explicit_sd && !guid && flags == SEF_SACL_AUTO_INHERIT && *context == 1 && !mapping && pool == PagedPool);
+    if (directory != (current->type == BTRFS_FT_DIR))
+        fprintf(stderr,"%s: IsDirectoryObject=%u, expected=%u (FCB type=%u, requested=%u)\n",
+                scenario,directory,current->type == BTRFS_FT_DIR,child_fcb.type,current->type);
+    CHECK(directory == (current->type == BTRFS_FT_DIR));
     if (hit(SECURITY)) return STATUS_ACCESS_DENIED;
     *out=allocate(64,"security"); return STATUS_SUCCESS;
 }
@@ -350,6 +358,7 @@ static uint32_t (*calc_crc32c)(uint32_t,uint8_t*,uint32_t)=calc_crc32c_sw;
 static void setup(void) {
     parent_fcb=(fcb){.Vcb=&volume,.subvol=&parent_root,.type=BTRFS_FT_DIR,.refcount=1,.nonpaged=&parent_np,.hash_ptrs=parent_hash,.hash_ptrs_uc=parent_hash_uc};
     parent_fcb.Header.Resource=&parent_resource;
+    parent_fcb.sd=&parent_security_descriptor;
     volume.fcb_lookaside.object=&child_fcb;
     volume.fcb_np_lookaside.object=&child_np;
     parent_root.id=5; parent_root.lastinode=current->lastinode ? current->lastinode : 1000;
@@ -401,6 +410,7 @@ static void run(void) {
     CHECK(status == current->expected);
     CHECK(faults == (current->fault == NONE ? 0u : 1u));
     CHECK(privilege_calls == (current->inode != 0 && !current->deny_access ? 1u : 0u));
+    CHECK(security_calls == (volume.fcb_lookaside.allocations ? 1u : 0u));
     CHECK(!volume.fcb_lock.held && !volume.fileref_lock.held && !parent_resource.held && !parent_np.dir_children_lock.held);
     if (NT_SUCCESS(status)) {
         uint64_t previous=current->lastinode ? (uint64_t)current->lastinode : 1000;
@@ -483,6 +493,7 @@ int main(int argc, char** argv) {
         {.name="temporary-allocation",.type=BTRFS_FT_REG_FILE,.fault=POOL_ALLOC,.allocator="mknod",.allocation_index=1,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="fcb-allocation",.type=BTRFS_FT_REG_FILE,.fault=FCB_ALLOC,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="security-failure",.type=BTRFS_FT_REG_FILE,.fault=SECURITY,.expected=STATUS_ACCESS_DENIED},
+        {.name="directory-security-failure",.type=BTRFS_FT_DIR,.fault=SECURITY,.expected=STATUS_ACCESS_DENIED},
         {.name="directory-hash-allocation",.type=BTRFS_FT_DIR,.fault=POOL_ALLOC,.allocator="mknod",.allocation_index=2,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="directory-uppercase-hash-allocation",.type=BTRFS_FT_DIR,.fault=POOL_ALLOC,.allocator="mknod",.allocation_index=3,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="fileref-allocation",.type=BTRFS_FT_REG_FILE,.fault=FILEREF_ALLOC,.expected=STATUS_INSUFFICIENT_RESOURCES},

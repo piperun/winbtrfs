@@ -189,6 +189,7 @@ NTSTATUS mknod(device_extension* Vcb, PFILE_OBJECT FileObject, void* data, ULONG
     }
 
     fcb->Vcb = Vcb;
+    fcb->type = bmn->type;
 
     fcb->inode_item.generation = Vcb->superblock.generation;
     fcb->inode_item.transid = Vcb->superblock.generation;
@@ -330,8 +331,6 @@ NTSTATUS mknod(device_extension* Vcb, PFILE_OBJECT FileObject, void* data, ULONG
             fcb->hash = hash;
         }
     }
-
-    fcb->type = bmn->type;
 
     if (fcb->type == BTRFS_FT_DIR) {
         fcb->hash_ptrs = ExAllocatePoolWithTag(PagedPool, sizeof(LIST_ENTRY*) * 256, ALLOC_TAG);

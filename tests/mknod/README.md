@@ -1,4 +1,4 @@
-# mknod inode regression
+# mknod regression
 
 Run from the repository root on Linux with Python 3 and GCC supporting
 `-ftrivial-auto-var-init`:
@@ -30,8 +30,22 @@ Reproduce the rejected-inode leak after the inode identity fix:
 python3 tests/mknod/check_mknod.py . --revision a4b0140a --build-dir build/mknod-tests-leak
 ```
 
-This baseline fails six rejection/error variants: cached collision,
-on-disk collision and metadata-read error, each for a file and directory.
+The leak affects cached collision, on-disk collision and metadata-read
+error, each for a file and directory. Older revisions also fail the
+directory-security checks below before reaching the directory leak checks.
+
+Reproduce the directory security argument bug after the rejection cleanup:
+
+```sh
+python3 tests/mknod/check_mknod.py . --revision 3eed7ee9 --build-dir build/mknod-tests-security
+```
+
+This baseline fails eight directory scenarios: `SeAssignSecurityEx` receives
+`IsDirectoryObject=FALSE` because the new FCB type is still zero. The harness
+checks this argument for all seven supported node types, the parent security
+descriptor and existing inheritance flags, plus security-assignment failure
+for both a regular file and directory. It verifies arguments passed to the
+Windows API, not the resulting ACL contents.
 
 The harness extracts the real `mknod`, FCB constructor/destructor, name
 lookup, inode collision check, directory-entry creation, FCB cache
