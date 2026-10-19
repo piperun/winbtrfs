@@ -2013,7 +2013,6 @@ void uninit(_In_ device_extension* Vcb) {
     KIRQL irql;
     NTSTATUS Status;
     LIST_ENTRY* le;
-    LARGE_INTEGER time;
 
     if (!Vcb->removing) {
         ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
@@ -2081,23 +2080,9 @@ void uninit(_In_ device_extension* Vcb) {
     if (!NT_SUCCESS(Status) && Status != STATUS_TOO_LATE)
         WARN("registry_mark_volume_unmounted returned %08lx\n", Status);
 
-    for (i = 0; i < Vcb->calcthreads.num_threads; i++) {
-        Vcb->calcthreads.threads[i].quit = true;
-    }
+    stop_calc_threads(Vcb);
 
-    KeSetEvent(&Vcb->calcthreads.event, 0, false);
-
-    for (i = 0; i < Vcb->calcthreads.num_threads; i++) {
-        KeWaitForSingleObject(&Vcb->calcthreads.threads[i].finished, Executive, KernelMode, false, NULL);
-
-        ZwClose(Vcb->calcthreads.threads[i].handle);
-    }
-
-    ExFreePool(Vcb->calcthreads.threads);
-
-    time.QuadPart = 0;
-    KeSetTimer(&Vcb->flush_thread_timer, time, NULL); // trigger the timer early
-    KeWaitForSingleObject(&Vcb->flush_thread_finished, Executive, KernelMode, false, NULL);
+    stop_flush_thread(Vcb);
 
     reap_fcb(Vcb->volume_fcb);
     reap_fcb(Vcb->dummy_fcb);
@@ -4089,67 +4074,6 @@ void init_file_cache(_In_ PFILE_OBJECT FileObject, _In_ CC_FILE_SIZES* ccfs) {
         fCcSetAdditionalCacheAttributesEx(FileObject, CC_ENABLE_DISK_IO_ACCOUNTING);
 
     CcSetReadAheadGranularity(FileObject, READ_AHEAD_GRANULARITY);
-}
-
-uint32_t get_num_of_processors() {
-    KAFFINITY p = KeQueryActiveProcessors();
-    uint32_t r = 0;
-
-    while (p != 0) {
-        if (p & 1)
-            r++;
-
-        p >>= 1;
-    }
-
-    return r;
-}
-
-static NTSTATUS create_calc_threads(_In_ PDEVICE_OBJECT DeviceObject) {
-    device_extension* Vcb = DeviceObject->DeviceExtension;
-    OBJECT_ATTRIBUTES oa;
-    ULONG i;
-
-    Vcb->calcthreads.num_threads = get_num_of_processors();
-
-    Vcb->calcthreads.threads = ExAllocatePoolWithTag(NonPagedPool, sizeof(drv_calc_thread) * Vcb->calcthreads.num_threads, ALLOC_TAG);
-    if (!Vcb->calcthreads.threads) {
-        ERR("out of memory\n");
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    InitializeListHead(&Vcb->calcthreads.job_list);
-    KeInitializeSpinLock(&Vcb->calcthreads.spinlock);
-    KeInitializeEvent(&Vcb->calcthreads.event, NotificationEvent, false);
-
-    RtlZeroMemory(Vcb->calcthreads.threads, sizeof(drv_calc_thread) * Vcb->calcthreads.num_threads);
-
-    InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
-
-    for (i = 0; i < Vcb->calcthreads.num_threads; i++) {
-        NTSTATUS Status;
-
-        Vcb->calcthreads.threads[i].DeviceObject = DeviceObject;
-        Vcb->calcthreads.threads[i].number = i;
-        KeInitializeEvent(&Vcb->calcthreads.threads[i].finished, NotificationEvent, false);
-
-        Status = PsCreateSystemThread(&Vcb->calcthreads.threads[i].handle, 0, &oa, NULL, NULL, calc_thread, &Vcb->calcthreads.threads[i]);
-        if (!NT_SUCCESS(Status)) {
-            ULONG j;
-
-            ERR("PsCreateSystemThread returned %08lx\n", Status);
-
-            for (j = 0; j < i; j++) {
-                Vcb->calcthreads.threads[i].quit = true;
-            }
-
-            KeSetEvent(&Vcb->calcthreads.event, 0, false);
-
-            return Status;
-        }
-    }
-
-    return STATUS_SUCCESS;
 }
 
 static bool is_btrfs_volume(_In_ PDEVICE_OBJECT DeviceObject) {

@@ -1098,7 +1098,7 @@ void reap_fileref(device_extension* Vcb, file_ref* fr);
 void reap_filerefs(device_extension* Vcb);
 NTSTATUS utf8_to_utf16(WCHAR* dest, ULONG dest_max, ULONG* dest_len, char* src, ULONG src_len);
 NTSTATUS utf16_to_utf8(char* dest, ULONG dest_max, ULONG* dest_len, WCHAR* src, ULONG src_len);
-uint32_t get_num_of_processors();
+#include "threads.h"
 
 _Ret_maybenull_
 root* find_default_subvol(_In_ _Requires_lock_held_(_Curr_->tree_lock) device_extension* Vcb, _In_opt_ PIRP Irp);
@@ -1425,9 +1425,6 @@ NTSTATUS dismount_volume(device_extension* Vcb, bool shutdown, PIRP Irp);
 
 // in flushthread.c
 
-_Function_class_(KSTART_ROUTINE)
-void __stdcall flush_thread(void* context);
-
 NTSTATUS do_write(device_extension* Vcb, PIRP Irp);
 NTSTATUS get_tree_new_address(device_extension* Vcb, tree* t, PIRP Irp);
 NTSTATUS flush_fcb(fcb* fcb, bool cache, LIST_ENTRY* batchlist, PIRP Irp);
@@ -1562,9 +1559,6 @@ _Function_class_(DRIVER_DISPATCH)
 NTSTATUS __stdcall drv_device_control(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp);
 
 // in calcthread.c
-
-_Function_class_(KSTART_ROUTINE)
-void __stdcall calc_thread(void* context);
 
 void do_calc_job(device_extension* Vcb, uint8_t* data, uint32_t sectors, void* csum);
 NTSTATUS add_calc_job_decomp(device_extension* Vcb, uint8_t compression, void* in, unsigned int inlen,

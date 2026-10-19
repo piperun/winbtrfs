@@ -107,6 +107,7 @@ set(SRC_FILES src/balance.c
     src/security.c
     src/send.c
     src/sha256.c
+    src/threads.c
     src/treefuncs.c
     src/volume.c
     src/worker-thread.c
