@@ -39,8 +39,10 @@ license_header = create[:create.index("#include")]
 ordinary = read("src/file-create.c", optional=True) or create
 marker = "static NTSTATUS file_create2(" if "static NTSTATUS file_create2(" in ordinary else "NTSTATUS file_create2("
 (out / "file_create2.inc").write_text(license_header + function(ordinary, marker))
-for name, marker in [("create_stream", "static NTSTATUS create_stream("),
-                     ("create_fcb", "fcb* create_fcb("),
+streams = read("src/stream-create.c", optional=True) or create
+marker = "static NTSTATUS create_stream(" if "static NTSTATUS create_stream(" in streams else "NTSTATUS create_stream("
+(out / "create_stream.inc").write_text(license_header + function(streams, marker))
+for name, marker in [("create_fcb", "fcb* create_fcb("),
                      ("create_fileref", "file_ref* create_fileref("),
                      ("add_dir_child", "NTSTATUS add_dir_child("),
                      ("find_file_in_dir", "NTSTATUS find_file_in_dir("),
