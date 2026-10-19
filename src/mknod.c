@@ -313,12 +313,16 @@ NTSTATUS mknod(device_extension* Vcb, PFILE_OBJECT FileObject, void* data, ULONG
 
                 WARN("inode collision\n");
                 Status = STATUS_INVALID_PARAMETER;
+                reap_fcb(fcb);
+                free_fcb(parfcb);
                 goto end;
             } else if (Status != STATUS_NOT_FOUND) {
                 ERR("check_inode_used returned %08lx\n", Status);
 
                 release_fcb_lock(Vcb);
                 ExReleaseResourceLite(&Vcb->fileref_lock);
+                reap_fcb(fcb);
+                free_fcb(parfcb);
                 goto end;
             }
 
