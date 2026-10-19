@@ -42,7 +42,9 @@ marker = "static NTSTATUS file_create2(" if "static NTSTATUS file_create2(" in o
 for name, marker in [("create_stream", "static NTSTATUS create_stream("),
                      ("create_fcb", "fcb* create_fcb("),
                      ("create_fileref", "file_ref* create_fileref("),
-                     ("add_dir_child", "NTSTATUS add_dir_child(")]:
+                     ("add_dir_child", "NTSTATUS add_dir_child("),
+                     ("find_file_in_dir", "NTSTATUS find_file_in_dir("),
+                     ("open_fileref_child", "NTSTATUS open_fileref_child(")]:
     (out / f"{name}.inc").write_text(license_header + function(create, marker))
 start = btrfs.index("#ifdef DEBUG_FCB_REFCOUNTS\nvoid _free_fcb(")
 (out / "free_fcb.inc").write_text(license_header + btrfs[start:btrfs.index("\nvoid reap_fcb(", start)])

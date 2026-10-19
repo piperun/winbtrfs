@@ -256,6 +256,7 @@ NTSTATUS file_create2(_In_ PIRP Irp, _Requires_exclusive_lock_held_(_Curr_->fcb_
     ANSI_STRING utf8as;
     LIST_ENTRY* lastle = NULL;
     file_ref* existing_fileref = NULL;
+    bool name_exists = false;
 
     if (parfileref->fcb == Vcb->dummy_fcb)
         return STATUS_ACCESS_DENIED;
@@ -565,8 +566,6 @@ NTSTATUS file_create2(_In_ PIRP Irp, _Requires_exclusive_lock_held_(_Curr_->fcb_
         RtlZeroMemory(fcb->hash_ptrs_uc, sizeof(LIST_ENTRY*) * 256);
     }
 
-    fcb->deleted = false;
-
     fileref->created = true;
 
     fcb->subvol->root_item.ctransid = Vcb->superblock.generation;
@@ -587,6 +586,7 @@ NTSTATUS file_create2(_In_ PIRP Irp, _Requires_exclusive_lock_held_(_Curr_->fcb_
                 dc = CONTAINING_RECORD(le, dir_child, list_entry_hash);
 
                 if (dc->hash == dc_hash && dc->name.Length == fpus->Length && RtlCompareMemory(dc->name.Buffer, fpus->Buffer, fpus->Length) == fpus->Length) {
+                    name_exists = true;
                     existing_fileref = dc->fileref;
                     break;
                 } else if (dc->hash > dc_hash)
@@ -621,6 +621,7 @@ NTSTATUS file_create2(_In_ PIRP Irp, _Requires_exclusive_lock_held_(_Curr_->fcb_
                 dc = CONTAINING_RECORD(le, dir_child, list_entry_hash_uc);
 
                 if (dc->hash_uc == dc_hash && dc->name_uc.Length == fpusuc.Length && RtlCompareMemory(dc->name_uc.Buffer, fpusuc.Buffer, fpusuc.Length) == fpusuc.Length) {
+                    name_exists = true;
                     existing_fileref = dc->fileref;
                     break;
                 } else if (dc->hash_uc > dc_hash)
@@ -633,7 +634,10 @@ NTSTATUS file_create2(_In_ PIRP Irp, _Requires_exclusive_lock_held_(_Curr_->fcb_
         ExFreePool(fpusuc.Buffer);
     }
 
-    if (existing_fileref) {
+    if (name_exists) {
+        if (existing_fileref)
+            increase_fileref_refcount(existing_fileref);
+
         ExReleaseResourceLite(&parfileref->fcb->nonpaged->dir_children_lock);
         reap_fileref(Vcb, fileref);
 
@@ -643,7 +647,15 @@ NTSTATUS file_create2(_In_ PIRP Irp, _Requires_exclusive_lock_held_(_Curr_->fcb_
 
         ExFreePool(utf8);
 
-        increase_fileref_refcount(existing_fileref);
+        // A cached directory entry can outlive its fileref.
+        if (!existing_fileref) {
+            Status = open_fileref_child(Vcb, parfileref, fpus, case_sensitive, true, false, pool_type, &existing_fileref, Irp);
+            if (!NT_SUCCESS(Status)) {
+                ERR("open_fileref_child returned %08lx\n", Status);
+                return Status;
+            }
+        }
+
         *pfr = existing_fileref;
 
         return STATUS_OBJECT_NAME_COLLISION;
@@ -664,6 +676,8 @@ NTSTATUS file_create2(_In_ PIRP Irp, _Requires_exclusive_lock_held_(_Curr_->fcb_
 
         return Status;
     }
+
+    fcb->deleted = false;
 
     fileref->parent = parfileref;
     fileref->dc = dc;

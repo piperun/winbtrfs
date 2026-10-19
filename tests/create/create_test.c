@@ -7,7 +7,7 @@ static const char* scenario;
 static void host_log(const char* format, ...) { (void)format; }
 enum fault_kind { NONE, POOL, FCB_ALLOC, NP_ALLOC, FILEREF_ALLOC, SECURITY, EA_ERROR,
                   EXTEND_ERROR, UTF8_ERROR, UPPERCASE_ERROR, TREE_ERROR, ACCESS_ERROR,
-                  OPEN_ERROR, NAME_ERROR };
+                  OPEN_ERROR, NAME_ERROR, REOPEN_ERROR };
 typedef struct {
     const char* name;
     bool stream, missing_base, directory, paging, insensitive, preallocate, existing_entry, full, readonly;
@@ -16,7 +16,7 @@ typedef struct {
     unsigned index;
     NTSTATUS expected;
     const WCHAR *existing_name, *requested_name;
-    bool hash_collision;
+    bool hash_collision, reaped_entry, existing_directory, install_during_open;
 } test_case;
 static const test_case* current;
 static device_extension volume;
@@ -32,7 +32,9 @@ static fcb_nonpaged nonpaged[4];
 static file_ref refs[4];
 static bool leases[3][4];
 static unsigned faults, fault_attempts, utf_calls, uppercase_calls, destroyed, created_resources, notifications;
-static bool have_base;
+static bool have_base, preparing;
+static unsigned reopen_calls;
+static file_ref* installed_ref;
 static ACCESS_STATE access_state;
 static SECURITY_CONTEXT security_context={&access_state};
 static IRP irp={.RequestorMode=UserMode};
@@ -50,13 +52,14 @@ static void InsertTailList(LIST_ENTRY* list, LIST_ENTRY* entry) { InsertHeadList
 static void RemoveEntryList(LIST_ENTRY* entry) { entry->Blink->Flink=entry->Flink; entry->Flink->Blink=entry->Blink; }
 static LIST_ENTRY* RemoveHeadList(LIST_ENTRY* list) { LIST_ENTRY* entry=list->Flink; RemoveEntryList(entry); return entry; }
 static bool hit(enum fault_kind kind) {
-    if (current->fault != kind || ++fault_attempts != (current->index ? current->index : 1)) return false;
+    if (preparing || current->fault != kind || ++fault_attempts != (current->index ? current->index : 1)) return false;
     faults++; return true;
 }
 static bool ExAcquireResourceExclusiveLite(ERESOURCE* lock, bool wait) { CHECK(wait); lock->held++; return true; }
 static bool ExAcquireResourceSharedLite(ERESOURCE* lock, bool wait) { return ExAcquireResourceExclusiveLite(lock,wait); }
 static void ExReleaseResourceLite(ERESOURCE* lock) { CHECK(lock->held); lock->held--; }
 static bool ExIsResourceAcquiredExclusive(ERESOURCE* lock) { return lock->held != 0; }
+static bool ExIsResourceAcquiredSharedLite(ERESOURCE* lock) { return lock->held != 0; }
 static int32_t InterlockedIncrement(int32_t* n) { return ++*n; }
 static int32_t InterlockedDecrement(int32_t* n) { CHECK(*n > 0); return --*n; }
 static int64_t InterlockedIncrement64(int64_t* n) { return ++*n; }
@@ -218,6 +221,31 @@ static uint32_t (*calc_crc32c)(uint32_t,uint8_t*,uint32_t)=calc_crc32c_sw;
 #include "crc32c.inc"
 #include "add_dir_child.inc"
 #include "add_fcb_to_subvol.inc"
+#include "find_file_in_dir.inc"
+// Disk/FCB service boundary. Namespace lookup, fileref publication and
+// cleanup use production code below.
+static NTSTATUS open_fcb(device_extension* vcb, root* r, uint64_t inode, uint8_t type, PANSI_STRING utf8,
+                         bool hardlink, fcb* parent, fcb** out, POOL_TYPE pool, PIRP request) {
+    CHECK(vcb == &volume && r == &subvol && inode == base_fcb.inode && type == base_fcb.type);
+    CHECK(utf8 == &collision_dc.utf8 && !hardlink && parent == &directory_fcb && request == &irp);
+    CHECK(pool == (current->paging ? NonPagedPool : PagedPool));
+    CHECK(volume.fcb_lock.held && !directory_np.dir_children_lock.held);
+    reopen_calls++;
+    if (hit(REOPEN_ERROR)) return STATUS_IO_DEVICE_ERROR;
+    if (current->install_during_open) {
+        installed_ref=create_fileref(vcb); CHECK(installed_ref);
+        installed_ref->fcb=&base_fcb; InterlockedIncrement(&base_fcb.refcount);
+        installed_ref->parent=&directory_ref; increase_fileref_refcount(&directory_ref);
+        installed_ref->dc=&collision_dc; collision_dc.fileref=installed_ref;
+        InsertTailList(&directory_ref.children,&installed_ref->list_entry);
+    }
+    InterlockedIncrement(&base_fcb.refcount); *out=&base_fcb; return STATUS_SUCCESS;
+}
+static NTSTATUS open_fcb_stream(device_extension* vcb, dir_child* dc, fcb* parent, fcb** out, PIRP request) {
+    (void)vcb; (void)dc; (void)parent; (void)out; (void)request;
+    CHECK(false); return STATUS_UNSUCCESSFUL; // not exercised by ordinary creation
+}
+#include "open_fileref_child.inc"
 #include "file_create2.inc"
 #include "create_stream.inc"
 
@@ -238,9 +266,11 @@ static void setup(void) {
     volume.root_fileref=&directory_ref;
     have_base=(current->stream && !current->missing_base) || current->existing_entry;
     if (have_base) {
-        setup_fcb(&base_fcb,&base_np,BTRFS_FT_REG_FILE,500,base_hash,base_hash_uc);
+        setup_fcb(&base_fcb,&base_np,current->existing_directory ? BTRFS_FT_DIR : BTRFS_FT_REG_FILE,500,base_hash,base_hash_uc);
         base_ref.fcb=&base_fcb; base_ref.refcount=1; base_ref.parent=&directory_ref; InitializeListHead(&base_ref.children);
-        InsertTailList(&directory_ref.children,&base_ref.list_entry); increase_fileref_refcount(&directory_ref);
+        if (!current->reaped_entry) {
+            InsertTailList(&directory_ref.children,&base_ref.list_entry); increase_fileref_refcount(&directory_ref);
+        }
         if (current->readonly) base_fcb.atts=FILE_ATTRIBUTE_READONLY;
     }
     if (current->existing_entry) {
@@ -256,10 +286,28 @@ static void setup(void) {
         collision_dc.name=(UNICODE_STRING){length*sizeof(WCHAR),length*sizeof(WCHAR),cached_name};
         collision_dc.name_uc=(UNICODE_STRING){length*sizeof(WCHAR),length*sizeof(WCHAR),cached_name_uc};
         collision_dc.index=2; collision_dc.fileref=&base_ref;
+        collision_dc.key.objectid=base_fcb.inode; collision_dc.key.type=BTRFS_INODE_ITEM_KEY;
+        collision_dc.type=base_fcb.type;
+        base_ref.dc=&collision_dc;
         collision_dc.hash=calc_crc32c(0xffffffff,(uint8_t*)cached_name,collision_dc.name.Length);
         collision_dc.hash_uc=calc_crc32c(0xffffffff,(uint8_t*)cached_name_uc,collision_dc.name_uc.Length);
         InsertTailList(&directory_fcb.dir_children_index,&collision_dc.list_entry_index);
         insert_dir_child_into_hash_lists(&directory_fcb,&collision_dc);
+    }
+    if (current->reaped_entry) {
+        // Reap a real, closed fileref while its directory entry remains cached.
+        // The fixture keeps an independent FCB hold, as another hardlink could.
+        preparing=true;
+        file_ref* closed=create_fileref(&volume); CHECK(closed);
+        closed->fcb=&base_fcb; InterlockedIncrement(&base_fcb.refcount);
+        closed->parent=&directory_ref; increase_fileref_refcount(&directory_ref);
+        closed->dc=&collision_dc; collision_dc.fileref=closed;
+        if (current->existing_directory) base_fcb.fileref=closed;
+        InsertTailList(&directory_ref.children,&closed->list_entry);
+        free_fileref(closed); reap_filerefs(&volume);
+        CHECK(!collision_dc.fileref && !base_fcb.fileref && base_fcb.refcount == 1);
+        CHECK(directory_ref.refcount == 1 && IsListEmpty(&directory_ref.children));
+        preparing=false;
     }
     irp.stack.Parameters.Create.SecurityContext=&security_context;
     irp.stack.Parameters.Create.FileAttributes=FILE_ATTRIBUTE_NORMAL;
@@ -302,10 +350,12 @@ static void run(void) {
     LIST_ENTRY rollback; InitializeListHead(&rollback);
     FILE_FULL_EA_INFORMATION ea={0};
     file_ref *result=NULL, *parent=&directory_ref;
+    volume.fcb_lock.held=1; // caller holds this across creation and child lookup
     NTSTATUS status=current->stream ? create_stream(&volume,&result,&parent,&name,&stream,&irp,
                           current->directory ? FILE_DIRECTORY_FILE : 0,current->paging ? NonPagedPool : PagedPool,!current->insensitive,&rollback)
         : file_create2(&irp,&volume,&name,&directory_ref,current->directory ? FILE_DIRECTORY_FILE : 0,
                        current->fault == EA_ERROR ? &ea : NULL,current->fault == EA_ERROR ? sizeof(ea) : 0,&result,!current->insensitive,&rollback);
+    CHECK(volume.fcb_lock.held == 1); volume.fcb_lock.held=0;
     if (status != current->expected)
         fprintf(stderr,"%s: status=%#x, expected=%#x, returned existing=%u\n",
                 scenario,(unsigned)status,(unsigned)current->expected,result == &base_ref);
@@ -314,7 +364,13 @@ static void run(void) {
         unsigned entries=0;
         for (LIST_ENTRY* le=directory_fcb.dir_children_index.Flink;le != &directory_fcb.dir_children_index;le=le->Flink) entries++;
         CHECK(entries == (NT_SUCCESS(status) ? 2u : 1u));
-        CHECK(collision_dc.fileref == &base_ref);
+        if (!current->reaped_entry) CHECK(collision_dc.fileref == &base_ref);
+        else if (status != STATUS_OBJECT_NAME_COLLISION) CHECK(!collision_dc.fileref);
+        if (current->reaped_entry && !NT_SUCCESS(status)) {
+            // No matching cached name may reach directory-entry insertion,
+            // even when a later allocation happens to produce the same error.
+            for (unsigned i=0;i<allocator_count;i++) CHECK(strcmp(allocators[i].caller,"add_dir_child"));
+        }
         const WCHAR* existing=current->existing_name ? current->existing_name : (const WCHAR*)L"alpha";
         CHECK(!memcmp(collision_dc.name.Buffer,existing,collision_dc.name.Length));
         if (!NT_SUCCESS(status)) {
@@ -337,15 +393,34 @@ static void run(void) {
         }
         free_fileref(result); // release the caller's returned fileref
     } else if (status == STATUS_OBJECT_NAME_COLLISION) {
-        CHECK(result == &base_ref); free_fileref(result);
+        CHECK(result && result == collision_dc.fileref && result->fcb == &base_fcb);
+        CHECK(result->parent == &directory_ref && result->dc == &collision_dc);
+        if (current->reaped_entry) {
+            CHECK(result->refcount == (current->install_during_open ? 2 : 1));
+            if (current->existing_directory) CHECK(base_fcb.fileref == result);
+            if (installed_ref) { CHECK(result == installed_ref); free_fileref(installed_ref); }
+        } else CHECK(result == &base_ref && result->refcount == 2);
+        CHECK(IsListEmpty(&rollback));
+        free_fileref(result);
     } else CHECK(!result);
+    if (!current->stream && !NT_SUCCESS(status)) {
+        for (LIST_ENTRY* le=volume.dirty_fcbs.Flink;le != &volume.dirty_fcbs;le=le->Flink) {
+            fcb* attempted=CONTAINING_RECORD(le,fcb,list_entry_dirty);
+            if (attempted != &directory_fcb) CHECK(attempted->deleted);
+        }
+    }
     // Model completed persistence, then run the actual cache reapers.
     drain_dirty(); reap_filerefs(&volume); reap_fcbs(&volume);
     if (directory_fcb.refcount != 1 || (have_base && base_fcb.refcount != 1))
         fprintf(stderr,"%s: parent FCB refs: directory=%d, base=%d (expected 1 for each fixture parent)\n",
                 scenario,directory_fcb.refcount,have_base ? base_fcb.refcount : 1);
     CHECK(directory_fcb.refcount == 1 && (!have_base || base_fcb.refcount == 1));
-    CHECK(directory_ref.refcount == (have_base ? 2 : 1) && (!have_base || base_ref.refcount == 1));
+    CHECK(directory_ref.refcount == (have_base && !current->reaped_entry ? 2 : 1) && (!have_base || base_ref.refcount == 1));
+    if (current->reaped_entry) {
+        CHECK(!collision_dc.fileref && !base_fcb.fileref);
+        bool opened=status == STATUS_OBJECT_NAME_COLLISION || current->fault == REOPEN_ERROR || current->fault == FILEREF_ALLOC;
+        CHECK(reopen_calls == (opened ? 1u : 0u));
+    }
     CHECK(subvol.fcbs.Flink == cache_head && subvol.fcbs.Blink == cache_tail);
     CHECK(!memcmp(buckets,subvol.fcbs_ptrs,sizeof(buckets)));
     CHECK(volume.fcb_lookaside.allocations == volume.fcb_lookaside.returns);
@@ -400,6 +475,22 @@ int main(int argc, char** argv) {
         {.name="insensitive-conversion-error",.existing_entry=true,.insensitive=true,.fault=UPPERCASE_ERROR,.index=1,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="insensitive-hash-collision",.existing_entry=true,.insensitive=true,.existing_name=L"572BSHK",.requested_name=L"AFNB7ZH",.hash_collision=true},
         {.name="insensitive-hash-collision-length",.existing_entry=true,.insensitive=true,.existing_name=L"6KKS16",.requested_name=L"IM921VL31U",.hash_collision=true},
+        {.name="cached-sensitive",.existing_entry=true,.reaped_entry=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="cached-insensitive",.existing_entry=true,.reaped_entry=true,.insensitive=true,.requested_name=L"AlPhA",.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="cached-directory",.existing_entry=true,.reaped_entry=true,.existing_directory=true,.directory=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="cached-directory-as-file",.existing_entry=true,.reaped_entry=true,.existing_directory=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="cached-file-as-directory",.existing_entry=true,.reaped_entry=true,.directory=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="cached-paging",.existing_entry=true,.reaped_entry=true,.paging=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="cached-preallocate",.existing_entry=true,.reaped_entry=true,.preallocate=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="cached-open-error",.existing_entry=true,.reaped_entry=true,.fault=REOPEN_ERROR,.expected=STATUS_IO_DEVICE_ERROR},
+        {.name="cached-insensitive-open-error",.existing_entry=true,.reaped_entry=true,.insensitive=true,.fault=REOPEN_ERROR,.expected=STATUS_IO_DEVICE_ERROR},
+        {.name="cached-fileref-error",.existing_entry=true,.reaped_entry=true,.fault=FILEREF_ALLOC,.index=2,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="cached-uppercase-error",.existing_entry=true,.reaped_entry=true,.insensitive=true,.fault=UPPERCASE_ERROR,.index=2,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="cached-installed-during-open",.existing_entry=true,.reaped_entry=true,.install_during_open=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="cached-sensitive-distinct",.existing_entry=true,.reaped_entry=true,.requested_name=L"ALPHA"},
+        {.name="cached-insensitive-distinct",.existing_entry=true,.reaped_entry=true,.insensitive=true,.requested_name=L"bravo"},
+        {.name="cached-hash-collision",.existing_entry=true,.reaped_entry=true,.insensitive=true,.existing_name=L"572BSHK",.requested_name=L"AFNB7ZH",.hash_collision=true},
+        {.name="cached-hash-collision-length",.existing_entry=true,.reaped_entry=true,.insensitive=true,.existing_name=L"6KKS16",.requested_name=L"IM921VL31U",.hash_collision=true},
         {.name="stream-success",.stream=true}, {.name="stream-casefold",.stream=true,.insensitive=true},
         {.name="stream-nonpaged",.stream=true,.paging=true},
         {.name="stream-missing-base",.stream=true,.missing_base=true},

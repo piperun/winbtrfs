@@ -34,8 +34,9 @@ Reproduce the mixed-case collision bug after the parent-reference fix:
 python3 tests/create/check_create.py . --revision f87278b4 --build-dir build/create-tests-case-before
 ```
 
-This baseline passes 58/64 cases. Six insensitive rechecks create a new
-entry instead of returning `STATUS_OBJECT_NAME_COLLISION` and the existing
+In the original 64-case matrix, this baseline passes 58/64 cases. The
+expanded matrix also exercises the cached-entry gap below. Six insensitive
+rechecks create a new entry instead of returning `STATUS_OBJECT_NAME_COLLISION` and the existing
 fileref. The cases cover lowercase and mixed-case cached names, different
 request capitalization, directory creation and paging allocation.
 
@@ -50,9 +51,35 @@ Equal hashes must not cause different names to collide. Collision returns
 must preserve the existing entry and restore parent directory size while
 reclaiming the attempted child through the normal reference cleanup.
 
+Reproduce the cached-entry collision gap after the uppercase fix:
+
+```sh
+python3 tests/create/check_create.py . --revision e0435e1c --build-dir build/create-tests-cached-before
+```
+
+This baseline passes 53/80 cases: 12 cached-entry collision failures and
+15 failures because rejected attempts remain marked live. The 12 collision
+cases fail after production `reap_filerefs` clears the existing entry's fileref. Creation must still
+reject that cached name and return a referenced fileref for the existing
+inode. The fixture keeps an independent FCB hold, as another hardlink can.
+The fixed path uses production `find_file_in_dir` and `open_fileref_child`;
+it does not manufacture the returned fileref in a mock.
+
+The cases cover sensitive and insensitive names, directory/file type
+mismatches, paging allocation, preallocation, FCB-open failure, fileref
+allocation failure and uppercase conversion failure during reopening.
+A deterministic callback installs another fileref during FCB opening to
+exercise the child-open helper's existing revalidation and loser cleanup;
+this models that interleaving, not actual concurrent execution. Controls
+allow distinct names and both real hash collisions after reaping. Failed
+reopens must return no fileref and must never attempt entry insertion.
+Rejected ordinary creations must also leave their dirty attempted inode
+marked deleted, so the flush worker cannot persist an unlinked live inode.
+
 The harness extracts the actual `file_create2`, `create_stream`, FCB and
 fileref constructors, dirty-queue insertion, reference releases, cache
-reapers, directory-entry creation, FCB cache insertion and software CRC32C.
+reapers, directory-entry creation and lookup, child fileref opening, FCB
+cache insertion and software CRC32C.
 It checks successful file/directory/stream creation, nonpaged allocation,
 preallocation, case folding, existing-file collision, and injected errors
 in conversion, allocation, security, EA parsing, extension and metadata
@@ -68,8 +95,8 @@ exactly once. Namespace entries remain cached after child eviction; their
 fixture teardown is separate from reference and child-ownership checks.
 
 Windows locks, lookaside storage, security assignment, access checks,
-name conversion, EA parsing, file extension, lookup and disk reads are
-host models. Conversion fixtures use ASCII names. Dirty completion does
+name conversion, EA parsing, file extension, stream base lookup and
+disk/FCB opening are host models. Conversion fixtures use ASCII names. Dirty completion does
 not run the flush worker, persistence, or actual transaction rollback.
 The test calls the creation helpers directly and models their callers'
 returned-reference releases; it does not drive the outer create dispatch

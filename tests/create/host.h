@@ -56,6 +56,7 @@
 #define STATUS_ACCESS_DENIED ((int32_t)0xc0000022)
 #define STATUS_OBJECT_NAME_INVALID ((int32_t)0xc0000033)
 #define STATUS_OBJECT_NAME_NOT_FOUND ((int32_t)0xc0000034)
+#define STATUS_OBJECT_PATH_NOT_FOUND ((int32_t)0xc000003a)
 #define STATUS_OBJECT_NAME_COLLISION ((int32_t)0xc0000035)
 #define STATUS_PRIVILEGE_NOT_HELD ((int32_t)0xc0000061)
 #define STATUS_INSUFFICIENT_RESOURCES ((int32_t)0xc000009a)
@@ -89,7 +90,7 @@ typedef struct _file_ref file_ref;
 typedef struct _fcb fcb;
 typedef struct { ERESOURCE load_tree_lock; } root_nonpaged;
 typedef struct _root {
-    uint64_t id;
+    uint64_t id, parent;
     int64_t lastinode;
     unsigned fcbs_version;
     struct btrfs_root_item root_item;
@@ -103,6 +104,7 @@ typedef struct _dir_child {
     uint64_t index;
     uint64_t size;
     uint8_t type;
+    bool root_dir;
     ANSI_STRING utf8;
     UNICODE_STRING name, name_uc;
     uint32_t hash, hash_uc;
@@ -181,6 +183,7 @@ typedef struct { unsigned unused; } FILE_FULL_EA_INFORMATION;
 #define IoGetCurrentIrpStackLocation(irp) (&(irp)->stack)
 #define S_IFDIR __S_IFDIR
 #define S_IFREG __S_IFREG
+#define FILE_ATTRIBUTE_REPARSE_POINT 0x400
 #define FILE_ATTRIBUTE_NORMAL 0x80
 #define FILE_ATTRIBUTE_ARCHIVE 0x20
 #define FILE_ATTRIBUTE_TEMPORARY 0x100
