@@ -40,7 +40,13 @@ license_header = source[:source.index("#include")]
 (out / "check_inode_used.inc").write_text(license_header + function(source, "static NTSTATUS check_inode_used("))
 create = read("src/create.c")
 (out / "create_fcb.inc").write_text(license_header + function(create, "fcb* create_fcb("))
-(out / "reap_fcb.inc").write_text(license_header + function(read("src/btrfs.c"), "void reap_fcb("))
+(out / "create_fileref.inc").write_text(license_header + function(create, "file_ref* create_fileref("))
+btrfs = read("src/btrfs.c")
+start = btrfs.index("#ifdef DEBUG_FCB_REFCOUNTS\nvoid _free_fcb(")
+(out / "free_fcb.inc").write_text(license_header + btrfs[start:btrfs.index("\nvoid reap_fcb(", start)])
+for name in ["reap_fcb", "free_fileref", "reap_fileref", "reap_fcbs", "reap_filerefs",
+             "mark_fcb_dirty", "mark_fileref_dirty"]:
+    (out / f"{name}.inc").write_text(license_header + function(btrfs, f"void {name}("))
 for marker, filename in [("NTSTATUS find_file_in_dir(", "find_file_in_dir.inc"),
                          ("NTSTATUS add_dir_child(", "add_dir_child.inc")]:
     (out / filename).write_text(license_header + function(create, marker))

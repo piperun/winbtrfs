@@ -262,7 +262,6 @@ NTSTATUS mknod(device_extension* Vcb, PFILE_OBJECT FileObject, void* data, ULONG
 
     fcb->atts_changed = false;
 
-    InterlockedIncrement(&parfcb->refcount);
     fcb->subvol = parfcb->subvol;
 
     SeCaptureSubjectContext(&subjcont);
@@ -315,7 +314,6 @@ NTSTATUS mknod(device_extension* Vcb, PFILE_OBJECT FileObject, void* data, ULONG
                 WARN("inode collision\n");
                 Status = STATUS_INVALID_PARAMETER;
                 reap_fcb(fcb);
-                free_fcb(parfcb);
                 goto end;
             } else if (Status != STATUS_NOT_FOUND) {
                 ERR("check_inode_used returned %08lx\n", Status);
@@ -323,7 +321,6 @@ NTSTATUS mknod(device_extension* Vcb, PFILE_OBJECT FileObject, void* data, ULONG
                 release_fcb_lock(Vcb);
                 ExReleaseResourceLite(&Vcb->fileref_lock);
                 reap_fcb(fcb);
-                free_fcb(parfcb);
                 goto end;
             }
 
@@ -384,9 +381,10 @@ NTSTATUS mknod(device_extension* Vcb, PFILE_OBJECT FileObject, void* data, ULONG
                            fcb->type, &dc, NULL);
     if (!NT_SUCCESS(Status)) {
         ERR("add_dir_child returned %08lx\n", Status);
-        free_fileref(fileref);
         release_fcb_lock(Vcb);
         ExReleaseResourceLite(&Vcb->fileref_lock);
+        reap_fileref(Vcb, fileref);
+        reap_fcb(fcb);
         goto end;
     }
 
@@ -435,6 +433,7 @@ NTSTATUS mknod(device_extension* Vcb, PFILE_OBJECT FileObject, void* data, ULONG
     if (!parccb->user_set_write_time)
         queue_notification_fcb(parfileref, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED, NULL);
 
+    free_fileref(fileref);
     Status = STATUS_SUCCESS;
 
 end:

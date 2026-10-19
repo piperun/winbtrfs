@@ -98,6 +98,7 @@ typedef struct _root {
 typedef struct _dir_child {
     struct btrfs_key key;
     uint64_t index;
+    uint64_t size;
     uint8_t type;
     ANSI_STRING utf8;
     UNICODE_STRING name, name_uc;
@@ -118,6 +119,7 @@ struct _fcb {
     int32_t refcount;
     struct btrfs_inode_item inode_item;
     bool created, sd_dirty, inode_item_changed, prop_compression_changed, atts_changed;
+    bool ads, dirty;
     unsigned prop_compression;
     void* sd;
     fcb_nonpaged* nonpaged;
@@ -126,6 +128,7 @@ struct _fcb {
     LIST_ENTRY extents, hardlinks, xattrs;
     file_ref* fileref;
     LIST_ENTRY list_entry, list_entry_all, dir_children_index, dir_children_hash, dir_children_hash_uc;
+    LIST_ENTRY list_entry_dirty;
     LIST_ENTRY **hash_ptrs, **hash_ptrs_uc;
     struct {
         ERESOURCE* Resource;
@@ -139,19 +142,26 @@ struct _file_ref {
     fcb* fcb;
     file_ref* parent;
     dir_child* dc;
-    bool created;
+    bool created, dirty;
     int32_t refcount;
     LIST_ENTRY children, list_entry;
+    LIST_ENTRY list_entry_dirty;
+    LIST_ENTRY list_entry_reap;
+    ANSI_STRING oldutf8;
 };
 typedef struct { file_ref* fileref; ULONG access; bool user_set_change_time, user_set_write_time; } ccb;
 typedef struct { fcb* FsContext; ccb* FsContext2; } FILE_OBJECT, *PFILE_OBJECT;
 struct _device_extension {
     ERESOURCE fileref_lock, fcb_lock;
+    ERESOURCE dirty_fcbs_lock, dirty_filerefs_lock;
     bool readonly;
+    bool need_write;
     fcb* volume_fcb;
+    file_ref* root_fileref;
     struct { uint64_t generation; } superblock;
     LIST_ENTRY all_fcbs, roots;
-    LOOKASIDE fcb_lookaside, fcb_np_lookaside;
+    LIST_ENTRY dirty_fcbs, dirty_filerefs;
+    LOOKASIDE fcb_lookaside, fcb_np_lookaside, fileref_lookaside;
 };
 typedef struct { struct { struct btrfs_key key; } *item; } traverse_ptr;
 typedef struct { unsigned type; struct { fcb* parent; dir_child* dc; } dir_child; LIST_ENTRY list_entry; } rollback_item;
@@ -188,6 +198,7 @@ static dir_child name_collision;
 static LIST_ENTRY *parent_hash[256], *parent_hash_uc[256];
 static unsigned faults, fcb_calls, reaps, fileref_calls, tree_calls, notifications, privilege_calls;
 static unsigned security_calls;
+static unsigned fileref_reaps;
 static char parent_security_descriptor;
 static unsigned mknod_allocs, child_allocs;
 static bool inserted;
@@ -230,8 +241,10 @@ static void ExFreePool(void* p) {
     CHECK(false);
 }
 static int32_t InterlockedIncrement(int32_t* n) { return ++*n; }
+static int32_t InterlockedDecrement(int32_t* n) { CHECK(*n > 0); return --*n; }
 static int64_t InterlockedIncrement64(int64_t* n) { return ++*n; }
-void free_fcb(fcb* node) { CHECK(node == &parent_fcb && node->refcount > 1); node->refcount--; }
+#include "free_fcb.inc"
+#include "free_fileref.inc"
 static bool is_subvol_readonly(root* r, PIRP irp) { CHECK(r == &parent_root && irp == &request_irp); return false; }
 static unsigned RtlConvertLongToLuid(unsigned value) { return value; }
 static bool SeSinglePrivilegeCheck(unsigned privilege, int mode) {
@@ -258,9 +271,15 @@ static void insert_dir_child_into_hash_lists(fcb* parent, dir_child* dc) {
 static void KeQuerySystemTime(LARGE_INTEGER* time) { time->QuadPart=123; }
 static void win_time_to_unix(LARGE_INTEGER time, struct btrfs_timespec* now) { (void)time; memset(now,0,sizeof(*now)); }
 static void* ExAllocateFromPagedLookasideList(LOOKASIDE* list) {
-    CHECK(list == &volume.fcb_lookaside && !list->live);
-    fcb_calls++;
-    if (hit(FCB_ALLOC)) return NULL;
+    CHECK(!list->live);
+    if (list == &volume.fcb_lookaside) {
+        fcb_calls++;
+        if (hit(FCB_ALLOC)) return NULL;
+    } else {
+        CHECK(list == &volume.fileref_lookaside);
+        fileref_calls++;
+        if (hit(FILEREF_ALLOC)) return NULL;
+    }
     list->allocations++; list->live=true;
     return list->object;
 }
@@ -275,8 +294,13 @@ static void ExFreeToNPagedLookasideList(LOOKASIDE* list, void* object) {
     list->live=false; list->returns++;
 }
 static void ExFreeToPagedLookasideList(LOOKASIDE* list, void* object) {
-    CHECK(list == &volume.fcb_lookaside && list->live && object == list->object);
-    CHECK(!volume.fcb_np_lookaside.live && !stream_contexts && !child_fcb.lock && !child_fcb.oplock);
+    CHECK(list->live && object == list->object);
+    if (list == &volume.fcb_lookaside) {
+        CHECK(!volume.fileref_lookaside.live);
+        CHECK(!volume.fcb_np_lookaside.live && !stream_contexts && !child_fcb.lock && !child_fcb.oplock);
+    } else {
+        CHECK(list == &volume.fileref_lookaside && child_fcb.refcount == 0);
+    }
     list->live=false; list->returns++;
 }
 static void ExInitializeResourceLite(ERESOURCE* r) { CHECK(!r->initialized); r->initialized=true; }
@@ -290,19 +314,29 @@ static int* fcb_oplock(fcb* child) { return &child->oplock; }
 static void FsRtlInitializeOplock(int* lock) { CHECK(!*lock); *lock=1; }
 static void FsRtlUninitializeOplock(int* lock) { CHECK(*lock == 1); *lock=0; }
 #include "create_fcb.inc"
+#include "create_fileref.inc"
 #define reap_fcb actual_reap_fcb
 #include "reap_fcb.inc"
 #undef reap_fcb
 static void reap_fcb(fcb* child) {
-    CHECK(child == &child_fcb && reaps++ == 0 && !inserted);
-    CHECK(child->refcount == 1);
+    CHECK(child == &child_fcb && reaps++ == 0);
+    CHECK(child->refcount == (fileref_reaps ? 0 : 1));
     CHECK(!volume.fcb_lock.held && !volume.fileref_lock.held && !parent_resource.held);
     actual_reap_fcb(child);
 }
-static file_ref* create_fileref(device_extension* vcb) { CHECK(vcb == &volume); fileref_calls++; return hit(FILEREF_ALLOC) ? NULL : &child_ref; }
-/* Fileref rollback remains modeled; direct rejection cleanup exercises the
- * real FCB destructor independently of that fixture. */
-static void free_fileref(file_ref* ref) { CHECK(ref == &child_ref && reaps++ == 0); actual_reap_fcb(ref->fcb); }
+#define reap_fileref actual_reap_fileref
+#include "reap_fileref.inc"
+#undef reap_fileref
+void reap_fileref(device_extension* vcb, file_ref* ref) {
+    CHECK(vcb == &volume && ref == &child_ref && fileref_reaps++ == 0);
+    CHECK(IsListEmpty(&ref->children));
+    if (inserted)
+        CHECK(ref->parent == &parent_ref && ref->dc && ref->list_entry.Flink && ref->refcount == 0);
+    else
+        CHECK(!ref->parent && !ref->dc && !ref->list_entry.Flink);
+    CHECK(!volume.fcb_lock.held && !volume.fileref_lock.held && !parent_resource.held);
+    actual_reap_fileref(vcb,ref);
+}
 static uint32_t inherit_mode(fcb* parent, bool directory) { CHECK(parent == &parent_fcb); (void)directory; return 0755; }
 static unsigned fast_io_possible(fcb* child) { CHECK(child == &child_fcb); return 1; }
 static void SeCaptureSubjectContext(SECURITY_SUBJECT_CONTEXT* context) { *context=1; }
@@ -325,9 +359,9 @@ static uint32_t sid_to_uid(PSID owner) { CHECK(owner == &child_fcb); return 1000
 static void find_gid(fcb* child, fcb* parent, SECURITY_SUBJECT_CONTEXT* context) { CHECK(child == &child_fcb && parent == &parent_fcb && *context == 1); child->inode_item.gid=1000; }
 static void acquire_fcb_lock_exclusive(device_extension* vcb) { ExAcquireResourceExclusiveLite(&vcb->fcb_lock,true); }
 static void release_fcb_lock(device_extension* vcb) { ExReleaseResourceLite(&vcb->fcb_lock); }
-static void increase_fileref_refcount(file_ref* ref) { ref->refcount++; }
-static void mark_fcb_dirty(fcb* child) { CHECK(child == &parent_fcb || child == &child_fcb); }
-static void mark_fileref_dirty(file_ref* ref) { CHECK(ref == &child_ref); }
+static void increase_fileref_refcount(file_ref* ref) { InterlockedIncrement(&ref->refcount); }
+#include "mark_fcb_dirty.inc"
+#include "mark_fileref_dirty.inc"
 static void send_notification_fileref(file_ref* ref, ULONG filter, ULONG action, PUNICODE_STRING stream) {
     CHECK(ref == &child_ref && (filter == FILE_NOTIFY_CHANGE_FILE_NAME || filter == FILE_NOTIFY_CHANGE_DIR_NAME) && action == FILE_ACTION_ADDED && !stream); notifications++;
 }
@@ -354,6 +388,8 @@ static uint32_t (*calc_crc32c)(uint32_t,uint8_t*,uint32_t)=calc_crc32c_sw;
 #include "add_dir_child.inc"
 #include "add_fcb_to_subvol.inc"
 #include "mknod.inc"
+#include "reap_filerefs.inc"
+#include "reap_fcbs.inc"
 
 static void setup(void) {
     parent_fcb=(fcb){.Vcb=&volume,.subvol=&parent_root,.type=BTRFS_FT_DIR,.refcount=1,.nonpaged=&parent_np,.hash_ptrs=parent_hash,.hash_ptrs_uc=parent_hash_uc};
@@ -361,16 +397,19 @@ static void setup(void) {
     parent_fcb.sd=&parent_security_descriptor;
     volume.fcb_lookaside.object=&child_fcb;
     volume.fcb_np_lookaside.object=&child_np;
+    volume.fileref_lookaside.object=&child_ref;
     parent_root.id=5; parent_root.lastinode=current->lastinode ? current->lastinode : 1000;
     other_root.id=6; other_root.lastinode=2000;
     InitializeListHead(&parent_root.fcbs); InitializeListHead(&other_root.fcbs);
     InitializeListHead(&parent_fcb.dir_children_index); InitializeListHead(&parent_fcb.dir_children_hash); InitializeListHead(&parent_fcb.dir_children_hash_uc);
     parent_ref.fcb=&parent_fcb; parent_ref.refcount=1; child_ref.refcount=1;
+    volume.root_fileref=&parent_ref;
     InitializeListHead(&parent_ref.children); InitializeListHead(&child_ref.children);
     parent_ccb.fileref=&parent_ref; parent_ccb.access=current->deny_access ? 0 : FILE_ADD_FILE|FILE_ADD_SUBDIRECTORY;
     parent_file=(FILE_OBJECT){&parent_fcb,&parent_ccb};
     volume.superblock.generation=42;
     InitializeListHead(&volume.all_fcbs); InitializeListHead(&volume.roots);
+    InitializeListHead(&volume.dirty_fcbs); InitializeListHead(&volume.dirty_filerefs);
     if (current->cache_collision || current->other_root_collision) {
         occupied_fcb.inode=current->inode;
         occupied_fcb.hash=calc_crc32c(0xffffffff,(uint8_t*)&occupied_fcb.inode,sizeof(uint64_t));
@@ -412,6 +451,11 @@ static void run(void) {
     CHECK(privilege_calls == (current->inode != 0 && !current->deny_access ? 1u : 0u));
     CHECK(security_calls == (volume.fcb_lookaside.allocations ? 1u : 0u));
     CHECK(!volume.fcb_lock.held && !volume.fileref_lock.held && !parent_resource.held && !parent_np.dir_children_lock.held);
+    int32_t expected_parent_refs=NT_SUCCESS(status) ? 2 : 1;
+    if (parent_fcb.refcount != expected_parent_refs)
+        fprintf(stderr,"%s: parent FCB refcount=%d, expected=%d\n",scenario,parent_fcb.refcount,expected_parent_refs);
+    CHECK(parent_fcb.refcount == expected_parent_refs);
+    CHECK(parent_ref.refcount == (NT_SUCCESS(status) ? 2 : 1));
     if (NT_SUCCESS(status)) {
         uint64_t previous=current->lastinode ? (uint64_t)current->lastinode : 1000;
         uint64_t expected=current->inode ? current->inode : previous + 1;
@@ -427,24 +471,29 @@ static void run(void) {
         CHECK(child_fcb.created && child_ref.created && child_fcb.type == current->type && notifications == 2);
         CHECK(child_ref.dc->utf8.Length == 5 && !memcmp(child_ref.dc->utf8.Buffer,"alpha",5));
         CHECK(parent_fcb.inode_item.size == 10 && parent_root.fcbs_version == 1 && reaps == 0);
+        CHECK(volume.fileref_lookaside.live && fileref_reaps == 0);
+        if (child_ref.refcount != 1)
+            fprintf(stderr,"%s: child fileref refcount=%d, expected=1 (dirty queue only)\n",scenario,child_ref.refcount);
+        CHECK(child_ref.parent == &parent_ref && child_fcb.refcount == 2 && child_ref.refcount == 1);
+        CHECK(parent_fcb.dirty && child_fcb.dirty && child_ref.dirty);
         inserted=true;
     } else {
         CHECK(notifications == 0 && IsListEmpty(&parent_ref.children) && IsListEmpty(&volume.all_fcbs));
-        if (volume.fcb_lookaside.live || volume.fcb_np_lookaside.live) {
+        if (volume.fcb_lookaside.live || volume.fcb_np_lookaside.live || volume.fileref_lookaside.live) {
             size_t bytes=0;
             for (unsigned i=0;i<pool_count;i++) if (pools[i].live) bytes+=pools[i].size;
-            fprintf(stderr,"%s: outstanding FCB=%u, nonpaged FCB=%u, pool bytes=%zu, destroyed resources=%u/3\n",
-                    scenario,volume.fcb_lookaside.live,volume.fcb_np_lookaside.live,bytes,destroyed_resources);
+            fprintf(stderr,"%s: outstanding FCB=%u, nonpaged FCB=%u, fileref=%u, pool bytes=%zu, destroyed resources=%u/3\n",
+                    scenario,volume.fcb_lookaside.live,volume.fcb_np_lookaside.live,volume.fileref_lookaside.live,bytes,destroyed_resources);
         }
         CHECK(reaps == (fcb_calls && current->fault != FCB_ALLOC ? 1u : 0u));
         CHECK(!volume.fcb_lookaside.live && !volume.fcb_np_lookaside.live && !stream_contexts);
+        CHECK(!volume.fileref_lookaside.live);
+        CHECK(volume.fileref_lookaside.allocations == volume.fileref_lookaside.returns);
+        CHECK(fileref_reaps == volume.fileref_lookaside.allocations);
         CHECK(volume.fcb_lookaside.allocations == volume.fcb_lookaside.returns);
         CHECK(volume.fcb_np_lookaside.allocations == volume.fcb_np_lookaside.returns);
         if (reaps) CHECK(destroyed_resources == 3);
         if (current->cache_collision || current->disk_collision || current->fault == TREE_ERROR) {
-            if (parent_fcb.refcount != 1)
-                fprintf(stderr,"%s: parent FCB refcount=%d, expected=1\n",scenario,parent_fcb.refcount);
-            CHECK(parent_fcb.refcount == 1);
             CHECK(fcb_calls == 1 && fileref_calls == 0);
             CHECK(volume.fcb_lookaside.allocations == 1 && volume.fcb_np_lookaside.allocations == 1);
             CHECK(parent_root.fcbs.Flink == cached_head && parent_root.fcbs.Blink == cached_tail);
@@ -456,6 +505,30 @@ static void run(void) {
     CHECK(tree_calls == (current->inode && current->inode <= (uint64_t)(current->lastinode ? current->lastinode : 1000) && !current->deny_privilege && !current->deny_access &&
                          !current->cache_collision && current->fault != NAME_INVALID && current->fault != SECURITY &&
                          current->fault != FCB_ALLOC && !current->name_collision ? 1u : 0u));
+    /* Model completion of the dirty queues, using the real reference release
+     * routines. This does not exercise persistence or the flush worker. */
+    while (!IsListEmpty(&volume.dirty_fcbs)) {
+        fcb* node=CONTAINING_RECORD(RemoveHeadList(&volume.dirty_fcbs),fcb,list_entry_dirty);
+        CHECK(node->dirty); node->dirty=false; free_fcb(node);
+    }
+    while (!IsListEmpty(&volume.dirty_filerefs)) {
+        file_ref* ref=CONTAINING_RECORD(RemoveHeadList(&volume.dirty_filerefs),file_ref,list_entry_dirty);
+        CHECK(ref->dirty); ref->dirty=false; free_fileref(ref);
+    }
+    CHECK(parent_fcb.refcount == 1);
+    CHECK(!volume.dirty_fcbs_lock.held && !volume.dirty_filerefs_lock.held);
+    if (inserted) {
+        dir_child* entry=child_ref.dc;
+        CHECK(child_ref.refcount == 0 && child_fcb.refcount == 1);
+        reap_filerefs(&volume);
+        reap_fcbs(&volume);
+        CHECK(parent_ref.refcount == 1 && parent_fcb.refcount == 1);
+        CHECK(reaps == 1 && fileref_reaps == 1 && destroyed_resources == 3);
+        CHECK(!volume.fileref_lookaside.live && !volume.fcb_lookaside.live && !volume.fcb_np_lookaside.live);
+        CHECK(!entry->fileref && IsListEmpty(&parent_ref.children) && IsListEmpty(&volume.all_fcbs));
+        CHECK(parent_root.fcbs.Flink == cached_head && parent_root.fcbs.Blink == cached_tail);
+        CHECK(!memcmp(cached_buckets,parent_root.fcbs_ptrs,sizeof(cached_buckets)));
+    }
     for (unsigned i=0;i<pool_count;i++) {
         if (pools[i].temporary) CHECK(!pools[i].live);
         if (!inserted) CHECK(!pools[i].live);
@@ -490,6 +563,7 @@ int main(int argc, char** argv) {
         {.name="parent-access-denied",.type=BTRFS_FT_DIR,.deny_access=true,.expected=STATUS_ACCESS_DENIED},
         {.name="name-collision",.type=BTRFS_FT_REG_FILE,.name_collision=true,.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="invalid-name",.type=BTRFS_FT_REG_FILE,.fault=NAME_INVALID,.expected=STATUS_OBJECT_NAME_INVALID},
+        {.name="directory-invalid-name",.type=BTRFS_FT_DIR,.fault=NAME_INVALID,.expected=STATUS_OBJECT_NAME_INVALID},
         {.name="temporary-allocation",.type=BTRFS_FT_REG_FILE,.fault=POOL_ALLOC,.allocator="mknod",.allocation_index=1,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="fcb-allocation",.type=BTRFS_FT_REG_FILE,.fault=FCB_ALLOC,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="security-failure",.type=BTRFS_FT_REG_FILE,.fault=SECURITY,.expected=STATUS_ACCESS_DENIED},
@@ -497,10 +571,15 @@ int main(int argc, char** argv) {
         {.name="directory-hash-allocation",.type=BTRFS_FT_DIR,.fault=POOL_ALLOC,.allocator="mknod",.allocation_index=2,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="directory-uppercase-hash-allocation",.type=BTRFS_FT_DIR,.fault=POOL_ALLOC,.allocator="mknod",.allocation_index=3,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="fileref-allocation",.type=BTRFS_FT_REG_FILE,.fault=FILEREF_ALLOC,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="directory-fileref-allocation",.type=BTRFS_FT_DIR,.fault=FILEREF_ALLOC,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="child-allocation",.type=BTRFS_FT_REG_FILE,.fault=POOL_ALLOC,.allocator="add_dir_child",.allocation_index=1,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="child-name-allocation",.type=BTRFS_FT_REG_FILE,.fault=POOL_ALLOC,.allocator="add_dir_child",.allocation_index=2,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="child-unicode-allocation",.type=BTRFS_FT_REG_FILE,.fault=POOL_ALLOC,.allocator="add_dir_child",.allocation_index=3,.expected=STATUS_INSUFFICIENT_RESOURCES},
         {.name="uppercase-failure",.type=BTRFS_FT_REG_FILE,.fault=UPPERCASE,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="directory-child-allocation",.type=BTRFS_FT_DIR,.fault=POOL_ALLOC,.allocator="add_dir_child",.allocation_index=1,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="directory-child-name-allocation",.type=BTRFS_FT_DIR,.fault=POOL_ALLOC,.allocator="add_dir_child",.allocation_index=2,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="directory-child-unicode-allocation",.type=BTRFS_FT_DIR,.fault=POOL_ALLOC,.allocator="add_dir_child",.allocation_index=3,.expected=STATUS_INSUFFICIENT_RESOURCES},
+        {.name="directory-uppercase-failure",.type=BTRFS_FT_DIR,.fault=UPPERCASE,.expected=STATUS_INSUFFICIENT_RESOURCES},
     };
     if (argc == 2 && !strcmp(argv[1],"--list")) {
         for (unsigned i=0;i<sizeof(cases)/sizeof(cases[0]);i++) puts(cases[i].name);
