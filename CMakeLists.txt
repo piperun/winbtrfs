@@ -98,6 +98,7 @@ set(SRC_FILES src/balance.c
     src/fsctl.c
     src/fsrtl.c
     src/galois.c
+    src/mknod.c
     src/pnp.c
     src/read.c
     src/registry.c
