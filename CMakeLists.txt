@@ -88,6 +88,7 @@ set(SRC_FILES src/balance.c
     src/compress.c
     src/crc32c.c
     src/create.c
+    src/file-create.c
     src/devctrl.c
     src/dirctrl.c
     src/extent-tree.c

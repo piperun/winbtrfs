@@ -16,10 +16,14 @@ args = parser.parse_args()
 repo, out = args.repo.resolve(), args.build_dir.resolve()
 out.mkdir(parents=True, exist_ok=True)
 
-def read(path):
+def read(path, optional=False):
     if args.revision:
-        return subprocess.check_output(["git", "-C", str(repo), "show", f"{args.revision}:{path}"], text=True)
-    return (repo / path).read_text()
+        result = subprocess.run(["git", "-C", str(repo), "show", f"{args.revision}:{path}"], text=True, capture_output=True)
+        if result.returncode and not optional:
+            raise RuntimeError(result.stderr)
+        return result.stdout if result.returncode == 0 else ""
+    p = repo / path
+    return p.read_text() if p.exists() or not optional else ""
 
 def function(source, marker):
     start = source.index(marker)
@@ -32,8 +36,10 @@ def function(source, marker):
 
 create, btrfs = read("src/create.c"), read("src/btrfs.c")
 license_header = create[:create.index("#include")]
-for name, marker in [("file_create2", "static NTSTATUS file_create2("),
-                     ("create_stream", "static NTSTATUS create_stream("),
+ordinary = read("src/file-create.c", optional=True) or create
+marker = "static NTSTATUS file_create2(" if "static NTSTATUS file_create2(" in ordinary else "NTSTATUS file_create2("
+(out / "file_create2.inc").write_text(license_header + function(ordinary, marker))
+for name, marker in [("create_stream", "static NTSTATUS create_stream("),
                      ("create_fcb", "fcb* create_fcb("),
                      ("create_fileref", "file_ref* create_fileref("),
                      ("add_dir_child", "NTSTATUS add_dir_child(")]:
