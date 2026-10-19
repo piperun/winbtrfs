@@ -157,6 +157,40 @@ parent. The helper returns an extra parent hold on success; the caller
 releases that hold once, transfers collision filerefs unchanged, and
 cleans up the original lookup parent according to its own ownership.
 
+Reproduce ADS FCB cache hash collisions:
+
+```sh
+python3 tests/create/check_create.py . --revision 34559bd4 --build-dir build/create-tests-ads-before
+```
+
+This baseline passes 141/155 cases. All 135 earlier cases pass. Fourteen
+new cases return another stream's cached FCB and its 12-byte payload
+instead of the requested stream's seven bytes. The fixture uses real
+CRC32C collisions with seed `0xfffffffe` over the complete UTF-8 xattr
+name, including the `user.` prefix. Production CRC32C verifies every pair:
+
+| Stream names | Hash |
+| --- | --- |
+| `adse585dd69ca30abba` / `ads7915a8e899062b68` | `0x930e70cc` |
+| `ads0cf29dd4fd238ad1` / `other554fc677dabbdbed` | `0x9aa368a1` |
+| `prefix` / `prefixfVKbGQ` | `0x36a5fa3c` |
+
+The cache must compare the xattr name length and every name byte after
+matching the inode and hash. Allocation capacity is not identity. The
+namespace lookup has already selected the canonical spelling, including
+for case-insensitive requests, so this comparison uses exact UTF-8 bytes.
+
+Twenty added cases cover equal-length and different-length names in both
+directions, a shared-prefix collision, warm/cold target caches, the
+matching FCB before and after the colliding FCB, directory bases, paging,
+case folding, direct child opens, stream creation and outer dispatch.
+Controls check reuse of the same name with a different allocation
+capacity, competing fileref publication, and xattr-read, metadata and
+fileref-allocation failures. The other cached FCB retains its original
+name, data, size and reference count after the requested stream is closed
+and reaped. The same ownership, cache, resource and allocation checks
+apply to all 155 scenarios.
+
 The harness extracts the actual `file_create2`, `create_stream`, FCB and
 fileref constructors, dirty-queue insertion, reference releases, cache
 reapers, directory-entry creation and lookup, child fileref opening,
@@ -188,6 +222,5 @@ is modeled false, and share-access operations are counted host services. Sanitiz
 Windows pool behavior or concurrency. Windows runtime testing is still
 required.
 
-Stream FCB cache matching still uses the ADS hash without the full xattr
-name. The missing-base access-denied path also retains a copied filename
-buffer. Those pre-existing defects are unchanged.
+The missing-base access-denied path still retains a copied filename
+buffer. That pre-existing defect is unchanged.

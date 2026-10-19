@@ -204,7 +204,9 @@ NTSTATUS open_fileref_child(_Requires_lock_held_(_Curr_->tree_lock) _Requires_ex
                 struct _fcb* fcb2 = CONTAINING_RECORD(le, struct _fcb, list_entry);
 
                 if (fcb2->inode == fcb->inode) {
-                    if (fcb2->ads && fcb2->adshash == fcb->adshash) { // FIXME - handle hash collisions
+                    if (fcb2->ads && fcb2->adshash == fcb->adshash &&
+                        fcb2->adsxattr.Length == fcb->adsxattr.Length &&
+                        RtlCompareMemory(fcb2->adsxattr.Buffer, fcb->adsxattr.Buffer, fcb->adsxattr.Length) == fcb->adsxattr.Length) {
                         duff_fcb = fcb;
                         fcb = fcb2;
                         break;

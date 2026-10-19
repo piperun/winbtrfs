@@ -20,6 +20,8 @@ typedef struct {
     const WCHAR *stream_name, *cached_stream_name;
     bool reaped_stream, cold_stream, reopen_only, install_stream, bad_stream_key, short_stream_item;
     bool dispatch, loaded_related, relative_stream, data_suffix;
+    const char* colliding_xattr;
+    bool collider_after_target;
 } test_case;
 static const test_case* current;
 static device_extension volume;
@@ -405,6 +407,8 @@ static void setup(void) {
     if (current->preallocate) irp.Overlay.AllocationSize.QuadPart=8192;
     if (current->dispatch && !current->insensitive) irp.stack.Flags |= SL_CASE_SENSITIVE;
 }
+#include "ads_cache_test.inc"
+
 static void drain_dirty(void) {
     while (!IsListEmpty(&volume.dirty_fcbs)) {
         fcb* node=CONTAINING_RECORD(RemoveHeadList(&volume.dirty_fcbs),fcb,list_entry_dirty);
@@ -425,6 +429,7 @@ static void release_cached_entries(fcb* parent) {
 }
 static void run(void) {
     setup();
+    setup_ads_cache();
     LIST_ENTRY *cache_head=subvol.fcbs.Flink, *cache_tail=subvol.fcbs.Blink;
     LIST_ENTRY* buckets[256]; memcpy(buckets,subvol.fcbs_ptrs,sizeof(buckets));
     const WCHAR* requested=current->requested_name ? current->requested_name : (const WCHAR*)L"alpha";
@@ -457,6 +462,7 @@ static void run(void) {
         fprintf(stderr,"%s: status=%#x, expected=%#x, returned existing=%u\n",
                 scenario,(unsigned)status,(unsigned)current->expected,result == &base_ref);
     CHECK(status == current->expected);
+    check_ads_result(result);
     if (current->existing_entry) {
         unsigned entries=0;
         for (LIST_ENTRY* le=directory_fcb.dir_children_index.Flink;le != &directory_fcb.dir_children_index;le=le->Flink) entries++;
@@ -567,6 +573,7 @@ static void run(void) {
     CHECK(subvol.fcbs.Flink == cache_head && subvol.fcbs.Blink == cache_tail);
     CHECK(!memcmp(buckets,subvol.fcbs_ptrs,sizeof(buckets)));
     if (warm_stream_fcb) { CHECK(warm_stream_fcb->refcount == 1); free_fcb(warm_stream_fcb); reap_fcbs(&volume); }
+    release_ads_cache();
     CHECK(volume.fcb_lookaside.allocations == volume.fcb_lookaside.returns);
     CHECK(volume.fcb_np_lookaside.allocations == volume.fcb_np_lookaside.returns);
     CHECK(volume.fileref_lookaside.allocations == volume.fileref_lookaside.returns);
@@ -585,6 +592,7 @@ static void run(void) {
 }
 int main(int argc, char** argv) {
     static const test_case cases[]={
+        #include "ads_cache_cases.inc"
         {.name="dispatch-stream-live",.dispatch=true,.stream=true,.existing_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="dispatch-stream-live-borrowed",.dispatch=true,.loaded_related=true,.stream=true,.existing_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="dispatch-stream-relative",.dispatch=true,.loaded_related=true,.relative_stream=true,.stream=true,.existing_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
