@@ -34,11 +34,11 @@ uint32_t get_num_of_processors() {
 NTSTATUS create_calc_threads(_In_ PDEVICE_OBJECT DeviceObject) {
     device_extension* Vcb = DeviceObject->DeviceExtension;
     OBJECT_ATTRIBUTES oa;
-    ULONG i;
+    ULONG i, num_threads = get_num_of_processors();
 
-    Vcb->calcthreads.num_threads = get_num_of_processors();
+    Vcb->calcthreads.num_threads = 0;
 
-    Vcb->calcthreads.threads = ExAllocatePoolWithTag(NonPagedPool, sizeof(drv_calc_thread) * Vcb->calcthreads.num_threads, ALLOC_TAG);
+    Vcb->calcthreads.threads = ExAllocatePoolWithTag(NonPagedPool, sizeof(drv_calc_thread) * num_threads, ALLOC_TAG);
     if (!Vcb->calcthreads.threads) {
         ERR("out of memory\n");
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -48,31 +48,25 @@ NTSTATUS create_calc_threads(_In_ PDEVICE_OBJECT DeviceObject) {
     KeInitializeSpinLock(&Vcb->calcthreads.spinlock);
     KeInitializeEvent(&Vcb->calcthreads.event, NotificationEvent, false);
 
-    RtlZeroMemory(Vcb->calcthreads.threads, sizeof(drv_calc_thread) * Vcb->calcthreads.num_threads);
+    RtlZeroMemory(Vcb->calcthreads.threads, sizeof(drv_calc_thread) * num_threads);
 
     InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
 
-    for (i = 0; i < Vcb->calcthreads.num_threads; i++) {
+    for (i = 0; i < num_threads; i++) {
         NTSTATUS Status;
 
         Vcb->calcthreads.threads[i].DeviceObject = DeviceObject;
         Vcb->calcthreads.threads[i].number = i;
         KeInitializeEvent(&Vcb->calcthreads.threads[i].finished, NotificationEvent, false);
 
-        Status = PsCreateSystemThread(&Vcb->calcthreads.threads[i].handle, 0, &oa, NULL, NULL, calc_thread, &Vcb->calcthreads.threads[i]);
+        Status = PsCreateSystemThread(&Vcb->calcthreads.threads[i].handle, SYNCHRONIZE, &oa, NULL, NULL, calc_thread, &Vcb->calcthreads.threads[i]);
         if (!NT_SUCCESS(Status)) {
-            ULONG j;
-
             ERR("PsCreateSystemThread returned %08lx\n", Status);
-
-            for (j = 0; j < i; j++) {
-                Vcb->calcthreads.threads[i].quit = true;
-            }
-
-            KeSetEvent(&Vcb->calcthreads.event, 0, false);
-
+            stop_calc_threads(Vcb);
             return Status;
         }
+
+        Vcb->calcthreads.num_threads++;
     }
 
     return STATUS_SUCCESS;
@@ -81,27 +75,38 @@ NTSTATUS create_calc_threads(_In_ PDEVICE_OBJECT DeviceObject) {
 void stop_calc_threads(_In_ device_extension* Vcb) {
     ULONG i;
 
+    if (!Vcb->calcthreads.threads)
+        return;
+
     for (i = 0; i < Vcb->calcthreads.num_threads; i++) {
         Vcb->calcthreads.threads[i].quit = true;
     }
 
     KeSetEvent(&Vcb->calcthreads.event, 0, false);
 
+    // The finished event is signaled before the thread has terminated.
     for (i = 0; i < Vcb->calcthreads.num_threads; i++) {
-        KeWaitForSingleObject(&Vcb->calcthreads.threads[i].finished, Executive, KernelMode, false, NULL);
-
+        ZwWaitForSingleObject(Vcb->calcthreads.threads[i].handle, false, NULL);
         ZwClose(Vcb->calcthreads.threads[i].handle);
     }
 
     ExFreePool(Vcb->calcthreads.threads);
+    Vcb->calcthreads.threads = NULL;
+    Vcb->calcthreads.num_threads = 0;
 }
 
 void stop_flush_thread(_In_ device_extension* Vcb) {
     LARGE_INTEGER time;
 
+    if (!Vcb->flush_thread_handle)
+        return;
+
+    // The caller marks the volume removing before waking this thread.
     time.QuadPart = 0;
     KeSetTimer(&Vcb->flush_thread_timer, time, NULL); // trigger the timer early
-    KeWaitForSingleObject(&Vcb->flush_thread_finished, Executive, KernelMode, false, NULL);
+    ZwWaitForSingleObject(Vcb->flush_thread_handle, false, NULL);
+    ZwClose(Vcb->flush_thread_handle);
+    Vcb->flush_thread_handle = NULL;
 }
 
 static void do_flush(device_extension* Vcb) {
@@ -130,13 +135,10 @@ void __stdcall flush_thread(void* context) {
 
     ObReferenceObject(devobj);
 
-    KeInitializeTimer(&Vcb->flush_thread_timer);
-
     due_time.QuadPart = (uint64_t)Vcb->options.flush_interval * -10000000;
 
-    KeSetTimer(&Vcb->flush_thread_timer, due_time, NULL);
-
-    while (true) {
+    // Rearming after do_flush can overwrite the shutdown timer wakeup.
+    while (!Vcb->removing) {
         KeWaitForSingleObject(&Vcb->flush_thread_timer, Executive, KernelMode, false, NULL);
 
         if (!(devobj->Vpb->Flags & VPB_MOUNTED) || Vcb->removing)

@@ -2009,7 +2009,6 @@ static NTSTATUS close_file(_In_ PFILE_OBJECT FileObject, _In_ PIRP Irp) {
 }
 
 void uninit(_In_ device_extension* Vcb) {
-    uint64_t i;
     KIRQL irql;
     NTSTATUS Status;
     LIST_ENTRY* le;
@@ -2080,9 +2079,9 @@ void uninit(_In_ device_extension* Vcb) {
     if (!NT_SUCCESS(Status) && Status != STATUS_TOO_LATE)
         WARN("registry_mark_volume_unmounted returned %08lx\n", Status);
 
-    stop_calc_threads(Vcb);
-
     stop_flush_thread(Vcb);
+
+    stop_calc_threads(Vcb);
 
     reap_fcb(Vcb->volume_fcb);
     reap_fcb(Vcb->dummy_fcb);
@@ -2197,8 +2196,6 @@ void uninit(_In_ device_extension* Vcb) {
     ExDeletePagedLookasideList(&Vcb->name_bit_lookaside);
     ExDeleteNPagedLookasideList(&Vcb->range_lock_lookaside);
     ExDeleteNPagedLookasideList(&Vcb->fcb_np_lookaside);
-
-    ZwClose(Vcb->flush_thread_handle);
 
     if (Vcb->devobj->AttachedDevice)
         IoDetachDevice(Vcb->devobj);
@@ -4338,6 +4335,7 @@ static NTSTATUS mount_vol(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
     device_extension* real_devext;
     KIRQL irql;
     bool direct_mount = false;
+    LARGE_INTEGER due_time;
 
     TRACE("(%p, %p)\n", DeviceObject, Irp);
 
@@ -4942,6 +4940,25 @@ static NTSTATUS mount_vol(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
         le = le->Flink;
     }
 
+    // Keep the VPB private until all volume threads have been created.
+    Status = create_calc_threads(NewDeviceObject);
+    if (!NT_SUCCESS(Status)) {
+        ERR("create_calc_threads returned %08lx\n", Status);
+        goto exit;
+    }
+
+    KeInitializeTimer(&Vcb->flush_thread_timer);
+    KeInitializeEvent(&Vcb->flush_thread_finished, NotificationEvent, false);
+
+    InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    Status = PsCreateSystemThread(&Vcb->flush_thread_handle, SYNCHRONIZE, &oa, NULL, NULL, flush_thread, NewDeviceObject);
+    if (!NT_SUCCESS(Status)) {
+        ERR("PsCreateSystemThread returned %08lx\n", Status);
+        stop_calc_threads(Vcb);
+        goto exit;
+    }
+
     IoAcquireVpbSpinLock(&irql);
 
     NewDeviceObject->Vpb = IrpSp->Parameters.MountVolume.Vpb;
@@ -4954,21 +4971,8 @@ static NTSTATUS mount_vol(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
 
     IoReleaseVpbSpinLock(irql);
 
-    KeInitializeEvent(&Vcb->flush_thread_finished, NotificationEvent, false);
-
-    InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
-
-    Status = PsCreateSystemThread(&Vcb->flush_thread_handle, 0, &oa, NULL, NULL, flush_thread, NewDeviceObject);
-    if (!NT_SUCCESS(Status)) {
-        ERR("PsCreateSystemThread returned %08lx\n", Status);
-        goto exit;
-    }
-
-    Status = create_calc_threads(NewDeviceObject);
-    if (!NT_SUCCESS(Status)) {
-        ERR("create_calc_threads returned %08lx\n", Status);
-        goto exit;
-    }
+    due_time.QuadPart = (uint64_t)Vcb->options.flush_interval * -10000000;
+    KeSetTimer(&Vcb->flush_thread_timer, due_time, NULL);
 
     Status = registry_mark_volume_mounted(Vcb->superblock.fsid);
     if (!NT_SUCCESS(Status))
