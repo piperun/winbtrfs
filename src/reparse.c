@@ -549,6 +549,11 @@ NTSTATUS delete_reparse_point(PIRP Irp) {
         goto end;
     }
 
+    if (fcb->type != BTRFS_FT_SYMLINK && !(fcb->atts & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        Status = STATUS_NOT_A_REPARSE_POINT;
+        goto end;
+    }
+
     if (fcb->type == BTRFS_FT_SYMLINK) {
         LARGE_INTEGER time;
         struct btrfs_timespec now;
@@ -576,6 +581,7 @@ NTSTATUS delete_reparse_point(PIRP Irp) {
             fileref->fcb->inode_item.mtime = now;
 
         fileref->fcb->atts &= ~FILE_ATTRIBUTE_REPARSE_POINT;
+        fileref->fcb->atts_changed = true;
 
         if (fileref->dc)
             fileref->dc->type = fileref->fcb->type;
