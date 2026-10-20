@@ -12,6 +12,7 @@ parser.add_argument("--revision")
 parser.add_argument("--build-dir", type=Path, required=True)
 parser.add_argument("--init", choices=["pattern", "zero"], default="pattern")
 parser.add_argument("--sanitize", action="store_true")
+parser.add_argument("--rust-object", type=Path)
 args = parser.parse_args()
 repo, out = args.repo.resolve(), args.build_dir.resolve()
 out.mkdir(parents=True, exist_ok=True)
@@ -46,7 +47,15 @@ math_source = read_optional("src/range-math.c")
 if math_header is not None and math_source is not None:
     (out / "range-math.h").write_text(math_header)
     (out / "range-math.c").write_text(math_source)
-    helpers.append(str(out / "range-math.c"))
+    if args.rust_object:
+        rust_object = args.rust_object.resolve()
+        if not rust_object.is_file():
+            parser.error("--rust-object must name an existing host object")
+        helpers.append(str(rust_object))
+    else:
+        helpers.append(str(out / "range-math.c"))
+elif args.rust_object:
+    parser.error("--rust-object requires a revision with the extracted range helper")
 math_include = '#include "range-math.h"\n' if helpers else ''
 (out / "query.inc").write_text(macros + "\n" + math_include + checksum[checksum.index("static NTSTATUS add_csum_sparse_extents("):]
                                + "\n" + ranges[ranges.index(range_start):])
@@ -64,5 +73,6 @@ for case in cases:
     if result.returncode:
         print(f"FAIL {case}: exit {result.returncode}", flush=True)
         failed += 1
-print(f"{len(cases)-failed}/{len(cases)} scenarios passed (locals: {args.init})", flush=True)
+backend = 'Rust' if args.rust_object else 'C'
+print(f"{len(cases)-failed}/{len(cases)} scenarios passed (locals: {args.init}, ranges: {backend})", flush=True)
 raise SystemExit(bool(failed))

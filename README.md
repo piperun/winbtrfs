@@ -139,6 +139,19 @@ To compile with GCC on Linux, you will need a cross-compiler set up, for either
 either `mingw-x86.cmake` or `mingw-amd64.cmake` as CMake toolchain files to
 generate your Makefile.
 
+Allocated-range clipping uses C by default. For an optional x64 MinGW build
+that uses the Rust implementation, provide a `rustc` executable with the
+`x86_64-pc-windows-gnu` target installed:
+
+```
+cmake -S . -B build/rust-amd64 -DCMAKE_TOOLCHAIN_FILE=mingw-amd64.cmake \
+  -DWITH_RUST_RANGES=ON -DBTRFS_RUSTC=/absolute/path/to/rustc
+cmake --build build/rust-amd64 --target btrfs
+```
+
+This option applies only to `btrfs.sys`; the default build does not require
+Rust. Leave it off for x86 or MSVC builds, which use the C implementation.
+
 Mappings
 --------
 

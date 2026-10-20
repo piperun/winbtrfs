@@ -68,3 +68,19 @@ task directory and sparse/ordinary files, checks twelve range queries, then
 removes its fixtures. Coverage includes sparse holes, clipped subranges, EOF,
 empty requests, one-slot partial output and zero-slot output. Its deterministic
 status, byte-count and range output can be compared between driver builds.
+
+The host query suite can link the Rust object produced by the arithmetic
+comparison runner, exercising the same production handler through its C ABI:
+
+```sh
+python3 tests/range-math/check_rust.py . --build-dir /tmp/winbtrfs-range-rust
+python3 tests/queries/check_queries.py . --build-dir /tmp/winbtrfs-queries-rust \
+  --rust-object /tmp/winbtrfs-range-rust/range-math-rust.o
+```
+
+Without `--rust-object`, the extracted C helper is used. `--revision` continues
+to support older handlers that contain the arithmetic directly; a Rust object
+cannot be selected for those revisions because they have no helper call.
+Both implementations pass the same 38 query scenarios. Windows comparison
+must include the sparse queries, since ordinary non-sparse files bypass the
+per-extent clipping helper.

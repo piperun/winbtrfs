@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.15)
 project(btrfs VERSION 1.10.0)
 
 option(WITH_TEST "Compile test program" ON)
+option(WITH_RUST_RANGES "Use Rust for allocated-range clipping" OFF)
 
 if(MSVC) # cmake bug 15170
     if(MSVC_C_ARCHITECTURE_ID STREQUAL "X86")
@@ -138,6 +139,61 @@ set(SRC_FILES src/balance.c
     src/write.c
     src/write-extents.c
     ${CMAKE_CURRENT_BINARY_DIR}/btrfs.rc)
+
+if(WITH_RUST_RANGES)
+    if(NOT MINGW OR NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+        message(FATAL_ERROR "WITH_RUST_RANGES currently supports only x86_64 MinGW builds")
+    endif()
+
+    set(BTRFS_RUSTC "" CACHE FILEPATH "Rust compiler with the x86_64-pc-windows-gnu target")
+    if(BTRFS_RUSTC)
+        set(_BTRFS_RUSTC "${BTRFS_RUSTC}")
+    else()
+        find_program(_BTRFS_RUSTC NAMES rustc)
+        if(NOT _BTRFS_RUSTC)
+            message(FATAL_ERROR "WITH_RUST_RANGES needs a rustc executable")
+        endif()
+    endif()
+
+    execute_process(
+        COMMAND "${_BTRFS_RUSTC}" --print target-libdir --target x86_64-pc-windows-gnu
+        OUTPUT_VARIABLE _RUST_TARGET_LIBDIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _RUST_TARGET_RESULT)
+    file(GLOB _RUST_CORE "${_RUST_TARGET_LIBDIR}/libcore-*.rlib")
+    if(NOT _RUST_TARGET_RESULT EQUAL 0 OR NOT _RUST_CORE)
+        message(FATAL_ERROR "${_BTRFS_RUSTC} needs the x86_64-pc-windows-gnu target")
+    endif()
+    if(CMAKE_NM)
+        set(_BTRFS_NM "${CMAKE_NM}")
+    else()
+        find_program(_BTRFS_NM NAMES x86_64-w64-mingw32-nm nm)
+    endif()
+    if(NOT _BTRFS_NM)
+        message(FATAL_ERROR "WITH_RUST_RANGES needs a target nm executable")
+    endif()
+
+    set(_RUST_RANGE_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/rust/range-math/lib.rs")
+    set(_RUST_RANGE_OBJECT "${CMAKE_CURRENT_BINARY_DIR}/range-math.o")
+    set(_RUST_RANGE_TEMP "${_RUST_RANGE_OBJECT}.tmp")
+    add_custom_command(
+        OUTPUT "${_RUST_RANGE_OBJECT}"
+        COMMAND "${CMAKE_COMMAND}" -E remove -f "${_RUST_RANGE_OBJECT}" "${_RUST_RANGE_TEMP}"
+        COMMAND "${_BTRFS_RUSTC}" --crate-name btrfs_range_math --crate-type rlib
+                --edition=2024 --target x86_64-pc-windows-gnu
+                -C opt-level=2 -C panic=abort -C overflow-checks=on
+                -C codegen-units=1 -C no-redzone=yes --emit=obj
+                -o "${_RUST_RANGE_TEMP}" "${_RUST_RANGE_SOURCE}"
+        COMMAND "${CMAKE_COMMAND}" "-DNM=${_BTRFS_NM}" "-DOBJECT=${_RUST_RANGE_TEMP}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/ci/check-rust-object.cmake"
+        COMMAND "${CMAKE_COMMAND}" -E rename "${_RUST_RANGE_TEMP}" "${_RUST_RANGE_OBJECT}"
+        DEPENDS "${_RUST_RANGE_SOURCE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/check-rust-object.cmake"
+        COMMENT "Compiling Rust range clipping"
+        VERBATIM)
+    set_source_files_properties("${_RUST_RANGE_OBJECT}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+    list(REMOVE_ITEM SRC_FILES src/range-math.c)
+    list(APPEND SRC_FILES "${_RUST_RANGE_OBJECT}")
+endif()
 
 # Work around bug in MSVC version of cmake - see https://gitlab.kitware.com/cmake/cmake/-/merge_requests/4257
 set(CMAKE_ASM_MASM_COMPILE_OPTIONS_MSVC_RUNTIME_LIBRARY_MultiThreaded         "")
