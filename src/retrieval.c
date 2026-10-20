@@ -19,133 +19,80 @@
 #include "retrieval.h"
 
 NTSTATUS get_retrieval_pointers(device_extension* Vcb, PFILE_OBJECT FileObject, STARTING_VCN_INPUT_BUFFER* in,
-                                       ULONG inlen, RETRIEVAL_POINTERS_BUFFER* out, ULONG outlen, ULONG_PTR* retlen) {
+                                ULONG inlen, RETRIEVAL_POINTERS_BUFFER* out, ULONG outlen, ULONG_PTR* retlen) {
     NTSTATUS Status;
     fcb* fcb;
 
-    TRACE("get_retrieval_pointers(%p, %p, %p, %lx, %p, %lx, %p)\n", Vcb, FileObject, in, inlen,
-                                                                    out, outlen, retlen);
+    *retlen = 0;
 
-    if (!FileObject)
+    if (!FileObject || !FileObject->FsContext || !in || inlen < sizeof(*in) || in->StartingVcn.QuadPart < 0 || !out)
         return STATUS_INVALID_PARAMETER;
 
-    fcb = FileObject->FsContext;
-
-    if (!fcb)
-        return STATUS_INVALID_PARAMETER;
-
-    if (inlen < sizeof(STARTING_VCN_INPUT_BUFFER) || in->StartingVcn.QuadPart < 0)
-        return STATUS_INVALID_PARAMETER;
-
-    if (!out)
-        return STATUS_INVALID_PARAMETER;
-
-    if (outlen < offsetof(RETRIEVAL_POINTERS_BUFFER, Extents[0]))
+    if (outlen < sizeof(RETRIEVAL_POINTERS_BUFFER))
         return STATUS_BUFFER_TOO_SMALL;
 
+    fcb = FileObject->FsContext;
     ExAcquireResourceSharedLite(fcb->Header.Resource, true);
 
     try {
         LIST_ENTRY* le = fcb->extents.Flink;
-        extent* first_ext = NULL;
-        unsigned int num_extents = 0, first_extent_num = 0, i;
-        uint64_t num_sectors, last_off = 0;
+        uint64_t num_sectors = fcb->Header.AllocationSize.QuadPart >> Vcb->sector_shift;
+        uint64_t last_off = 0;
 
-        num_sectors = (fcb->inode_item.size + Vcb->superblock.sectorsize - 1) >> Vcb->sector_shift;
-
-        while (le != &fcb->extents) {
-            extent* ext = CONTAINING_RECORD(le, extent, list_entry);
-
-            if (ext->ignore || ext->extent_data.type == BTRFS_FILE_EXTENT_INLINE) {
-                le = le->Flink;
-                continue;
-            }
-
-            if (ext->offset > last_off)
-                num_extents++;
-
-            if ((ext->offset >> Vcb->sector_shift) <= (uint64_t)in->StartingVcn.QuadPart &&
-                (ext->offset + ext->extent_data.ram_bytes) >> Vcb->sector_shift > (uint64_t)in->StartingVcn.QuadPart) {
-                first_ext = ext;
-                first_extent_num = num_extents;
-            }
-
-            num_extents++;
-
-            last_off = ext->offset + ext->extent_data.ram_bytes;
-
-            le = le->Flink;
-        }
-
-        if (num_sectors > last_off >> Vcb->sector_shift)
-            num_extents++;
-
-        if (!first_ext) {
+        if ((uint64_t)in->StartingVcn.QuadPart >= num_sectors) {
             Status = STATUS_END_OF_FILE;
             leave;
         }
 
-        out->ExtentCount = num_extents - first_extent_num;
-        out->StartingVcn.QuadPart = first_ext->offset >> Vcb->sector_shift;
+        out->ExtentCount = 0;
         outlen -= offsetof(RETRIEVAL_POINTERS_BUFFER, Extents[0]);
-        *retlen = offsetof(RETRIEVAL_POINTERS_BUFFER, Extents[0]);
 
-        le = &first_ext->list_entry;
-        i = 0;
-        last_off = 0;
+        while (last_off < num_sectors) {
+            extent* ext = le == &fcb->extents ? NULL : CONTAINING_RECORD(le, extent, list_entry);
+            uint64_t run_end, extent_start = ext ? ext->offset >> Vcb->sector_shift : num_sectors;
+            int64_t lcn = -1;
 
-        while (le != &fcb->extents) {
-            extent* ext = CONTAINING_RECORD(le, extent, list_entry);
-
-            if (ext->ignore || ext->extent_data.type == BTRFS_FILE_EXTENT_INLINE) {
+            if (ext && ext->ignore) {
                 le = le->Flink;
                 continue;
             }
 
-            if (ext->offset > last_off) {
-                if (outlen < sizeof(LARGE_INTEGER) + sizeof(LARGE_INTEGER)) {
+            if (ext && ext->extent_data.type == BTRFS_FILE_EXTENT_INLINE) {
+                Status = STATUS_END_OF_FILE;
+                leave;
+            }
+
+            if (last_off < extent_start)
+                run_end = min(extent_start, num_sectors);
+            else {
+                run_end = min((ext->offset + ext->extent_data.num_bytes) >> Vcb->sector_shift, num_sectors);
+                if (ext->extent_data.disk_bytenr != 0 && ext->extent_data.compression == BTRFS_COMPRESS_NONE)
+                    lcn = ((ext->extent_data.disk_bytenr + ext->extent_data.offset) >> Vcb->sector_shift) + last_off - extent_start;
+                le = le->Flink;
+            }
+
+            if (run_end <= last_off)
+                continue;
+
+            if (run_end > (uint64_t)in->StartingVcn.QuadPart) {
+                if (out->ExtentCount == 0) {
+                    out->StartingVcn.QuadPart = last_off;
+                    *retlen = offsetof(RETRIEVAL_POINTERS_BUFFER, Extents[0]);
+                }
+
+                if (outlen < sizeof(out->Extents[0])) {
                     Status = STATUS_BUFFER_OVERFLOW;
                     leave;
                 }
 
-                out->Extents[i].NextVcn.QuadPart = ext->offset >> Vcb->sector_shift;
-                out->Extents[i].Lcn.QuadPart = -1;
-
-                outlen -= sizeof(LARGE_INTEGER) + sizeof(LARGE_INTEGER);
-                *retlen += sizeof(LARGE_INTEGER) + sizeof(LARGE_INTEGER);
-                i++;
+                out->Extents[out->ExtentCount].NextVcn.QuadPart = run_end;
+                out->Extents[out->ExtentCount].Lcn.QuadPart = lcn;
+                out->ExtentCount++;
+                outlen -= sizeof(out->Extents[0]);
+                *retlen += sizeof(out->Extents[0]);
             }
 
-            if (outlen < sizeof(LARGE_INTEGER) + sizeof(LARGE_INTEGER)) {
-                Status = STATUS_BUFFER_OVERFLOW;
-                leave;
-            }
-
-            out->Extents[i].NextVcn.QuadPart = (ext->offset + ext->extent_data.ram_bytes) >> Vcb->sector_shift;
-
-            if (ext->extent_data.compression == BTRFS_COMPRESS_NONE)
-                out->Extents[i].Lcn.QuadPart = (ext->extent_data.disk_bytenr + ext->extent_data.offset) >> Vcb->sector_shift;
-            else
-                out->Extents[i].Lcn.QuadPart = -1;
-
-            outlen -= sizeof(LARGE_INTEGER) + sizeof(LARGE_INTEGER);
-            *retlen += sizeof(LARGE_INTEGER) + sizeof(LARGE_INTEGER);
-            i++;
-
-            le = le->Flink;
-        }
-
-        if (num_sectors << Vcb->sector_shift > last_off) {
-            if (outlen < sizeof(LARGE_INTEGER) + sizeof(LARGE_INTEGER)) {
-                Status = STATUS_BUFFER_OVERFLOW;
-                leave;
-            }
-
-            out->Extents[i].NextVcn.QuadPart = num_sectors;
-            out->Extents[i].Lcn.QuadPart = -1;
-
-            outlen -= sizeof(LARGE_INTEGER) + sizeof(LARGE_INTEGER);
-            *retlen += sizeof(LARGE_INTEGER) + sizeof(LARGE_INTEGER);
+            last_off = run_end;
         }
 
         Status = STATUS_SUCCESS;
