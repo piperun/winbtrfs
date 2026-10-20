@@ -521,7 +521,7 @@ NTSTATUS do_write_file(fcb* fcb, uint64_t start, uint64_t end_data, void* data, 
 
                 if (ed->type == BTRFS_FILE_EXTENT_REG) {
                     uint64_t writeaddr = ed->disk_bytenr + ed->offset + start + written - ext->offset;
-                    uint64_t write_len = min(len, length);
+                    uint64_t write_len = min(ext->offset + len - start - written, length);
                     chunk* c;
 
                     TRACE("doing non-COW write to %I64x\n", writeaddr);
