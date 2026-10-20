@@ -76,7 +76,7 @@ typedef struct {
     dir_child* dc;
 } dir_entry;
 
-NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_entry* de, root* r);
+NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_entry* de, root* r, bool allow_partial);
 NTSTATUS query_directory(PIRP Irp);
 
 #endif

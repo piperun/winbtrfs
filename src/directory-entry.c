@@ -56,9 +56,41 @@ static ULONG get_ea_len(device_extension* Vcb, root* subvol, uint64_t inode, PIR
         return 0;
 }
 
-NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_entry* de, root* r) {
+static LONG directory_entry_header_size(enum _FILE_INFORMATION_CLASS information_class) {
+    switch (information_class) {
+        case FileBothDirectoryInformation:
+            return offsetof(FILE_BOTH_DIR_INFORMATION, FileName);
+        case FileDirectoryInformation:
+            return offsetof(FILE_DIRECTORY_INFORMATION, FileName);
+        case FileFullDirectoryInformation:
+            return offsetof(FILE_FULL_DIR_INFORMATION, FileName);
+        case FileIdBothDirectoryInformation:
+            return offsetof(FILE_ID_BOTH_DIR_INFORMATION, FileName);
+        case FileIdFullDirectoryInformation:
+            return offsetof(FILE_ID_FULL_DIR_INFORMATION, FileName);
+#ifndef _MSC_VER
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wswitch"
+#endif
+        case FileIdExtdDirectoryInformation:
+            return offsetof(FILE_ID_EXTD_DIR_INFORMATION, FileName);
+        case FileIdExtdBothDirectoryInformation:
+            return offsetof(FILE_ID_EXTD_BOTH_DIR_INFORMATION, FileName);
+#ifndef _MSC_VER
+#pragma GCC diagnostic pop
+#endif
+        case FileNamesInformation:
+            return offsetof(FILE_NAMES_INFORMATION, FileName);
+        default:
+            return 0;
+    }
+}
+
+NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_entry* de, root* r, bool allow_partial) {
     PIO_STACK_LOCATION IrpSp;
-    LONG needed;
+    LONG needed, header_size;
+    ULONG name_length;
+    NTSTATUS completion_status = STATUS_SUCCESS;
     uint64_t inode;
     struct btrfs_inode_item ii;
     NTSTATUS Status;
@@ -66,6 +98,21 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
     file_ref* fileref = ccb->fileref;
 
     IrpSp = IoGetCurrentIrpStackLocation(Irp);
+
+    header_size = directory_entry_header_size(IrpSp->Parameters.QueryDirectory.FileInformationClass);
+    if (header_size == 0)
+        return STATUS_NOT_IMPLEMENTED;
+
+    name_length = de->name.Length;
+    needed = header_size + name_length;
+    if (needed > *len) {
+        if (!allow_partial || *len < header_size)
+            return STATUS_BUFFER_OVERFLOW;
+
+        name_length = *len - header_size;
+        needed = *len;
+        completion_status = STATUS_BUFFER_OVERFLOW;
+    }
 
     if (de->key.type == BTRFS_ROOT_ITEM_KEY) { // subvol
         LIST_ENTRY* le;
@@ -200,13 +247,6 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
 
             TRACE("FileBothDirectoryInformation\n");
 
-            needed = offsetof(FILE_BOTH_DIR_INFORMATION, FileName) + de->name.Length;
-
-            if (needed > *len) {
-                TRACE("buffer overflow - %li > %lu\n", needed, *len);
-                return STATUS_BUFFER_OVERFLOW;
-            }
-
             fbdi->NextEntryOffset = 0;
             fbdi->FileIndex = 0;
             fbdi->CreationTime.QuadPart = unix_time_to_win(&ii.otime);
@@ -227,11 +267,11 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
             fbdi->EaSize = (r && atts & FILE_ATTRIBUTE_REPARSE_POINT) ? get_reparse_tag(fcb->Vcb, r, inode, de->type, atts, ccb->lxss, Irp) : ealen;
             fbdi->ShortNameLength = 0;
 
-            RtlCopyMemory(fbdi->FileName, de->name.Buffer, de->name.Length);
+            RtlCopyMemory(fbdi->FileName, de->name.Buffer, name_length);
 
             *len -= needed;
 
-            return STATUS_SUCCESS;
+            return completion_status;
         }
 
         case FileDirectoryInformation:
@@ -239,13 +279,6 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
             FILE_DIRECTORY_INFORMATION* fdi = buf;
 
             TRACE("FileDirectoryInformation\n");
-
-            needed = offsetof(FILE_DIRECTORY_INFORMATION, FileName) + de->name.Length;
-
-            if (needed > *len) {
-                TRACE("buffer overflow - %li > %lu\n", needed, *len);
-                return STATUS_BUFFER_OVERFLOW;
-            }
 
             fdi->NextEntryOffset = 0;
             fdi->FileIndex = 0;
@@ -265,11 +298,11 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
             fdi->FileAttributes = atts;
             fdi->FileNameLength = de->name.Length;
 
-            RtlCopyMemory(fdi->FileName, de->name.Buffer, de->name.Length);
+            RtlCopyMemory(fdi->FileName, de->name.Buffer, name_length);
 
             *len -= needed;
 
-            return STATUS_SUCCESS;
+            return completion_status;
         }
 
         case FileFullDirectoryInformation:
@@ -277,13 +310,6 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
             FILE_FULL_DIR_INFORMATION* ffdi = buf;
 
             TRACE("FileFullDirectoryInformation\n");
-
-            needed = offsetof(FILE_FULL_DIR_INFORMATION, FileName) + de->name.Length;
-
-            if (needed > *len) {
-                TRACE("buffer overflow - %li > %lu\n", needed, *len);
-                return STATUS_BUFFER_OVERFLOW;
-            }
 
             ffdi->NextEntryOffset = 0;
             ffdi->FileIndex = 0;
@@ -304,11 +330,11 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
             ffdi->FileNameLength = de->name.Length;
             ffdi->EaSize = (r && atts & FILE_ATTRIBUTE_REPARSE_POINT) ? get_reparse_tag(fcb->Vcb, r, inode, de->type, atts, ccb->lxss, Irp) : ealen;
 
-            RtlCopyMemory(ffdi->FileName, de->name.Buffer, de->name.Length);
+            RtlCopyMemory(ffdi->FileName, de->name.Buffer, name_length);
 
             *len -= needed;
 
-            return STATUS_SUCCESS;
+            return completion_status;
         }
 
         case FileIdBothDirectoryInformation:
@@ -316,13 +342,6 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
             FILE_ID_BOTH_DIR_INFORMATION* fibdi = buf;
 
             TRACE("FileIdBothDirectoryInformation\n");
-
-            needed = offsetof(FILE_ID_BOTH_DIR_INFORMATION, FileName) + de->name.Length;
-
-            if (needed > *len) {
-                TRACE("buffer overflow - %li > %lu\n", needed, *len);
-                return STATUS_BUFFER_OVERFLOW;
-            }
 
             fibdi->NextEntryOffset = 0;
             fibdi->FileIndex = 0;
@@ -345,11 +364,11 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
             fibdi->ShortNameLength = 0;
             fibdi->FileId.QuadPart = r ? make_file_id(r, inode) : make_file_id(fcb->Vcb->dummy_fcb->subvol, fcb->Vcb->dummy_fcb->inode);
 
-            RtlCopyMemory(fibdi->FileName, de->name.Buffer, de->name.Length);
+            RtlCopyMemory(fibdi->FileName, de->name.Buffer, name_length);
 
             *len -= needed;
 
-            return STATUS_SUCCESS;
+            return completion_status;
         }
 
         case FileIdFullDirectoryInformation:
@@ -357,13 +376,6 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
             FILE_ID_FULL_DIR_INFORMATION* fifdi = buf;
 
             TRACE("FileIdFullDirectoryInformation\n");
-
-            needed = offsetof(FILE_ID_FULL_DIR_INFORMATION, FileName) + de->name.Length;
-
-            if (needed > *len) {
-                TRACE("buffer overflow - %li > %lu\n", needed, *len);
-                return STATUS_BUFFER_OVERFLOW;
-            }
 
             fifdi->NextEntryOffset = 0;
             fifdi->FileIndex = 0;
@@ -385,11 +397,11 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
             fifdi->EaSize = (r && atts & FILE_ATTRIBUTE_REPARSE_POINT) ? get_reparse_tag(fcb->Vcb, r, inode, de->type, atts, ccb->lxss, Irp) : ealen;
             fifdi->FileId.QuadPart = r ? make_file_id(r, inode) : make_file_id(fcb->Vcb->dummy_fcb->subvol, fcb->Vcb->dummy_fcb->inode);
 
-            RtlCopyMemory(fifdi->FileName, de->name.Buffer, de->name.Length);
+            RtlCopyMemory(fifdi->FileName, de->name.Buffer, name_length);
 
             *len -= needed;
 
-            return STATUS_SUCCESS;
+            return completion_status;
         }
 
 #ifndef _MSC_VER
@@ -401,13 +413,6 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
             FILE_ID_EXTD_DIR_INFORMATION* fiedi = buf;
 
             TRACE("FileIdExtdDirectoryInformation\n");
-
-            needed = offsetof(FILE_ID_EXTD_DIR_INFORMATION, FileName) + de->name.Length;
-
-            if (needed > *len) {
-                TRACE("buffer overflow - %li > %lu\n", needed, *len);
-                return STATUS_BUFFER_OVERFLOW;
-            }
 
             fiedi->NextEntryOffset = 0;
             fiedi->FileIndex = 0;
@@ -429,14 +434,19 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
             fiedi->EaSize = ealen;
             fiedi->ReparsePointTag = get_reparse_tag(fcb->Vcb, r, inode, de->type, atts, ccb->lxss, Irp);
 
-            RtlCopyMemory(&fiedi->FileId.Identifier[0], &fcb->inode, sizeof(uint64_t));
-            RtlCopyMemory(&fiedi->FileId.Identifier[sizeof(uint64_t)], &fcb->subvol->id, sizeof(uint64_t));
+            if (r) {
+                RtlCopyMemory(&fiedi->FileId.Identifier[0], &inode, sizeof(uint64_t));
+                RtlCopyMemory(&fiedi->FileId.Identifier[sizeof(uint64_t)], &r->id, sizeof(uint64_t));
+            } else {
+                RtlCopyMemory(&fiedi->FileId.Identifier[0], &fcb->Vcb->dummy_fcb->inode, sizeof(uint64_t));
+                RtlCopyMemory(&fiedi->FileId.Identifier[sizeof(uint64_t)], &fcb->Vcb->dummy_fcb->subvol->id, sizeof(uint64_t));
+            }
 
-            RtlCopyMemory(fiedi->FileName, de->name.Buffer, de->name.Length);
+            RtlCopyMemory(fiedi->FileName, de->name.Buffer, name_length);
 
             *len -= needed;
 
-            return STATUS_SUCCESS;
+            return completion_status;
         }
 
         case FileIdExtdBothDirectoryInformation:
@@ -444,13 +454,6 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
             FILE_ID_EXTD_BOTH_DIR_INFORMATION* fiebdi = buf;
 
             TRACE("FileIdExtdBothDirectoryInformation\n");
-
-            needed = offsetof(FILE_ID_EXTD_BOTH_DIR_INFORMATION, FileName) + de->name.Length;
-
-            if (needed > *len) {
-                TRACE("buffer overflow - %li > %lu\n", needed, *len);
-                return STATUS_BUFFER_OVERFLOW;
-            }
 
             fiebdi->NextEntryOffset = 0;
             fiebdi->FileIndex = 0;
@@ -472,16 +475,21 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
             fiebdi->EaSize = ealen;
             fiebdi->ReparsePointTag = get_reparse_tag(fcb->Vcb, r, inode, de->type, atts, ccb->lxss, Irp);
 
-            RtlCopyMemory(&fiebdi->FileId.Identifier[0], &fcb->inode, sizeof(uint64_t));
-            RtlCopyMemory(&fiebdi->FileId.Identifier[sizeof(uint64_t)], &fcb->subvol->id, sizeof(uint64_t));
+            if (r) {
+                RtlCopyMemory(&fiebdi->FileId.Identifier[0], &inode, sizeof(uint64_t));
+                RtlCopyMemory(&fiebdi->FileId.Identifier[sizeof(uint64_t)], &r->id, sizeof(uint64_t));
+            } else {
+                RtlCopyMemory(&fiebdi->FileId.Identifier[0], &fcb->Vcb->dummy_fcb->inode, sizeof(uint64_t));
+                RtlCopyMemory(&fiebdi->FileId.Identifier[sizeof(uint64_t)], &fcb->Vcb->dummy_fcb->subvol->id, sizeof(uint64_t));
+            }
 
             fiebdi->ShortNameLength = 0;
 
-            RtlCopyMemory(fiebdi->FileName, de->name.Buffer, de->name.Length);
+            RtlCopyMemory(fiebdi->FileName, de->name.Buffer, name_length);
 
             *len -= needed;
 
-            return STATUS_SUCCESS;
+            return completion_status;
         }
 
 #ifndef _MSC_VER
@@ -494,22 +502,15 @@ NTSTATUS query_dir_item(fcb* fcb, ccb* ccb, void* buf, LONG* len, PIRP Irp, dir_
 
             TRACE("FileNamesInformation\n");
 
-            needed = offsetof(FILE_NAMES_INFORMATION, FileName) + de->name.Length;
-
-            if (needed > *len) {
-                TRACE("buffer overflow - %li > %lu\n", needed, *len);
-                return STATUS_BUFFER_OVERFLOW;
-            }
-
             fni->NextEntryOffset = 0;
             fni->FileIndex = 0;
             fni->FileNameLength = de->name.Length;
 
-            RtlCopyMemory(fni->FileName, de->name.Buffer, de->name.Length);
+            RtlCopyMemory(fni->FileName, de->name.Buffer, name_length);
 
             *len -= needed;
 
-            return STATUS_SUCCESS;
+            return completion_status;
         }
 
         default:

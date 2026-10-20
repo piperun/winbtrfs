@@ -183,47 +183,32 @@ NTSTATUS query_directory(PIRP Irp) {
             TRACE("    unknown flags: %lu\n", flags);
     }
 
-    if (IrpSp->Flags & SL_RESTART_SCAN) {
-        ccb->query_dir_offset = 0;
-
-        if (ccb->query_string.Buffer) {
-            RtlFreeUnicodeString(&ccb->query_string);
-            ccb->query_string.Buffer = NULL;
-        }
-
-        ccb->has_wildcard = false;
-        ccb->specific_file = false;
-    }
-
     initial = !ccb->query_string.Buffer;
 
-    if (IrpSp->Parameters.QueryDirectory.FileName && IrpSp->Parameters.QueryDirectory.FileName->Length > 1) {
-        TRACE("QD filename: %.*S\n", (int)(IrpSp->Parameters.QueryDirectory.FileName->Length / sizeof(WCHAR)), IrpSp->Parameters.QueryDirectory.FileName->Buffer);
+    if (IrpSp->Flags & SL_RESTART_SCAN)
+        ccb->query_dir_offset = 0;
 
-        if (IrpSp->Parameters.QueryDirectory.FileName->Length > sizeof(WCHAR) || IrpSp->Parameters.QueryDirectory.FileName->Buffer[0] != L'*') {
-            specific_file = true;
+    if (initial) {
+        UNICODE_STRING all_files = {sizeof(WCHAR), sizeof(WCHAR), L"*"};
+        UNICODE_STRING* expression = IrpSp->Parameters.QueryDirectory.FileName;
 
-            if (FsRtlDoesNameContainWildCards(IrpSp->Parameters.QueryDirectory.FileName)) {
-                has_wildcard = true;
-                specific_file = false;
-            } else if (!initial)
-                return STATUS_NO_MORE_FILES;
-        }
+        if (!expression || expression->Length == 0)
+            expression = &all_files;
 
-        if (ccb->query_string.Buffer)
-            RtlFreeUnicodeString(&ccb->query_string);
+        has_wildcard = FsRtlDoesNameContainWildCards(expression);
+        specific_file = !has_wildcard;
 
-        if (has_wildcard)
-            RtlUpcaseUnicodeString(&ccb->query_string, IrpSp->Parameters.QueryDirectory.FileName, true);
-        else {
-            ccb->query_string.Buffer = ExAllocatePoolWithTag(PagedPool, IrpSp->Parameters.QueryDirectory.FileName->Length, ALLOC_TAG);
-            if (!ccb->query_string.Buffer) {
-                ERR("out of memory\n");
+        if (has_wildcard && !ccb->case_sensitive) {
+            Status = RtlUpcaseUnicodeString(&ccb->query_string, expression, true);
+            if (!NT_SUCCESS(Status))
+                return Status;
+        } else {
+            ccb->query_string.Buffer = ExAllocatePoolWithTag(PagedPool, expression->Length, ALLOC_TAG);
+            if (!ccb->query_string.Buffer)
                 return STATUS_INSUFFICIENT_RESOURCES;
-            }
 
-            ccb->query_string.Length = ccb->query_string.MaximumLength = IrpSp->Parameters.QueryDirectory.FileName->Length;
-            RtlCopyMemory(ccb->query_string.Buffer, IrpSp->Parameters.QueryDirectory.FileName->Buffer, IrpSp->Parameters.QueryDirectory.FileName->Length);
+            ccb->query_string.Length = ccb->query_string.MaximumLength = expression->Length;
+            RtlCopyMemory(ccb->query_string.Buffer, expression->Buffer, expression->Length);
         }
 
         ccb->has_wildcard = has_wildcard;
@@ -232,12 +217,8 @@ NTSTATUS query_directory(PIRP Irp) {
         has_wildcard = ccb->has_wildcard;
         specific_file = ccb->specific_file;
 
-        if (!(IrpSp->Flags & SL_RESTART_SCAN)) {
-            initial = false;
-
-            if (specific_file)
-                return STATUS_NO_MORE_FILES;
-        }
+        if (specific_file && ccb->query_dir_offset != 0 && !(IrpSp->Flags & SL_RESTART_SCAN))
+            return STATUS_NO_MORE_FILES;
     }
 
     if (ccb->query_string.Buffer) {
@@ -257,8 +238,6 @@ NTSTATUS query_directory(PIRP Irp) {
             Status = STATUS_NO_SUCH_FILE;
         goto end;
     }
-
-    ccb->query_dir_offset = newoffset;
 
     buf = map_user_buffer(Irp, NormalPagePriority);
 
@@ -351,12 +330,9 @@ NTSTATUS query_directory(PIRP Irp) {
         }
     } else if (has_wildcard) {
         while (!FsRtlIsNameInExpression(&ccb->query_string, &de.name, !ccb->case_sensitive, NULL)) {
-            newoffset = ccb->query_dir_offset;
+            ccb->query_dir_offset = newoffset;
             Status = next_dir_entry(fileref, &newoffset, &de, &dc);
-
-            if (NT_SUCCESS(Status))
-                ccb->query_dir_offset = newoffset;
-            else {
+            if (!NT_SUCCESS(Status)) {
                 if (Status == STATUS_NO_MORE_FILES && initial)
                     Status = STATUS_NO_SUCH_FILE;
 
@@ -368,72 +344,57 @@ NTSTATUS query_directory(PIRP Irp) {
     TRACE("file(0) = %.*S\n", (int)(de.name.Length / sizeof(WCHAR)), de.name.Buffer);
     TRACE("offset = %I64u\n", ccb->query_dir_offset - 1);
 
-    Status = query_dir_item(fcb, ccb, buf, &length, Irp, &de, fcb->subvol);
+    Status = query_dir_item(fcb, ccb, buf, &length, Irp, &de, fcb->subvol, initial);
+    if (NT_SUCCESS(Status))
+        ccb->query_dir_offset = newoffset;
+    else if (Status == STATUS_BUFFER_OVERFLOW && !initial)
+        Status = STATUS_SUCCESS;
 
     count = 0;
-    if (NT_SUCCESS(Status) && !(IrpSp->Flags & SL_RETURN_SINGLE_ENTRY) && !specific_file) {
+    if (NT_SUCCESS(Status) && length != (LONG)IrpSp->Parameters.QueryDirectory.Length &&
+        !(IrpSp->Flags & SL_RETURN_SINGLE_ENTRY) && !specific_file) {
         lastitem = (uint8_t*)buf;
 
         while (length > 0) {
-            switch (IrpSp->Parameters.QueryDirectory.FileInformationClass) {
-#ifndef _MSC_VER
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wswitch"
-#endif
-                case FileBothDirectoryInformation:
-                case FileDirectoryInformation:
-                case FileIdBothDirectoryInformation:
-                case FileFullDirectoryInformation:
-                case FileIdFullDirectoryInformation:
-                case FileIdExtdDirectoryInformation:
-                case FileIdExtdBothDirectoryInformation:
-                    length -= length % 8;
-                    break;
-#ifndef _MSC_VER
-#pragma GCC diagnostic pop
-#endif
+            LONG item_length;
+            ULONG used, padding, alignment;
 
-                case FileNamesInformation:
-                    length -= length % 4;
-                    break;
-
-                default:
-                    WARN("unhandled file information class %u\n", IrpSp->Parameters.QueryDirectory.FileInformationClass);
-                    break;
+            newoffset = ccb->query_dir_offset;
+            Status = next_dir_entry(fileref, &newoffset, &de, &dc);
+            if (!NT_SUCCESS(Status)) {
+                if (Status == STATUS_NO_MORE_FILES)
+                    Status = STATUS_SUCCESS;
+                break;
             }
 
-            if (length > 0) {
-                newoffset = ccb->query_dir_offset;
-                Status = next_dir_entry(fileref, &newoffset, &de, &dc);
-                if (NT_SUCCESS(Status)) {
-                    if (!has_wildcard || FsRtlIsNameInExpression(&ccb->query_string, &de.name, !ccb->case_sensitive, NULL)) {
-                        curitem = (uint8_t*)buf + IrpSp->Parameters.QueryDirectory.Length - length;
-                        count++;
+            if (has_wildcard && !FsRtlIsNameInExpression(&ccb->query_string, &de.name, !ccb->case_sensitive, NULL)) {
+                ccb->query_dir_offset = newoffset;
+                continue;
+            }
 
-                        TRACE("file(%lu) %Iu = %.*S\n", count, curitem - (uint8_t*)buf, (int)(de.name.Length / sizeof(WCHAR)), de.name.Buffer);
-                        TRACE("offset = %I64u\n", ccb->query_dir_offset - 1);
-
-                        status2 = query_dir_item(fcb, ccb, curitem, &length, Irp, &de, fcb->subvol);
-
-                        if (NT_SUCCESS(status2)) {
-                            ULONG* lastoffset = (ULONG*)lastitem;
-
-                            *lastoffset = (ULONG)(curitem - lastitem);
-                            ccb->query_dir_offset = newoffset;
-
-                            lastitem = curitem;
-                        } else
-                            break;
-                    } else
-                        ccb->query_dir_offset = newoffset;
-                } else {
-                    if (Status == STATUS_NO_MORE_FILES)
-                        Status = STATUS_SUCCESS;
-
-                    break;
-                }
-            } else
+            alignment = IrpSp->Parameters.QueryDirectory.FileInformationClass == FileNamesInformation ? 4 : 8;
+            used = IrpSp->Parameters.QueryDirectory.Length - length;
+            padding = (alignment - used % alignment) % alignment;
+            if ((ULONG)length <= padding)
                 break;
+
+            item_length = length - padding;
+            curitem = (uint8_t*)buf + used + padding;
+            count++;
+
+            TRACE("file(%lu) %Iu = %.*S\n", count, curitem - (uint8_t*)buf, (int)(de.name.Length / sizeof(WCHAR)), de.name.Buffer);
+
+            status2 = query_dir_item(fcb, ccb, curitem, &item_length, Irp, &de, fcb->subvol, false);
+            if (!NT_SUCCESS(status2)) {
+                if (status2 != STATUS_BUFFER_OVERFLOW)
+                    Status = status2;
+                break;
+            }
+
+            *(ULONG*)lastitem = (ULONG)(curitem - lastitem);
+            ccb->query_dir_offset = newoffset;
+            length = item_length;
+            lastitem = curitem;
         }
     }
 
