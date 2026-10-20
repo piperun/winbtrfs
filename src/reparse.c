@@ -531,15 +531,26 @@ NTSTATUS delete_reparse_point(PIRP Irp) {
     ExAcquireResourceSharedLite(&fcb->Vcb->tree_lock, true);
     ExAcquireResourceExclusiveLite(fcb->Header.Resource, true);
 
-    if (buflen < offsetof(REPARSE_DATA_BUFFER, GenericReparseBuffer.DataBuffer)) {
+    if (!rdb || buflen < REPARSE_DATA_BUFFER_HEADER_SIZE) {
         ERR("buffer was too short\n");
-        Status = STATUS_INVALID_PARAMETER;
+        Status = STATUS_IO_REPARSE_DATA_INVALID;
         goto end;
     }
 
     if (rdb->ReparseDataLength > 0) {
         WARN("rdb->ReparseDataLength was not zero\n");
-        Status = STATUS_INVALID_PARAMETER;
+        Status = STATUS_IO_REPARSE_DATA_INVALID;
+        goto end;
+    }
+
+    if (!IsReparseTagValid(rdb->ReparseTag)) {
+        Status = STATUS_IO_REPARSE_TAG_INVALID;
+        goto end;
+    }
+
+    if ((buflen != REPARSE_DATA_BUFFER_HEADER_SIZE && buflen != REPARSE_GUID_DATA_BUFFER_HEADER_SIZE) ||
+        (!IsReparseTagMicrosoft(rdb->ReparseTag) && buflen != REPARSE_GUID_DATA_BUFFER_HEADER_SIZE)) {
+        Status = STATUS_IO_REPARSE_DATA_INVALID;
         goto end;
     }
 
@@ -555,14 +566,79 @@ NTSTATUS delete_reparse_point(PIRP Irp) {
     }
 
     if (fcb->type == BTRFS_FT_SYMLINK) {
-        LARGE_INTEGER time;
-        struct btrfs_timespec now;
+        ULONG tag = ccb->lxss ? IO_REPARSE_TAG_LX_SYMLINK : IO_REPARSE_TAG_SYMLINK;
 
-        if (rdb->ReparseTag != IO_REPARSE_TAG_SYMLINK) {
-            WARN("reparse tag was not IO_REPARSE_TAG_SYMLINK\n");
-            Status = STATUS_INVALID_PARAMETER;
+        if (rdb->ReparseTag != tag) {
+            Status = STATUS_IO_REPARSE_TAG_MISMATCH;
             goto end;
         }
+    } else if (fcb->type == BTRFS_FT_REG_FILE || fcb->type == BTRFS_FT_DIR) {
+        REPARSE_GUID_DATA_BUFFER stored;
+        ULONG bytes_read;
+
+        if (fcb->type == BTRFS_FT_REG_FILE) {
+            if (fcb->inode_item.size < REPARSE_DATA_BUFFER_HEADER_SIZE) {
+                Status = STATUS_IO_REPARSE_DATA_INVALID;
+                goto end;
+            }
+
+            Status = read_file(fcb, (uint8_t*)&stored, 0, REPARSE_DATA_BUFFER_HEADER_SIZE, &bytes_read, Irp);
+            if (!NT_SUCCESS(Status))
+                goto end;
+            if (bytes_read != REPARSE_DATA_BUFFER_HEADER_SIZE) {
+                Status = STATUS_IO_REPARSE_DATA_INVALID;
+                goto end;
+            }
+        } else {
+            if (!fcb->reparse_xattr.Buffer || fcb->reparse_xattr.Length < REPARSE_DATA_BUFFER_HEADER_SIZE) {
+                Status = STATUS_IO_REPARSE_DATA_INVALID;
+                goto end;
+            }
+
+            RtlCopyMemory(&stored, fcb->reparse_xattr.Buffer, REPARSE_DATA_BUFFER_HEADER_SIZE);
+        }
+
+        if (rdb->ReparseTag != stored.ReparseTag) {
+            Status = STATUS_IO_REPARSE_TAG_MISMATCH;
+            goto end;
+        }
+
+        if (!IsReparseTagMicrosoft(stored.ReparseTag)) {
+            if (fcb->type == BTRFS_FT_REG_FILE) {
+                if (fcb->inode_item.size < REPARSE_GUID_DATA_BUFFER_HEADER_SIZE) {
+                    Status = STATUS_IO_REPARSE_DATA_INVALID;
+                    goto end;
+                }
+
+                Status = read_file(fcb, (uint8_t*)&stored.ReparseGuid, REPARSE_DATA_BUFFER_HEADER_SIZE,
+                                   sizeof(GUID), &bytes_read, Irp);
+                if (!NT_SUCCESS(Status))
+                    goto end;
+                if (bytes_read != sizeof(GUID)) {
+                    Status = STATUS_IO_REPARSE_DATA_INVALID;
+                    goto end;
+                }
+            } else {
+                if (fcb->reparse_xattr.Length < REPARSE_GUID_DATA_BUFFER_HEADER_SIZE) {
+                    Status = STATUS_IO_REPARSE_DATA_INVALID;
+                    goto end;
+                }
+
+                RtlCopyMemory(&stored.ReparseGuid, (uint8_t*)fcb->reparse_xattr.Buffer + REPARSE_DATA_BUFFER_HEADER_SIZE,
+                              sizeof(GUID));
+            }
+
+            if (RtlCompareMemory(&stored.ReparseGuid, &((REPARSE_GUID_DATA_BUFFER*)rdb)->ReparseGuid,
+                                 sizeof(GUID)) != sizeof(GUID)) {
+                Status = STATUS_REPARSE_ATTRIBUTE_CONFLICT;
+                goto end;
+            }
+        }
+    }
+
+    if (fcb->type == BTRFS_FT_SYMLINK) {
+        LARGE_INTEGER time;
+        struct btrfs_timespec now;
 
         KeQuerySystemTime(&time);
         win_time_to_unix(time, &now);
@@ -597,8 +673,6 @@ NTSTATUS delete_reparse_point(PIRP Irp) {
         LARGE_INTEGER time;
         struct btrfs_timespec now;
 
-        // FIXME - do we need to check that the reparse tags match?
-
         Status = truncate_file(fcb, 0, Irp, &rollback);
         if (!NT_SUCCESS(Status)) {
             ERR("truncate_file returned %08lx\n", Status);
@@ -628,8 +702,6 @@ NTSTATUS delete_reparse_point(PIRP Irp) {
     } else if (fcb->type == BTRFS_FT_DIR) {
         LARGE_INTEGER time;
         struct btrfs_timespec now;
-
-        // FIXME - do we need to check that the reparse tags match?
 
         fcb->atts &= ~FILE_ATTRIBUTE_REPARSE_POINT;
         fcb->atts_changed = true;

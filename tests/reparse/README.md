@@ -6,12 +6,12 @@ python3 tests/reparse/check_reparse.py . --init zero --sanitize --build-dir /tmp
 ```
 
 The runner extracts the production deletion handler without rewriting its
-statements. Symlink deletion must mark the cleared DOS attributes for
-persistence. Ordinary files and directories must reject deletion of a
-nonexistent reparse point without truncating data or changing metadata.
-Controls cover real file/directory reparse points and a mismatched symlink tag.
-The unchanged `be01e7d0` passes 3/6 scenarios; the fix passes 6/6 with patterned
-and zero initialization and ASan/UBSan.
+statements. File and directory reparse points must reject a different tag or
+third-party GUID without changing data or metadata. Native symlinks use the
+same tag that `FSCTL_GET_REPARSE_POINT` returns to the caller, including LX
+symlinks. Controls cover matching deletes, missing reparse points, invalid
+headers, short stored data, and a failed file read. All scenarios run with
+patterned and zero initialization and ASan/UBSan.
 
 The dirty-attribute persistence service, rollback, notifications and locks are
 modeled. The host fixture follows the actual DOSATTRIB dirty predicate in
