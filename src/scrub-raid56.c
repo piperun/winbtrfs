@@ -229,6 +229,7 @@ NTSTATUS scrub_chunk_raid56_stripe_run(device_extension* Vcb, chunk* c, uint64_t
 
             for (j = 0; j < i; j++) {
                 ExFreePool(context.stripes[j].buf);
+                ExFreePool(context.stripes[j].errorarr);
             }
             ExFreePool(context.stripes);
 
@@ -246,6 +247,7 @@ NTSTATUS scrub_chunk_raid56_stripe_run(device_extension* Vcb, chunk* c, uint64_t
 
             for (j = 0; j < i; j++) {
                 ExFreePool(context.stripes[j].buf);
+                ExFreePool(context.stripes[j].errorarr);
             }
             ExFreePool(context.stripes);
 
@@ -411,23 +413,25 @@ end4:
                 }
                 IoFreeIrp(context.stripes[i].Irp);
                 context.stripes[i].Irp = NULL;
+            }
+        }
 
-                if (context.stripes[i].rewrite) {
-                    Status = write_data_phys(c->devices[i]->devobj, c->devices[i]->fileobj, c->chunk_item->stripe[i].offset + context.stripes[i].offset,
-                                             context.stripes[i].buf, (uint32_t)(read_stripes * c->chunk_item->stripe_len));
+        for (i = 0; i < c->chunk_item->num_stripes; i++) {
+            if (c->devices[i]->devobj && context.stripes[i].rewrite) {
+                Status = write_data_phys(c->devices[i]->devobj, c->devices[i]->fileobj, c->chunk_item->stripe[i].offset + context.stripes[i].offset,
+                                         context.stripes[i].buf, (uint32_t)(read_stripes * c->chunk_item->stripe_len));
 
-                    if (!NT_SUCCESS(Status)) {
-                        ERR("write_data_phys returned %08lx\n", Status);
-                        log_device_error(Vcb, c->devices[i], BTRFS_DEV_STAT_WRITE_ERRS);
-                        goto end3;
-                    }
+                if (!NT_SUCCESS(Status)) {
+                    ERR("write_data_phys returned %08lx\n", Status);
+                    log_device_error(Vcb, c->devices[i], BTRFS_DEV_STAT_WRITE_ERRS);
+                    goto end3;
                 }
             }
         }
 
         if (!NT_SUCCESS(Status))
             break;
-    } while (stripe < stripe_end);
+    } while (stripe <= stripe_end);
 
 end3:
     chunk_unlock_range(Vcb, c, run_start, run_end - run_start);

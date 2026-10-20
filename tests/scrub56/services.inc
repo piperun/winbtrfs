@@ -1,11 +1,11 @@
 /* Tracked Windows ownership, RAM disks and a controlled parity-verification seam. */
 enum { MAX_DEVICES = 5, STRIPE_BYTES = 65536, BATCH_ROWS = 16, MAX_BATCHES = 3 };
-enum fault { NO_FAULT, PAGE_LOCK, IRP_ALLOC, MDL_ALLOC, READ_ERROR };
+enum fault { NO_FAULT, PAGE_LOCK, IRP_ALLOC, MDL_ALLOC, READ_ERROR, POOL_ALLOC, WRITE_ERROR };
 typedef struct {
-    bool raid6, direct, deferred;
+    bool raid6, direct, deferred, metadata;
     unsigned rows, repair_batches, repair_devices, missing;
     enum fault fault;
-    unsigned fail_batch, fail_device;
+    unsigned fail_batch, fail_device, fail_allocation;
 } scenario;
 static scenario cfg;
 static device_extension volume;
@@ -17,11 +17,11 @@ static unsigned disk_size, count, prepared[MAX_DEVICES], preparing;
 static unsigned writes[MAX_BATCHES][MAX_DEVICES], wanted_writes[MAX_BATCHES][MAX_DEVICES];
 static PIRP irps[MAX_DEVICES], queue[MAX_DEVICES];
 static unsigned pending, queued, reads, completions, verified_rows, pool_live, mdl_live, mdl_used, range_locks;
-static unsigned read_errors, fault_hits;
+static unsigned read_errors, write_errors, fault_hits, allocation_calls;
 static jmp_buf page_exception;
 static KEVENT* active_event;
 static const uint64_t first_row = 3;
-static struct { void* p; } pools[64];
+static struct { void* p; size_t size; } pools[64];
 typedef struct { bool live, locked; void* buf; unsigned size, id, batch; } model_mdl;
 static model_mdl mdls[MAX_DEVICES * MAX_BATCHES];
 
@@ -32,14 +32,19 @@ static bool inject(enum fault fault, unsigned batch, unsigned id) {
 
 static void* ExAllocatePoolWithTag(unsigned pool, size_t size, unsigned tag) {
     CHECK((pool == PagedPool || pool == NonPagedPool) && tag == ALLOC_TAG && size);
+    allocation_calls++;
+    if (cfg.fault == POOL_ALLOC && allocation_calls == cfg.fail_allocation) {
+        fault_hits++; return NULL;
+    }
     void* p = malloc(size); CHECK(p); memset(p, 0xa5, size);
     for (unsigned i = 0; i < 64; i++) if (!pools[i].p) {
-        pools[i].p = p; pool_live++; return p;
+        pools[i].p = p; pools[i].size = size; pool_live++; return p;
     }
     CHECK(false); return NULL;
 }
 static void ExFreePool(void* p) {
     CHECK(p && pending == 0);
+    for (unsigned i = 0; i < mdl_used; i++) CHECK(!mdls[i].live || mdls[i].buf != p);
     for (unsigned i = 0; i < 64; i++) if (pools[i].p == p) {
         pools[i].p = NULL; pool_live--; free(p); return;
     }
@@ -158,8 +163,9 @@ static NTSTATUS KeWaitForSingleObject(KEVENT* event, unsigned reason, unsigned m
     CHECK(!pending && event->signaled); return STATUS_SUCCESS;
 }
 static void log_device_error(device_extension* v, device* dev, int error) {
-    CHECK(v == &volume && dev >= devices && dev < devices + count && error == BTRFS_DEV_STAT_READ_ERRS);
-    read_errors++;
+    CHECK(v == &volume && dev == &devices[cfg.fail_device]);
+    if (error == BTRFS_DEV_STAT_READ_ERRS) { CHECK(cfg.fault == READ_ERROR); read_errors++; }
+    else { CHECK(error == BTRFS_DEV_STAT_WRITE_ERRS && cfg.fault == WRITE_ERROR); write_errors++; }
 }
 static NTSTATUS write_data_phys(PDEVICE_OBJECT obj, void* file, uint64_t address, void* data, uint32_t size) {
     unsigned id = obj->id;
@@ -171,6 +177,7 @@ static NTSTATUS write_data_phys(PDEVICE_OBJECT obj, void* file, uint64_t address
         fprintf(stderr, "unexpected repair write: batch %u, device %u\n", batch, id); CHECK(false);
     }
     CHECK(size == min(BATCH_ROWS, cfg.rows - batch * BATCH_ROWS) * STRIPE_BYTES);
+    if (inject(WRITE_ERROR, batch, id)) return STATUS_IO_DEVICE_ERROR;
     memcpy(disk[id] + off, data, size); return STATUS_SUCCESS;
 }
 static void verify_stripe(device_extension* v, chunk* c, scrub_context_raid56* context,
@@ -184,7 +191,8 @@ static void verify_stripe(device_extension* v, chunk* c, scrub_context_raid56* c
         CHECK(memcmp(context->stripes[id].buf + num * STRIPE_BYTES, disk[id] + off, STRIPE_BYTES) == 0);
         if (num == 0 && (cfg.repair_batches & (1u << batch)) && (cfg.repair_devices & (1u << id))) {
             context->stripes[id].buf[0] ^= 0x5a;
-            expected[id][off] ^= 0x5a;
+            if (cfg.fault != WRITE_ERROR || batch != cfg.fail_batch || id < cfg.fail_device)
+                expected[id][off] ^= 0x5a;
             context->stripes[id].rewrite = true;
             wanted_writes[batch][id]++;
         }
