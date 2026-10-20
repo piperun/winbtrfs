@@ -320,14 +320,52 @@ static NTSTATUS __stdcall device_usage_completion(PDEVICE_OBJECT DeviceObject, P
 
     context->Status = Irp->IoStatus.Status;
 
+    IoFreeIrp(Irp);
+
     KeSetEvent(&context->Event, 0, false);
 
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
+static NTSTATUS send_device_usage_notification(volume_child* vc, PIO_STACK_LOCATION IrpSp, bool in_path) {
+    PIRP Irp;
+    PIO_STACK_LOCATION next;
+    device_usage_context context;
+    NTSTATUS Status;
+
+    Irp = IoAllocateIrp(vc->devobj->StackSize, false);
+    if (!Irp) {
+        ERR("out of memory\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    next = IoGetNextIrpStackLocation(Irp);
+    next->MajorFunction = IRP_MJ_PNP;
+    next->MinorFunction = IRP_MN_DEVICE_USAGE_NOTIFICATION;
+    next->Parameters.UsageNotification = IrpSp->Parameters.UsageNotification;
+    next->Parameters.UsageNotification.InPath = in_path;
+    next->FileObject = vc->fileobj;
+
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+    context.iosb.Status = STATUS_SUCCESS;
+    Irp->UserIosb = &context.iosb;
+
+    KeInitializeEvent(&context.Event, NotificationEvent, false);
+    Irp->UserEvent = &context.Event;
+    IoSetCompletionRoutine(Irp, device_usage_completion, &context, true, true, true);
+
+    Status = IoCallDriver(vc->devobj, Irp);
+    if (Status == STATUS_PENDING)
+        KeWaitForSingleObject(&context.Event, Executive, KernelMode, false, NULL);
+
+    return context.Status;
+}
+
 static NTSTATUS pdo_device_usage_notification(pdo_device_extension* pdode, PIRP Irp) {
     PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
     LIST_ENTRY* le;
+    NTSTATUS Status = STATUS_SUCCESS;
 
     TRACE("(%p, %p)\n", pdode, Irp);
 
@@ -339,40 +377,23 @@ static NTSTATUS pdo_device_usage_notification(pdo_device_extension* pdode, PIRP 
         volume_child* vc = CONTAINING_RECORD(le, volume_child, list_entry);
 
         if (vc->devobj) {
-            PIRP Irp2;
-            PIO_STACK_LOCATION IrpSp2;
-            device_usage_context context;
+            Status = send_device_usage_notification(vc, IrpSp, IrpSp->Parameters.UsageNotification.InPath);
+            if (!NT_SUCCESS(Status)) {
+                LIST_ENTRY* rollback = le->Blink;
 
-            Irp2 = IoAllocateIrp(vc->devobj->StackSize, false);
-            if (!Irp2) {
-                ERR("out of memory\n");
-                ExReleaseResourceLite(&pdode->child_lock);
-                return STATUS_INSUFFICIENT_RESOURCES;
-            }
+                ERR("device usage notification returned %08lx\n", Status);
+                while (rollback != &pdode->children) {
+                    volume_child* previous = CONTAINING_RECORD(rollback, volume_child, list_entry);
 
-            IrpSp2 = IoGetNextIrpStackLocation(Irp2);
-            IrpSp2->MajorFunction = IRP_MJ_PNP;
-            IrpSp2->MinorFunction = IRP_MN_DEVICE_USAGE_NOTIFICATION;
-            IrpSp2->Parameters.UsageNotification = IrpSp->Parameters.UsageNotification;
-            IrpSp2->FileObject = vc->fileobj;
+                    if (previous->devobj) {
+                        NTSTATUS rollback_status = send_device_usage_notification(previous, IrpSp, !IrpSp->Parameters.UsageNotification.InPath);
+                        if (!NT_SUCCESS(rollback_status))
+                            ERR("device usage rollback returned %08lx\n", rollback_status);
+                    }
 
-            context.iosb.Status = STATUS_SUCCESS;
-            Irp2->UserIosb = &context.iosb;
-
-            KeInitializeEvent(&context.Event, NotificationEvent, false);
-            Irp2->UserEvent = &context.Event;
-
-            IoSetCompletionRoutine(Irp2, device_usage_completion, &context, true, true, true);
-
-            context.Status = IoCallDriver(vc->devobj, Irp2);
-
-            if (context.Status == STATUS_PENDING)
-                KeWaitForSingleObject(&context.Event, Executive, KernelMode, false, NULL);
-
-            if (!NT_SUCCESS(context.Status)) {
-                ERR("IoCallDriver returned %08lx\n", context.Status);
-                ExReleaseResourceLite(&pdode->child_lock);
-                return context.Status;
+                    rollback = rollback->Blink;
+                }
+                break;
             }
         }
 
@@ -381,7 +402,7 @@ static NTSTATUS pdo_device_usage_notification(pdo_device_extension* pdode, PIRP 
 
     ExReleaseResourceLite(&pdode->child_lock);
 
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 static NTSTATUS pdo_query_device_relations(PDEVICE_OBJECT pdo, PIRP Irp) {
@@ -434,24 +455,41 @@ static NTSTATUS pdo_pnp(PDEVICE_OBJECT pdo, PIRP Irp) {
     return Irp->IoStatus.Status;
 }
 
+_Function_class_(IO_COMPLETION_ROUTINE)
+static NTSTATUS __stdcall pnp_usage_completion(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID conptr) {
+    device_extension* Vcb = conptr;
+    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
+
+    UNUSED(DeviceObject);
+
+    if (!NT_SUCCESS(Irp->IoStatus.Status))
+        IoAdjustPagingPathCount(&Vcb->page_file_count, !IrpSp->Parameters.UsageNotification.InPath);
+
+    if (Irp->PendingReturned)
+        IoMarkIrpPending(Irp);
+
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS pnp_device_usage_notification(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
     PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
     device_extension* Vcb = DeviceObject->DeviceExtension;
 
-    if (IrpSp->Parameters.UsageNotification.InPath) {
-        switch (IrpSp->Parameters.UsageNotification.Type) {
-            case DeviceUsageTypePaging:
-            case DeviceUsageTypeHibernation:
-            case DeviceUsageTypeDumpFile:
-                IoAdjustPagingPathCount(&Vcb->page_file_count, IrpSp->Parameters.UsageNotification.InPath);
-                break;
+    switch (IrpSp->Parameters.UsageNotification.Type) {
+        case DeviceUsageTypePaging:
+        case DeviceUsageTypeHibernation:
+        case DeviceUsageTypeDumpFile:
+            IoAdjustPagingPathCount(&Vcb->page_file_count, IrpSp->Parameters.UsageNotification.InPath);
+            IoCopyCurrentIrpStackLocationToNext(Irp);
+            IoSetCompletionRoutine(Irp, pnp_usage_completion, Vcb, true, true, true);
+            break;
 
-            default:
-                break;
-        }
+        default:
+            IoSkipCurrentIrpStackLocation(Irp);
+            break;
     }
 
-    IoSkipCurrentIrpStackLocation(Irp);
+    Irp->IoStatus.Status = STATUS_SUCCESS;
     return IoCallDriver(Vcb->Vpb->RealDevice, Irp);
 }
 
