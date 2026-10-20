@@ -1,0 +1,450 @@
+/* Copyright (c) Mark Harmstone 2016-17
+ *
+ * This file is part of WinBtrfs.
+ *
+ * WinBtrfs is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public Licence as published by
+ * the Free Software Foundation, either version 3 of the Licence, or
+ * (at your option) any later version.
+ *
+ * WinBtrfs is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public Licence for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public Licence
+ * along with WinBtrfs.  If not, see <http://www.gnu.org/licenses/>. */
+
+/* Maintain directory enumeration state and select matching entries. */
+#include "btrfs_drv.h"
+#include "crc32c.h"
+#include "directory-query.h"
+
+static NTSTATUS next_dir_entry(file_ref* fileref, uint64_t* offset, dir_entry* de, dir_child** pdc) {
+    LIST_ENTRY* le;
+    dir_child* dc;
+
+    if (*pdc) {
+        dir_child* dc2 = *pdc;
+
+        if (dc2->list_entry_index.Flink != &fileref->fcb->dir_children_index)
+            dc = CONTAINING_RECORD(dc2->list_entry_index.Flink, dir_child, list_entry_index);
+        else
+            dc = NULL;
+
+        goto next;
+    }
+
+    if (fileref->parent) { // don't return . and .. if root directory
+        if (*offset == 0) {
+            de->key.objectid = fileref->fcb->inode;
+            de->key.type = BTRFS_INODE_ITEM_KEY;
+            de->key.offset = 0;
+            de->dir_entry_type = DirEntryType_Self;
+            de->name.Buffer = L".";
+            de->name.Length = de->name.MaximumLength = sizeof(WCHAR);
+            de->type = BTRFS_FT_DIR;
+
+            *offset = 1;
+            *pdc = NULL;
+
+            return STATUS_SUCCESS;
+        } else if (*offset == 1) {
+            de->key.objectid = fileref->parent->fcb->inode;
+            de->key.type = BTRFS_INODE_ITEM_KEY;
+            de->key.offset = 0;
+            de->dir_entry_type = DirEntryType_Parent;
+            de->name.Buffer = L"..";
+            de->name.Length = de->name.MaximumLength = sizeof(WCHAR) * 2;
+            de->type = BTRFS_FT_DIR;
+
+            *offset = 2;
+            *pdc = NULL;
+
+            return STATUS_SUCCESS;
+        }
+    }
+
+    if (*offset < 2)
+        *offset = 2;
+
+    dc = NULL;
+    le = fileref->fcb->dir_children_index.Flink;
+
+    // skip entries before offset
+    while (le != &fileref->fcb->dir_children_index) {
+        dir_child* dc2 = CONTAINING_RECORD(le, dir_child, list_entry_index);
+
+        if (dc2->index >= *offset) {
+            dc = dc2;
+            break;
+        }
+
+        le = le->Flink;
+    }
+
+next:
+    if (!dc)
+        return STATUS_NO_MORE_FILES;
+
+    if (dc->root_dir && fileref->parent) { // hide $Root dir unless in apparent root, to avoid recursion
+        if (dc->list_entry_index.Flink == &fileref->fcb->dir_children_index)
+            return STATUS_NO_MORE_FILES;
+
+        dc = CONTAINING_RECORD(dc->list_entry_index.Flink, dir_child, list_entry_index);
+    }
+
+    de->key = dc->key;
+    de->name = dc->name;
+    de->type = dc->type;
+    de->dir_entry_type = DirEntryType_File;
+    de->dc = dc;
+
+    *offset = dc->index + 1;
+    *pdc = dc;
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS query_directory(PIRP Irp) {
+    PIO_STACK_LOCATION IrpSp;
+    NTSTATUS Status, status2;
+    fcb* fcb;
+    ccb* ccb;
+    file_ref* fileref;
+    device_extension* Vcb;
+    void* buf;
+    uint8_t *curitem, *lastitem;
+    LONG length;
+    ULONG count;
+    bool has_wildcard = false, specific_file = false, initial;
+    dir_entry de;
+    uint64_t newoffset;
+    dir_child* dc = NULL;
+
+    TRACE("query directory\n");
+
+    IrpSp = IoGetCurrentIrpStackLocation(Irp);
+    fcb = IrpSp->FileObject->FsContext;
+    ccb = IrpSp->FileObject->FsContext2;
+    fileref = ccb ? ccb->fileref : NULL;
+
+    if (!fileref)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!ccb) {
+        ERR("ccb was NULL\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (!fcb) {
+        ERR("fcb was NULL\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (Irp->RequestorMode == UserMode && !(ccb->access & FILE_LIST_DIRECTORY)) {
+        WARN("insufficient privileges\n");
+        return STATUS_ACCESS_DENIED;
+    }
+
+    Vcb = fcb->Vcb;
+
+    if (!Vcb) {
+        ERR("Vcb was NULL\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (fileref->fcb == Vcb->dummy_fcb)
+        return STATUS_NO_MORE_FILES;
+
+    if (IrpSp->Flags == 0) {
+        TRACE("QD flags: (none)\n");
+    } else {
+        ULONG flags = IrpSp->Flags;
+
+        TRACE("QD flags:\n");
+
+        if (flags & SL_INDEX_SPECIFIED) {
+            TRACE("    SL_INDEX_SPECIFIED\n");
+            flags &= ~SL_INDEX_SPECIFIED;
+        }
+
+        if (flags & SL_RESTART_SCAN) {
+            TRACE("    SL_RESTART_SCAN\n");
+            flags &= ~SL_RESTART_SCAN;
+        }
+
+        if (flags & SL_RETURN_SINGLE_ENTRY) {
+            TRACE("    SL_RETURN_SINGLE_ENTRY\n");
+            flags &= ~SL_RETURN_SINGLE_ENTRY;
+        }
+
+        if (flags != 0)
+            TRACE("    unknown flags: %lu\n", flags);
+    }
+
+    if (IrpSp->Flags & SL_RESTART_SCAN) {
+        ccb->query_dir_offset = 0;
+
+        if (ccb->query_string.Buffer) {
+            RtlFreeUnicodeString(&ccb->query_string);
+            ccb->query_string.Buffer = NULL;
+        }
+
+        ccb->has_wildcard = false;
+        ccb->specific_file = false;
+    }
+
+    initial = !ccb->query_string.Buffer;
+
+    if (IrpSp->Parameters.QueryDirectory.FileName && IrpSp->Parameters.QueryDirectory.FileName->Length > 1) {
+        TRACE("QD filename: %.*S\n", (int)(IrpSp->Parameters.QueryDirectory.FileName->Length / sizeof(WCHAR)), IrpSp->Parameters.QueryDirectory.FileName->Buffer);
+
+        if (IrpSp->Parameters.QueryDirectory.FileName->Length > sizeof(WCHAR) || IrpSp->Parameters.QueryDirectory.FileName->Buffer[0] != L'*') {
+            specific_file = true;
+
+            if (FsRtlDoesNameContainWildCards(IrpSp->Parameters.QueryDirectory.FileName)) {
+                has_wildcard = true;
+                specific_file = false;
+            } else if (!initial)
+                return STATUS_NO_MORE_FILES;
+        }
+
+        if (ccb->query_string.Buffer)
+            RtlFreeUnicodeString(&ccb->query_string);
+
+        if (has_wildcard)
+            RtlUpcaseUnicodeString(&ccb->query_string, IrpSp->Parameters.QueryDirectory.FileName, true);
+        else {
+            ccb->query_string.Buffer = ExAllocatePoolWithTag(PagedPool, IrpSp->Parameters.QueryDirectory.FileName->Length, ALLOC_TAG);
+            if (!ccb->query_string.Buffer) {
+                ERR("out of memory\n");
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            ccb->query_string.Length = ccb->query_string.MaximumLength = IrpSp->Parameters.QueryDirectory.FileName->Length;
+            RtlCopyMemory(ccb->query_string.Buffer, IrpSp->Parameters.QueryDirectory.FileName->Buffer, IrpSp->Parameters.QueryDirectory.FileName->Length);
+        }
+
+        ccb->has_wildcard = has_wildcard;
+        ccb->specific_file = specific_file;
+    } else {
+        has_wildcard = ccb->has_wildcard;
+        specific_file = ccb->specific_file;
+
+        if (!(IrpSp->Flags & SL_RESTART_SCAN)) {
+            initial = false;
+
+            if (specific_file)
+                return STATUS_NO_MORE_FILES;
+        }
+    }
+
+    if (ccb->query_string.Buffer) {
+        TRACE("query string = %.*S\n", (int)(ccb->query_string.Length / sizeof(WCHAR)), ccb->query_string.Buffer);
+    }
+
+    newoffset = ccb->query_dir_offset;
+
+    ExAcquireResourceSharedLite(&Vcb->tree_lock, true);
+
+    ExAcquireResourceSharedLite(&fileref->fcb->nonpaged->dir_children_lock, true);
+
+    Status = next_dir_entry(fileref, &newoffset, &de, &dc);
+
+    if (!NT_SUCCESS(Status)) {
+        if (Status == STATUS_NO_MORE_FILES && initial)
+            Status = STATUS_NO_SUCH_FILE;
+        goto end;
+    }
+
+    ccb->query_dir_offset = newoffset;
+
+    buf = map_user_buffer(Irp, NormalPagePriority);
+
+    if (Irp->MdlAddress && !buf) {
+        ERR("MmGetSystemAddressForMdlSafe returned NULL\n");
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto end;
+    }
+
+    length = IrpSp->Parameters.QueryDirectory.Length;
+
+    if (specific_file) {
+        bool found = false;
+        UNICODE_STRING us;
+        LIST_ENTRY* le;
+        uint32_t hash;
+        uint8_t c;
+
+        us.Buffer = NULL;
+
+        if (!ccb->case_sensitive) {
+            Status = RtlUpcaseUnicodeString(&us, &ccb->query_string, true);
+            if (!NT_SUCCESS(Status)) {
+                ERR("RtlUpcaseUnicodeString returned %08lx\n", Status);
+                goto end;
+            }
+
+            hash = calc_crc32c(0xffffffff, (uint8_t*)us.Buffer, us.Length);
+        } else
+            hash = calc_crc32c(0xffffffff, (uint8_t*)ccb->query_string.Buffer, ccb->query_string.Length);
+
+        c = hash >> 24;
+
+        if (ccb->case_sensitive) {
+            if (fileref->fcb->hash_ptrs[c]) {
+                le = fileref->fcb->hash_ptrs[c];
+                while (le != &fileref->fcb->dir_children_hash) {
+                    dir_child* dc2 = CONTAINING_RECORD(le, dir_child, list_entry_hash);
+
+                    if (dc2->hash == hash) {
+                        if (dc2->name.Length == ccb->query_string.Length && RtlCompareMemory(dc2->name.Buffer, ccb->query_string.Buffer, ccb->query_string.Length) == ccb->query_string.Length) {
+                            found = true;
+
+                            de.key = dc2->key;
+                            de.name = dc2->name;
+                            de.type = dc2->type;
+                            de.dir_entry_type = DirEntryType_File;
+                            de.dc = dc2;
+
+                            break;
+                        }
+                    } else if (dc2->hash > hash)
+                        break;
+
+                    le = le->Flink;
+                }
+            }
+        } else {
+            if (fileref->fcb->hash_ptrs_uc[c]) {
+                le = fileref->fcb->hash_ptrs_uc[c];
+                while (le != &fileref->fcb->dir_children_hash_uc) {
+                    dir_child* dc2 = CONTAINING_RECORD(le, dir_child, list_entry_hash_uc);
+
+                    if (dc2->hash_uc == hash) {
+                        if (dc2->name_uc.Length == us.Length && RtlCompareMemory(dc2->name_uc.Buffer, us.Buffer, us.Length) == us.Length) {
+                            found = true;
+
+                            de.key = dc2->key;
+                            de.name = dc2->name;
+                            de.type = dc2->type;
+                            de.dir_entry_type = DirEntryType_File;
+                            de.dc = dc2;
+
+                            break;
+                        }
+                    } else if (dc2->hash_uc > hash)
+                        break;
+
+                    le = le->Flink;
+                }
+            }
+        }
+
+        if (us.Buffer)
+            ExFreePool(us.Buffer);
+
+        if (!found) {
+            Status = STATUS_NO_SUCH_FILE;
+            goto end;
+        }
+    } else if (has_wildcard) {
+        while (!FsRtlIsNameInExpression(&ccb->query_string, &de.name, !ccb->case_sensitive, NULL)) {
+            newoffset = ccb->query_dir_offset;
+            Status = next_dir_entry(fileref, &newoffset, &de, &dc);
+
+            if (NT_SUCCESS(Status))
+                ccb->query_dir_offset = newoffset;
+            else {
+                if (Status == STATUS_NO_MORE_FILES && initial)
+                    Status = STATUS_NO_SUCH_FILE;
+
+                goto end;
+            }
+        }
+    }
+
+    TRACE("file(0) = %.*S\n", (int)(de.name.Length / sizeof(WCHAR)), de.name.Buffer);
+    TRACE("offset = %I64u\n", ccb->query_dir_offset - 1);
+
+    Status = query_dir_item(fcb, ccb, buf, &length, Irp, &de, fcb->subvol);
+
+    count = 0;
+    if (NT_SUCCESS(Status) && !(IrpSp->Flags & SL_RETURN_SINGLE_ENTRY) && !specific_file) {
+        lastitem = (uint8_t*)buf;
+
+        while (length > 0) {
+            switch (IrpSp->Parameters.QueryDirectory.FileInformationClass) {
+#ifndef _MSC_VER
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wswitch"
+#endif
+                case FileBothDirectoryInformation:
+                case FileDirectoryInformation:
+                case FileIdBothDirectoryInformation:
+                case FileFullDirectoryInformation:
+                case FileIdFullDirectoryInformation:
+                case FileIdExtdDirectoryInformation:
+                case FileIdExtdBothDirectoryInformation:
+                    length -= length % 8;
+                    break;
+#ifndef _MSC_VER
+#pragma GCC diagnostic pop
+#endif
+
+                case FileNamesInformation:
+                    length -= length % 4;
+                    break;
+
+                default:
+                    WARN("unhandled file information class %u\n", IrpSp->Parameters.QueryDirectory.FileInformationClass);
+                    break;
+            }
+
+            if (length > 0) {
+                newoffset = ccb->query_dir_offset;
+                Status = next_dir_entry(fileref, &newoffset, &de, &dc);
+                if (NT_SUCCESS(Status)) {
+                    if (!has_wildcard || FsRtlIsNameInExpression(&ccb->query_string, &de.name, !ccb->case_sensitive, NULL)) {
+                        curitem = (uint8_t*)buf + IrpSp->Parameters.QueryDirectory.Length - length;
+                        count++;
+
+                        TRACE("file(%lu) %Iu = %.*S\n", count, curitem - (uint8_t*)buf, (int)(de.name.Length / sizeof(WCHAR)), de.name.Buffer);
+                        TRACE("offset = %I64u\n", ccb->query_dir_offset - 1);
+
+                        status2 = query_dir_item(fcb, ccb, curitem, &length, Irp, &de, fcb->subvol);
+
+                        if (NT_SUCCESS(status2)) {
+                            ULONG* lastoffset = (ULONG*)lastitem;
+
+                            *lastoffset = (ULONG)(curitem - lastitem);
+                            ccb->query_dir_offset = newoffset;
+
+                            lastitem = curitem;
+                        } else
+                            break;
+                    } else
+                        ccb->query_dir_offset = newoffset;
+                } else {
+                    if (Status == STATUS_NO_MORE_FILES)
+                        Status = STATUS_SUCCESS;
+
+                    break;
+                }
+            } else
+                break;
+        }
+    }
+
+    Irp->IoStatus.Information = IrpSp->Parameters.QueryDirectory.Length - length;
+
+end:
+    ExReleaseResourceLite(&fileref->fcb->nonpaged->dir_children_lock);
+
+    ExReleaseResourceLite(&Vcb->tree_lock);
+
+    TRACE("returning %08lx\n", Status);
+
+    return Status;
+}

@@ -80,11 +80,13 @@ endif()
 # btrfs.sys
 
 set(SRC_FILES src/balance.c
+    src/allocated-ranges.c
     src/blake2b-ref.c
     src/boot.c
     src/btrfs.c
     src/cache.c
     src/calcthread.c
+    src/checksum-info.c
     src/compress.c
     src/crc32c.c
     src/create.c
@@ -94,11 +96,14 @@ set(SRC_FILES src/balance.c
     src/stream-create.c
     src/devctrl.c
     src/dirctrl.c
+    src/directory-entry.c
+    src/directory-query.c
     src/ea.c
     src/extent-tree.c
     src/extent-ranges.c
     src/fastio.c
     src/fileinfo.c
+    src/file-name.c
     src/flushthread.c
     src/free-space.c
     src/fsctl.c
