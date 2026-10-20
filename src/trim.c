@@ -194,7 +194,7 @@ NTSTATUS trim_devices(device_extension* Vcb) {
             stripe->dmdsa = ExAllocatePoolWithTag(PagedPool, datalen, ALLOC_TAG);
             if (!stripe->dmdsa) {
                 ERR("out of memory\n");
-                goto nextdev;
+                goto skipdev;
             }
 
             stripe->dmdsa->Size = sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES);
@@ -224,7 +224,7 @@ NTSTATUS trim_devices(device_extension* Vcb) {
 
             if (!stripe->Irp) {
                 ERR("IoAllocateIrp failed\n");
-                goto nextdev;
+                goto skipdev;
             }
 
             IrpSp = IoGetNextIrpStackLocation(stripe->Irp);
@@ -243,6 +243,12 @@ NTSTATUS trim_devices(device_extension* Vcb) {
             IoSetCompletionRoutine(stripe->Irp, trim_completion, &context, true, true, true);
 
             IoCallDriver(dev->devobj, stripe->Irp);
+            goto nextdev;
+
+skipdev:
+            // This device will not produce a completion, so retire its pending slot.
+            if (InterlockedDecrement(&context.left) == 0)
+                KeSetEvent(&context.Event, 0, false);
 
 nextdev:
 #endif
