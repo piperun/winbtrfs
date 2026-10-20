@@ -321,8 +321,6 @@ cont:
                     extent_range* er2 = CONTAINING_RECORD(le2, extent_range, list_entry);
 
                     if (ext->extent_data.disk_bytenr >= er2->address && ext->extent_data.disk_bytenr + ext->extent_data.disk_num_bytes <= er2->address + er2->length && er2->changed) {
-                        NTSTATUS Status;
-
                         Status = update_changed_extent_ref(fcb->Vcb, er2->chunk, ext->extent_data.disk_bytenr,
                                                            ext->extent_data.disk_num_bytes, fcb->subvol->id, fcb->inode,
                                                            ext->offset - ext->extent_data.offset, -1,
