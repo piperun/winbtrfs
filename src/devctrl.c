@@ -210,6 +210,8 @@ static NTSTATUS probe_volume(void* data, ULONG length, KPROCESSOR_MODE processor
     else
         volume_arrival(&pnp_name, false);
 
+    ExFreePool(pnp_name.Buffer);
+
     return STATUS_SUCCESS;
 }
 
