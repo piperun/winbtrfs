@@ -41,7 +41,7 @@ NTSTATUS get_retrieval_pointers(device_extension* Vcb, PFILE_OBJECT FileObject, 
 
         if ((uint64_t)in->StartingVcn.QuadPart >= num_sectors) {
             Status = STATUS_END_OF_FILE;
-            leave;
+            goto end;
         }
 
         out->ExtentCount = 0;
@@ -59,7 +59,7 @@ NTSTATUS get_retrieval_pointers(device_extension* Vcb, PFILE_OBJECT FileObject, 
 
             if (ext && ext->extent_data.type == BTRFS_FILE_EXTENT_INLINE) {
                 Status = STATUS_END_OF_FILE;
-                leave;
+                goto end;
             }
 
             if (last_off < extent_start)
@@ -82,7 +82,7 @@ NTSTATUS get_retrieval_pointers(device_extension* Vcb, PFILE_OBJECT FileObject, 
 
                 if (outlen < sizeof(out->Extents[0])) {
                     Status = STATUS_BUFFER_OVERFLOW;
-                    leave;
+                    goto end;
                 }
 
                 out->Extents[out->ExtentCount].NextVcn.QuadPart = run_end;
@@ -96,6 +96,8 @@ NTSTATUS get_retrieval_pointers(device_extension* Vcb, PFILE_OBJECT FileObject, 
         }
 
         Status = STATUS_SUCCESS;
+end:
+        ;
     } finally {
         ExReleaseResourceLite(fcb->Header.Resource);
     }

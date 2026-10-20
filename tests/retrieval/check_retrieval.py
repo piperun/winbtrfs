@@ -11,6 +11,7 @@ parser.add_argument("--revision")
 parser.add_argument("--build-dir", type=Path, required=True)
 parser.add_argument("--init", choices=["pattern", "zero"], default="pattern")
 parser.add_argument("--sanitize", action="store_true")
+parser.add_argument("--mingw", action="store_true", help="Use the driver's actual MinGW cleanup macros")
 args = parser.parse_args()
 repo, out = args.repo.resolve(), args.build_dir.resolve()
 out.mkdir(parents=True, exist_ok=True)
@@ -33,9 +34,16 @@ while depth:
     depth += (source[end] == "{") - (source[end] == "}")
     end += 1
 function = source[start:end]
-# Translate only the structured cleanup syntax; all query logic is unchanged.
-function = function.replace("try {", "{").replace("leave;", "goto cleanup;")
-function = function.replace("} finally {", "} cleanup: {")
+if args.mingw:
+    header = read("src/btrfs_drv.h")
+    begin = header.index("#if defined(_MSC_VER) || defined(__clang__)")
+    end = header.index("#endif", begin) + len("#endif")
+    function = header[begin:end] + "\n" + function
+else:
+    # Translate only the structured cleanup syntax; query logic is unchanged.
+    has_leave = "leave;" in function
+    function = function.replace("try {", "{").replace("leave;", "goto cleanup;")
+    function = function.replace("} finally {", "} cleanup: {" if has_leave else "} {")
 (out / "query.inc").write_text(function + "\n")
 (out / "btrfs.h").write_text(read("src/btrfs.h"))
 binary = out / "retrieval_test"
