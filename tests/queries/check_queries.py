@@ -24,6 +24,15 @@ def read(path):
     return (repo / path).read_text()
 
 
+def read_optional(path):
+    if args.revision:
+        result = subprocess.run(["git", "-C", str(repo), "show", f"{args.revision}:{path}"],
+                                capture_output=True, text=True, timeout=10)
+        return result.stdout if result.returncode == 0 else None
+    source = repo / path
+    return source.read_text() if source.exists() else None
+
+
 header = read("src/btrfs_drv.h")
 begin = header.index("#if defined(_MSC_VER) || defined(__clang__)")
 end = header.index("#endif", begin) + len("#endif")
@@ -31,13 +40,21 @@ macros = header[begin:end]
 checksum = read("src/checksum-info.c")
 ranges = read("src/allocated-ranges.c")
 range_start = "static NTSTATUS append_range(" if "static NTSTATUS append_range(" in ranges else "NTSTATUS query_ranges("
-(out / "query.inc").write_text(macros + "\n" + checksum[checksum.index("static NTSTATUS add_csum_sparse_extents("):]
+helpers = []
+math_header = read_optional("src/range-math.h")
+math_source = read_optional("src/range-math.c")
+if math_header is not None and math_source is not None:
+    (out / "range-math.h").write_text(math_header)
+    (out / "range-math.c").write_text(math_source)
+    helpers.append(str(out / "range-math.c"))
+math_include = '#include "range-math.h"\n' if helpers else ''
+(out / "query.inc").write_text(macros + "\n" + math_include + checksum[checksum.index("static NTSTATUS add_csum_sparse_extents("):]
                                + "\n" + ranges[ranges.index(range_start):])
 binary = out / "query_test"
 flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie"] if args.sanitize else []
 subprocess.run(["gcc", "-std=c11", "-O0", "-g", "-Wall", "-Wextra", "-Werror",
                 f"-ftrivial-auto-var-init={args.init}", *flags, "-I", str(out),
-                str(Path(__file__).with_name("query_test.c")), "-o", str(binary)], check=True, timeout=30)
+                str(Path(__file__).with_name("query_test.c")), *helpers, "-o", str(binary)], check=True, timeout=30)
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 env = dict(os.environ, ASAN_OPTIONS="detect_leaks=0")
 cases = subprocess.check_output([str(binary), "--list"], text=True, timeout=5, env=env).splitlines()

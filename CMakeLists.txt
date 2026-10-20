@@ -115,6 +115,7 @@ set(SRC_FILES src/balance.c
     src/mount-cleanup.c
     src/notify.c
     src/pnp.c
+    src/range-math.c
     src/read.c
     src/registry.c
     src/rename.c

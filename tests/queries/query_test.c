@@ -178,6 +178,27 @@ static int ranges_case(const char *name) {
     } else if (!strcmp(name, "ranges-beyond-eof")) {
         in.FileOffset.QuadPart = 36864;
         expected_count = 0;
+    } else if (!strcmp(name, "ranges-large-extent-length")) {
+        ext[0].offset = 4096;
+        ext[0].extent_data.num_bytes = UINT64_MAX;
+        count = 1;
+        in = (FILE_ALLOCATED_RANGE_BUFFER){{8192}, {8192}};
+        expected[0] = in;
+        expected_count = 1;
+    } else if (!strcmp(name, "ranges-empty-extent")) {
+        ext[0].extent_data.num_bytes = 0;
+        count = 1;
+        expected_count = 0;
+    } else if (!strcmp(name, "ranges-zero-capacity") || !strcmp(name, "ranges-short-capacity")) {
+        capacity = !strcmp(name, "ranges-zero-capacity") ? 0 : sizeof(expected[0]) - 1;
+        expected_status = STATUS_BUFFER_TOO_SMALL;
+        expected_count = 0;
+    } else if (!strcmp(name, "ranges-before-request")) {
+        in = (FILE_ALLOCATED_RANGE_BUFFER){{4096}, {4096}};
+        expected_count = 0;
+    } else if (!strcmp(name, "ranges-at-request-end")) {
+        in.Length.QuadPart = 16384;
+        expected_count = 1;
     }
     link_extents(&node, ext, count);
     struct { FILE_ALLOCATED_RANGE_BUFFER ranges[2]; unsigned char guard[16]; } out;
@@ -204,7 +225,9 @@ int main(int argc, char **argv) {
         "ranges-intersection", "ranges-ordinary", "ranges-eof", "ranges-zero",
         "ranges-negative", "ranges-overflow", "ranges-page", "ranges-next-page",
         "ranges-explicit-hole", "ranges-prealloc", "ranges-ignored", "ranges-clip-eof",
-        "ranges-negative-length", "ranges-inline", "ranges-adjacent", "ranges-prealloc-after-eof", "ranges-beyond-eof"
+        "ranges-negative-length", "ranges-inline", "ranges-adjacent", "ranges-prealloc-after-eof", "ranges-beyond-eof",
+        "ranges-large-extent-length", "ranges-empty-extent", "ranges-zero-capacity", "ranges-short-capacity",
+        "ranges-before-request", "ranges-at-request-end"
     };
     if (argc == 2 && !strcmp(argv[1], "--list")) {
         for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) puts(cases[i]);

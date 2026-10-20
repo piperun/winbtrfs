@@ -31,6 +31,10 @@ extents and adjacent allocations. A page containing one range returns
 `STATUS_BUFFER_OVERFLOW` when a second disjoint result cannot fit. Resuming at
 the returned range's end returns the later allocation. Empty intersections,
 including requests beginning at or beyond EOF, return success with zero bytes.
+Additional guards cover zero/undersized output capacity, zero-length extents,
+extent lengths spanning the unsigned 64-bit limit, and extents touching either
+request boundary. These preserve the existing query behavior while the pure
+clipping helper is tested independently under `tests/range-math`.
 
 These are native contract checks with modeled kernel services. See the
 [Microsoft FSCTL_QUERY_ALLOCATED_RANGES documentation](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_query_allocated_ranges)
@@ -51,3 +55,16 @@ placeholders followed by ordinary checksums, sparse and ordinary subranges,
 EOF clipping, zero length and empty files. The mixed fixture must have proven
 compressed and ordinary mappings; failure to establish that layout returns
 exit code 3 rather than passing the checksum assertion.
+
+For allocated-range checks on the isolated healthy `R:` test volume:
+
+```sh
+x86_64-w64-mingw32-gcc -std=c11 -O2 -Wall -Wextra -Werror -municode \
+  tests/queries/windows-ranges.c -lntdll -o /tmp/windows-ranges.exe
+```
+
+The client requires a Btrfs volume labeled `WBTRFS_TEST`. It creates an exclusive
+task directory and sparse/ordinary files, checks twelve range queries, then
+removes its fixtures. Coverage includes sparse holes, clipped subranges, EOF,
+empty requests, one-slot partial output and zero-slot output. Its deterministic
+status, byte-count and range output can be compared between driver builds.

@@ -17,6 +17,7 @@
 
 /* Allocated file ranges returned by FSCTL_QUERY_ALLOCATED_RANGES. */
 #include "allocated-ranges.h"
+#include "range-math.h"
 
 static NTSTATUS append_range(FILE_ALLOCATED_RANGE_BUFFER* out, ULONG outlen, ULONG_PTR* retlen,
                              uint64_t start, uint64_t end) {
@@ -67,7 +68,8 @@ NTSTATUS query_ranges(PFILE_OBJECT FileObject, FILE_ALLOCATED_RANGE_BUFFER* inbu
     le = fcb->extents.Flink;
     while (le != &fcb->extents) {
         extent* ext = CONTAINING_RECORD(le, extent, list_entry);
-        uint64_t length, extent_start, extent_end;
+        uint64_t length;
+        btrfs_byte_range clipped;
 
         le = le->Flink;
         if (ext->ignore || (ext->extent_data.type != BTRFS_FILE_EXTENT_INLINE && ext->extent_data.disk_bytenr == 0))
@@ -77,21 +79,19 @@ NTSTATUS query_ranges(PFILE_OBJECT FileObject, FILE_ALLOCATED_RANGE_BUFFER* inbu
             break;
 
         length = ext->extent_data.type == BTRFS_FILE_EXTENT_INLINE ? ext->extent_data.ram_bytes : ext->extent_data.num_bytes;
-        extent_start = ext->offset < start ? start : ext->offset;
-        extent_end = ext->offset + min(length, end - ext->offset);
-        if (extent_start >= extent_end)
+        if (!btrfs_clip_byte_range(start, end, ext->offset, length, &clipped))
             continue;
 
-        if (last_end > last_start && extent_start > last_end) {
+        if (last_end > last_start && clipped.start > last_end) {
             Status = append_range(outbuf, outbuflen, retlen, last_start, last_end);
             if (!NT_SUCCESS(Status))
                 goto end;
-            last_start = extent_start;
+            last_start = clipped.start;
         } else if (last_end == last_start)
-            last_start = extent_start;
+            last_start = clipped.start;
 
-        if (extent_end > last_end)
-            last_end = extent_end;
+        if (clipped.end > last_end)
+            last_end = clipped.end;
     }
 
     if (last_end > last_start)
