@@ -96,6 +96,7 @@ set(SRC_FILES src/balance.c
     src/dirctrl.c
     src/ea.c
     src/extent-tree.c
+    src/extent-ranges.c
     src/fastio.c
     src/fileinfo.c
     src/flushthread.c
