@@ -19,17 +19,6 @@
 #include "mount-cleanup.h"
 
 void cleanup_failed_mount(device_extension* Vcb, fcb* root_fcb, bool init_lookaside) {
-    if (init_lookaside) {
-        ExDeletePagedLookasideList(&Vcb->tree_data_lookaside);
-        ExDeletePagedLookasideList(&Vcb->traverse_ptr_lookaside);
-        ExDeletePagedLookasideList(&Vcb->batch_item_lookaside);
-        ExDeletePagedLookasideList(&Vcb->fileref_lookaside);
-        ExDeletePagedLookasideList(&Vcb->fcb_lookaside);
-        ExDeletePagedLookasideList(&Vcb->name_bit_lookaside);
-        ExDeleteNPagedLookasideList(&Vcb->range_lock_lookaside);
-        ExDeleteNPagedLookasideList(&Vcb->fcb_np_lookaside);
-    }
-
     if (Vcb->root_file)
         ObDereferenceObject(Vcb->root_file);
     else if (Vcb->root_fileref)
@@ -42,6 +31,18 @@ void cleanup_failed_mount(device_extension* Vcb, fcb* root_fcb, bool init_lookas
 
     if (Vcb->volume_fcb)
         reap_fcb(Vcb->volume_fcb);
+
+    // FCB destructors return allocations to these lookaside lists.
+    if (init_lookaside) {
+        ExDeletePagedLookasideList(&Vcb->tree_data_lookaside);
+        ExDeletePagedLookasideList(&Vcb->traverse_ptr_lookaside);
+        ExDeletePagedLookasideList(&Vcb->batch_item_lookaside);
+        ExDeletePagedLookasideList(&Vcb->fileref_lookaside);
+        ExDeletePagedLookasideList(&Vcb->fcb_lookaside);
+        ExDeletePagedLookasideList(&Vcb->name_bit_lookaside);
+        ExDeleteNPagedLookasideList(&Vcb->range_lock_lookaside);
+        ExDeleteNPagedLookasideList(&Vcb->fcb_np_lookaside);
+    }
 
     ExDeleteResourceLite(&Vcb->tree_lock);
     ExDeleteResourceLite(&Vcb->load_lock);
