@@ -212,9 +212,6 @@ NTSTATUS file_create(PIRP Irp, _Requires_lock_held_(_Curr_->tree_lock) _Requires
 
         // The new stream owns its parent hold; release the extra returned hold.
         free_fileref(stream_parent);
-
-        IoSetShareAccess(IrpSp->Parameters.Create.SecurityContext->DesiredAccess, IrpSp->Parameters.Create.ShareAccess,
-                         FileObject, &fileref->fcb->share_access);
     } else {
         ACCESS_MASK granted_access;
 
@@ -260,13 +257,9 @@ NTSTATUS file_create(PIRP Irp, _Requires_lock_held_(_Curr_->tree_lock) _Requires
             goto end;
         }
 
-        IoSetShareAccess(IrpSp->Parameters.Create.SecurityContext->DesiredAccess, IrpSp->Parameters.Create.ShareAccess, FileObject, &fileref->fcb->share_access);
-
         send_notification_fileref(fileref, options & FILE_DIRECTORY_FILE ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_ADDED, NULL);
         queue_notification_fcb(fileref->parent, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED, NULL);
     }
-
-    FileObject->FsContext = fileref->fcb;
 
     ccb = ExAllocatePoolWithTag(NonPagedPool, sizeof(*ccb), ALLOC_TAG);
     if (!ccb) {
@@ -302,16 +295,9 @@ NTSTATUS file_create(PIRP Irp, _Requires_lock_held_(_Curr_->tree_lock) _Requires
     ccb->reserving = false;
     ccb->lxss = called_from_lxss();
 
-#ifdef DEBUG_FCB_REFCOUNTS
-    oc = InterlockedIncrement(&fileref->open_count);
-    ERR("fileref %p: open_count now %i\n", fileref, oc);
-#else
-    InterlockedIncrement(&fileref->open_count);
-#endif
-    InterlockedIncrement(&Vcb->open_files);
-
+    // Reparse writes need these contexts before the create completes.
+    FileObject->FsContext = fileref->fcb;
     FileObject->FsContext2 = ccb;
-
     FileObject->SectionObjectPointer = &fileref->fcb->nonpaged->segment_object;
 
     // FIXME - ATOMIC_CREATE_ECP_IN_FLAG_BEST_EFFORT
@@ -338,8 +324,12 @@ NTSTATUS file_create(PIRP Irp, _Requires_lock_held_(_Curr_->tree_lock) _Requires
                     ExReleaseResourceLite(parfileref->fcb->Header.Resource);
                 }
 
+                FileObject->FsContext = NULL;
+                FileObject->FsContext2 = NULL;
+                FileObject->SectionObjectPointer = NULL;
+                ExFreePool(ccb);
                 free_fileref(fileref);
-                return Status;
+                goto end;
             }
         }
 
@@ -359,6 +349,17 @@ NTSTATUS file_create(PIRP Irp, _Requires_lock_held_(_Curr_->tree_lock) _Requires
 
         acec->OutFlags |= ATOMIC_CREATE_ECP_OUT_FLAG_OP_FLAGS_HONORED;
     }
+
+    IoSetShareAccess(IrpSp->Parameters.Create.SecurityContext->DesiredAccess, IrpSp->Parameters.Create.ShareAccess,
+                     FileObject, &fileref->fcb->share_access);
+
+#ifdef DEBUG_FCB_REFCOUNTS
+    oc = InterlockedIncrement(&fileref->open_count);
+    ERR("fileref %p: open_count now %i\n", fileref, oc);
+#else
+    InterlockedIncrement(&fileref->open_count);
+#endif
+    InterlockedIncrement(&Vcb->open_files);
 
     fileref->dc->type = fileref->fcb->type;
 

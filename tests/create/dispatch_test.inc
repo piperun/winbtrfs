@@ -1,5 +1,6 @@
 /* Production file creation dispatch with host-only Windows services. */
 #include "create_ecp.inc"
+#include "atomic_create_test.inc"
 static NTSTATUS (*fFsRtlGetEcpListFromIrp)(PIRP,ECP_LIST**) = NULL;
 static NTSTATUS (*fFsRtlGetNextExtraCreateParameter)(ECP_LIST*,void*,GUID*,void**,ULONG*) = NULL;
 static unsigned share_calls;
@@ -24,11 +25,15 @@ static void IoSetShareAccess(unsigned desired, unsigned share, PFILE_OBJECT obje
 static void RtlInitUnicodeString(UNICODE_STRING* out, const WCHAR* text) { CHECK(!text); memset(out,0,sizeof(*out)); }
 #define called_from_lxss() false
 static NTSTATUS set_reparse_point2(fcb* node, PREPARSE_DATA_BUFFER data, unsigned size, void* a, void* b, PIRP request, LIST_ENTRY* rollback) {
-    (void)node; (void)data; (void)size; (void)a; (void)b; (void)request; (void)rollback;
-    CHECK(false); return STATUS_INVALID_PARAMETER;
+    return host_set_reparse(node,data,size,a,b,request,rollback);
 }
 #include "file_create.inc"
 static NTSTATUS dispatch_create(UNICODE_STRING* name, UNICODE_STRING* stream, file_ref** out, file_ref** parent, LIST_ENTRY* rollback) {
+    if (current->atomic_ecp) {
+        prepare_atomic_create();
+        fFsRtlGetEcpListFromIrp=host_get_ecp_list;
+        fFsRtlGetNextExtraCreateParameter=host_get_next_ecp;
+    }
     WCHAR path[160]; unsigned length=0;
     if (!current->relative_stream) {
         memcpy(path,name->Buffer,name->Length); length=name->Length/sizeof(WCHAR);
@@ -42,8 +47,11 @@ static NTSTATUS dispatch_create(UNICODE_STRING* name, UNICODE_STRING* stream, fi
     CHECK(length < 160);
     UNICODE_STRING filename={length*sizeof(WCHAR),sizeof(path),path};
     FILE_OBJECT object={0};
+    irp.stack.FileObject=&object;
     file_ref* related=current->relative_stream ? &base_ref : &directory_ref;
-    NTSTATUS status=file_create(&irp,&volume,&object,related,current->loaded_related,&filename,1,0,out,rollback);
+    NTSTATUS status=file_create(&irp,&volume,&object,related,current->loaded_related,&filename,1,
+                                current->directory ? FILE_DIRECTORY_FILE : 0,out,rollback);
+    check_atomic_result(status);
     if (status == STATUS_OBJECT_NAME_COLLISION) {
         if (!*out) fprintf(stderr,"%s: collision fileref missing; directory refs=%d, base refs=%d\n",scenario,directory_ref.refcount,base_ref.refcount);
         CHECK(*out && (*out)->fcb && !object.FsContext && !object.FsContext2 && !share_calls);
@@ -51,20 +59,35 @@ static NTSTATUS dispatch_create(UNICODE_STRING* name, UNICODE_STRING* stream, fi
     } else if (NT_SUCCESS(status)) {
         CHECK(!*out && object.FsContext2 && object.FsContext == object.FsContext2->fileref->fcb && share_calls == 1);
         *out=object.FsContext2->fileref; *parent=(*out)->parent;
+        if (current->ecp_ops && current->directory && !current->ecp_short) CHECK(object.FsContext2->case_sensitive && (*out)->fcb->case_sensitive);
         CHECK((*out)->open_count == 1 && volume.open_files == 1);
         // Model handle closure; run() releases the CCB's fileref hold once.
         InterlockedDecrement(&(*out)->open_count); InterlockedDecrement(&volume.open_files);
         ExFreePool(object.FsContext2);
-    } else CHECK(!*out && !object.FsContext && !object.FsContext2 && !share_calls);
+    } else {
+        unsigned live_paths=0, failed_children=0;
+        for (unsigned i=0;i<pool_count;i++)
+            if (pools[i].live && !strcmp(pools[i].caller,"file_create")) live_paths++;
+        if (object.FsContext || object.FsContext2 || share_calls || volume.open_files || live_paths)
+            fprintf(stderr,"%s: failed create: context=%u, CCB=%u, share=%u, open_files=%d, owned buffers=%u, directory refs=%d\n",
+                    scenario,!!object.FsContext,!!object.FsContext2,share_calls,volume.open_files,live_paths,directory_ref.refcount);
+        CHECK(!*out && !object.FsContext && !object.FsContext2 && !object.SectionObjectPointer && !share_calls && !volume.open_files && !live_paths);
+        for (LIST_ENTRY* le=volume.dirty_filerefs.Flink;le != &volume.dirty_filerefs;le=le->Flink) {
+            file_ref* failed=CONTAINING_RECORD(le,file_ref,list_entry_dirty);
+            if (failed->deleted) { CHECK(failed->fcb->deleted && !failed->open_count); failed_children++; }
+        }
+        if (current->late_create_failure) CHECK(failed_children == 1);
+    }
     if (current->stream) {
         int expected_base=1+(current->existing_stream && !current->reaped_stream ? 1 : 0);
-        if (NT_SUCCESS(status) || (status == STATUS_OBJECT_NAME_COLLISION && current->reaped_stream)) expected_base++;
-        int expected_directory=(have_base ? 2 : 1)+(current->missing_base && NT_SUCCESS(status) ? 1 : 0);
+        if (NT_SUCCESS(status) || current->late_create_failure || (status == STATUS_OBJECT_NAME_COLLISION && current->reaped_stream)) expected_base++;
+        int expected_directory=(have_base ? 2 : 1)+(current->missing_base && (NT_SUCCESS(status) || current->late_create_failure) ? 1 : 0);
         if ((have_base && base_ref.refcount != expected_base) || directory_ref.refcount != expected_directory)
             fprintf(stderr,"%s: returned parent refs: directory=%d, base=%d (expected %d, %d)\n",
                     scenario,directory_ref.refcount,base_ref.refcount,expected_directory,expected_base);
         if (have_base) CHECK(base_ref.refcount == expected_base);
         CHECK(directory_ref.refcount == expected_directory);
     }
+    irp.stack.FileObject=NULL;
     return status;
 }

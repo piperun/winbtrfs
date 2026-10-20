@@ -235,6 +235,37 @@ and preserve any lock held by the caller. Ten lookup cases also cover
 case-sensitive validation errors, uppercase conversion failure, missing
 and distinct names, and matching entries with live or reaped filerefs.
 
+Reproduce late creation failure cleanup:
+
+```sh
+python3 tests/create/check_create.py . --revision 63183801 --build-dir build/create-tests-atomic-before
+```
+
+This baseline passes 190/204 cases after the lookup fix. Eight failed
+atomic-create reparse operations retain a CCB and copied path, skip the
+acquired lookup-parent release and leave handle/open-count state published.
+Six CCB allocation failures leave FileObject/share state partially set.
+The original 169 creation cases and ten direct lookup cases still pass.
+
+The CCB stays locally owned during atomic-create processing. Reparse
+writes require temporary FileObject contexts; the host reparse boundary
+enforces that dependency from the real `write_file2` entry path. Reparse
+failure clears those contexts, frees the CCB and uses the common
+filename/parent cleanup. Share access and open counts are installed only
+once setup succeeds. Existing failed-child deletion and dirty/rollback
+ownership remain in force.
+
+Twenty-five new dispatch cases cover ordinary files, directories and ADS,
+missing stream bases, acquired/borrowed parents, paging, relative names,
+case folding and both late failure points. Success controls exercise
+atomic-create output flags and directory case flags. Other controls cover
+short ECP contexts, other GUIDs, ECP list errors, parent-open failure and
+ordinary/stream collisions that must not publish a new handle. The tests
+assert no failed FileObject/CCB/share state, no open-count residue, released
+local buffers, and deletion/reaping of failed children. Dirty holds on
+newly created children are legitimate until modeled dirty completion;
+their references and cache entries must still balance after reaping.
+
 The harness extracts the actual `file_create2`, `create_stream`, FCB and
 fileref constructors, dirty-queue insertion, reference releases, cache
 reapers, directory-entry creation and lookup, child fileref opening,
@@ -261,7 +292,9 @@ Conversion fixtures use ASCII names. Dirty completion does
 not run the flush worker, persistence, or actual transaction rollback.
 The test runs file creation dispatch and helpers, modeling returned-reference
 releases and handle closure. It does not run `open_file`, `open_file2` or
-Windows IRP/handle-close dispatch. ECP discovery is disabled, LXSS detection
-is modeled false, and share-access operations are counted host services. Sanitizer results cover host memory, not
+Windows IRP/handle-close dispatch. ECP discovery and reparse operations are
+modeled services; production atomic-create handling and CCB ownership run
+in `file_create`. LXSS detection is modeled false, and share-access
+operations are counted host services. Sanitizer results cover host memory, not
 Windows pool behavior or concurrency. Windows runtime testing is still
 required.

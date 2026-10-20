@@ -185,13 +185,13 @@ typedef struct { unsigned type; struct { fcb* parent; dir_child* dc; } dir_child
 #define ROLLBACK_ADD_DIR_CHILD 1
 typedef struct { int SubjectSecurityContext; } ACCESS_STATE;
 typedef struct { ACCESS_STATE* AccessState; unsigned DesiredAccess; } SECURITY_CONTEXT;
-typedef struct { unsigned Flags; struct { struct { unsigned FileAttributes, EaLength, ShareAccess; SECURITY_CONTEXT* SecurityContext; } Create; } Parameters; } IO_STACK_LOCATION, *PIO_STACK_LOCATION;
+typedef struct { unsigned Flags; PFILE_OBJECT FileObject; struct { struct { unsigned FileAttributes, EaLength, ShareAccess; SECURITY_CONTEXT* SecurityContext; } Create; } Parameters; } IO_STACK_LOCATION, *PIO_STACK_LOCATION;
 typedef struct { int RequestorMode; IO_STACK_LOCATION stack; struct { LARGE_INTEGER AllocationSize; } Overlay; struct { void* SystemBuffer; } AssociatedIrp; } IRP, *PIRP;
 typedef struct { unsigned unused; } FILE_FULL_EA_INFORMATION;
 #define IoGetCurrentIrpStackLocation(irp) (&(irp)->stack)
 typedef int64_t LONGLONG, USN;
 typedef struct { ULONG Data1; USHORT Data2, Data3; uint8_t Data4[8]; } GUID;
-typedef struct { ULONG ReparseTag; } REPARSE_DATA_BUFFER, *PREPARSE_DATA_BUFFER;
+typedef struct { ULONG ReparseTag; USHORT ReparseDataLength, Reserved; } REPARSE_DATA_BUFFER, *PREPARSE_DATA_BUFFER;
 typedef struct { int unused; } ECP_LIST;
 #define STATUS_CANNOT_DELETE ((int32_t)0xc0000121)
 #define FILE_DELETE_ON_CLOSE 0x1000

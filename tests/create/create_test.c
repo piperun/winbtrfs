@@ -7,7 +7,7 @@ static const char* scenario;
 static void host_log(const char* format, ...) { (void)format; }
 enum fault_kind { NONE, POOL, FCB_ALLOC, NP_ALLOC, FILEREF_ALLOC, SECURITY, EA_ERROR,
                   EXTEND_ERROR, UTF8_ERROR, UPPERCASE_ERROR, TREE_ERROR, ACCESS_ERROR,
-                  OPEN_ERROR, NAME_ERROR, REOPEN_ERROR, XATTR_ERROR };
+                  OPEN_ERROR, NAME_ERROR, REOPEN_ERROR, XATTR_ERROR, REPARSE_ERROR };
 typedef struct {
     const char* name;
     bool stream, missing_base, directory, paging, insensitive, preallocate, existing_entry, full, readonly;
@@ -23,6 +23,7 @@ typedef struct {
     const char* colliding_xattr;
     bool collider_after_target;
     bool lookup_only, caller_holds_dirlock;
+    bool atomic_ecp, ecp_short, ecp_other_guid, ecp_list_failure, ecp_ops, late_create_failure;
 } test_case;
 static const test_case* current;
 static device_extension volume;
@@ -564,8 +565,10 @@ static void run(void) {
     if (current->stream && !NT_SUCCESS(status)) {
         // A discarded ADS shares the existing stream's inode and xattr name.
         // A dirty deleted ADS would make flush_fcb delete that xattr.
-        for (LIST_ENTRY* le=volume.dirty_fcbs.Flink;le != &volume.dirty_fcbs;le=le->Flink)
-            CHECK(!CONTAINING_RECORD(le,fcb,list_entry_dirty)->ads);
+        for (LIST_ENTRY* le=volume.dirty_fcbs.Flink;le != &volume.dirty_fcbs;le=le->Flink) {
+            fcb* child=CONTAINING_RECORD(le,fcb,list_entry_dirty);
+            if (child->ads) CHECK(current->late_create_failure && child->created && child->deleted);
+        }
     }
     // Model completed persistence, then run the actual cache reapers.
     drain_dirty(); reap_filerefs(&volume); reap_fcbs(&volume);
@@ -604,6 +607,7 @@ static void run(void) {
 int main(int argc, char** argv) {
     static const test_case cases[]={
         #include "lookup_cases.inc"
+        #include "atomic_create_cases.inc"
         #include "missing_base_cases.inc"
         #include "ads_cache_cases.inc"
         {.name="dispatch-stream-live",.dispatch=true,.stream=true,.existing_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
