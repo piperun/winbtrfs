@@ -2,6 +2,7 @@
 static unsigned subject_contexts, clear_calls, rollback_calls, path_calls, notifications, move_calls;
 static file_ref *source_ref, *destination, *collision, *old_parent_hold;
 static bool deny_access, children_open, cross_volume, fail_move;
+static bool deny_delete, fail_delete, fail_utf8_size, fail_utf8_fill, fail_cache_flush;
 static NTSTATUS parent_lookup_status;
 static unsigned fail_path_call;
 
@@ -22,16 +23,23 @@ static bool SeAccessCheck(void* sd, SECURITY_SUBJECT_CONTEXT* context, bool lock
     (void)sd; (void)locked; (void)desired; (void)previous; (void)privileges; (void)mapping; (void)mode;
     CHECK(*context == 1);
     *access = desired;
-    *status = deny_access ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
-    return !deny_access;
+    bool denied = deny_access || (deny_delete && desired == DELETE);
+    *status = denied ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
+    return !denied;
 }
 static void* IoGetFileObjectGenericMapping(void) { return NULL; }
 static void CcFlushCache(SECTION_OBJECT_POINTERS* section, void* offset, ULONG length, IO_STATUS_BLOCK* iosb) {
-    (void)section; (void)offset; (void)length; iosb->Status = STATUS_SUCCESS;
+    (void)offset; (void)length;
+    CHECK(section && section->DataSectionObject);
+    iosb->Status = fail_cache_flush ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
 }
 static bool has_open_children(file_ref* ref) { return children_open && ref == source_ref; }
 static NTSTATUS delete_fileref(file_ref* ref, void* object, bool posix, PIRP irp, LIST_ENTRY* rollback) {
-    (void)object; (void)posix; CHECK(ref == collision && irp && rollback); ref->deleted = true; return STATUS_SUCCESS;
+    (void)object; (void)posix; CHECK(ref == collision && irp && rollback);
+    if (fail_delete)
+        return STATUS_UNSUCCESSFUL;
+    ref->deleted = true;
+    return STATUS_SUCCESS;
 }
 static void clear_rollback(LIST_ENTRY* list) { CHECK(list->Flink == list); clear_calls++; }
 static void do_rollback(device_extension* volume, LIST_ENTRY* list) { CHECK(volume && list->Flink == list); rollback_calls++; }
@@ -55,6 +63,8 @@ static NTSTATUS open_fileref(device_extension* volume, file_ref** out, UNICODE_S
     return STATUS_SUCCESS;
 }
 static NTSTATUS utf16_to_utf8(char* out, ULONG capacity, ULONG* length, WCHAR* text, ULONG bytes) {
+    if ((out && fail_utf8_fill) || (!out && fail_utf8_size))
+        return STATUS_UNSUCCESSFUL;
     ULONG needed = 0;
     for (unsigned i = 0; i < bytes / 2; i++) {
         unsigned c = text[i];
@@ -121,6 +131,7 @@ static void FsRtlNotifyFilterReportChange(void* sync, LIST_ENTRY* list, PSTRING 
 static NTSTATUS move_across_directories(file_ref* ref, ccb* context, file_ref* related,
                                        ANSI_STRING* utf8, UNICODE_STRING* name, PIRP irp) {
     CHECK(ref == source_ref && context && related == destination && utf8 && name && irp);
+    CHECK(utf8->Buffer == request_utf8 && request_frees == 0);
     move_calls++;
     if (fail_move)
         return STATUS_INSUFFICIENT_RESOURCES;

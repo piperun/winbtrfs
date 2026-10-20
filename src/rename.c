@@ -219,7 +219,7 @@ NTSTATUS set_rename_information(device_extension* Vcb, PIRP Irp, PFILE_OBJECT Fi
     WCHAR* fn;
     ULONG fnlen, utf8len;
     UNICODE_STRING fnus;
-    ANSI_STRING utf8;
+    ANSI_STRING utf8 = {0};
     NTSTATUS Status;
     LIST_ENTRY rollback;
     SECURITY_SUBJECT_CONTEXT subjcont;
@@ -462,6 +462,9 @@ end:
         clear_rollback(&rollback);
     else
         do_rollback(Vcb, &rollback);
+
+    if (utf8.Buffer)
+        ExFreePool(utf8.Buffer);
 
     ExReleaseResourceLite(fcb->Header.Resource);
     ExReleaseResourceLite(&Vcb->fileref_lock);
