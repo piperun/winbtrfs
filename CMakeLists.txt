@@ -117,6 +117,7 @@ set(SRC_FILES src/balance.c
     src/sha256.c
     src/threads.c
     src/treefuncs.c
+    src/trim.c
     src/volume.c
     src/worker-thread.c
     src/write.c
