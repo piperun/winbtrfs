@@ -1,5 +1,8 @@
 # Pure byte-range clipping tests
 
+For the reproducible Windows C/Rust cost comparison, see the
+[benchmark runner](benchmark/README.md).
+
 ```sh
 python3 tests/range-math/check_math.py . --build-dir /tmp/winbtrfs-range-math
 python3 tests/range-math/check_math.py . --init zero --sanitize --build-dir /tmp/winbtrfs-range-math
