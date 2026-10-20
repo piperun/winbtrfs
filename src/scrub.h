@@ -40,3 +40,32 @@ typedef struct _scrub_context {
 
 NTSTATUS scrub_extent_raid10(device_extension* Vcb, chunk* c, uint64_t offset, uint32_t length, uint16_t startoffstripe, void* csum, scrub_context* context);
 void log_error(device_extension* Vcb, uint64_t addr, uint64_t devid, bool metadata, bool recoverable, bool parity);
+
+typedef struct {
+    uint8_t* buf;
+    PIRP Irp;
+    void* context;
+    IO_STATUS_BLOCK iosb;
+    uint64_t offset;
+    bool rewrite, missing;
+    RTL_BITMAP error;
+    ULONG* errorarr;
+} scrub_context_raid56_stripe;
+
+typedef struct {
+    scrub_context_raid56_stripe* stripes;
+    LONG stripes_left;
+    KEVENT Event;
+    RTL_BITMAP alloc;
+    RTL_BITMAP has_csum;
+    RTL_BITMAP is_tree;
+    void* csum;
+    uint8_t* parity_scratch;
+    uint8_t* parity_scratch2;
+} scrub_context_raid56;
+
+void scrub_raid5_stripe(device_extension* Vcb, chunk* c, scrub_context_raid56* context, uint64_t stripe_start, uint64_t bit_start,
+                        uint64_t num, uint16_t missing_devices);
+NTSTATUS scrub_raid6_stripe(device_extension* Vcb, chunk* c, scrub_context_raid56* context, uint64_t stripe_start, uint64_t bit_start,
+                            uint64_t num, uint16_t missing_devices);
+NTSTATUS scrub_chunk_raid56_stripe_run(device_extension* Vcb, chunk* c, uint64_t stripe_start, uint64_t stripe_end);

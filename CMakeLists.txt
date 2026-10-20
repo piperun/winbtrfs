@@ -114,6 +114,8 @@ set(SRC_FILES src/balance.c
     src/reparse.c
     src/scrub.c
     src/scrub-raid10.c
+    src/scrub-raid56.c
+    src/scrub-parity.c
     src/search.c
     src/security.c
     src/send.c
