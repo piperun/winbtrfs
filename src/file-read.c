@@ -590,6 +590,7 @@ nextitem:
 
         RtlCopyMemory(ccj->data, (uint8_t*)ccj->decomp + ccj->offset, ccj->length);
         ExFreePool(ccj->decomp);
+        ExFreePool(ccj->cj);
 
         ExFreePool(ccj);
     }
@@ -700,7 +701,7 @@ NTSTATUS do_read(PIRP Irp, bool wait, ULONG* bytes_read) {
     }
 
     if (start >= (uint64_t)fcb->Header.ValidDataLength.QuadPart) {
-        length = (ULONG)min(length, min(start + length, (uint64_t)fcb->Header.FileSize.QuadPart) - fcb->Header.ValidDataLength.QuadPart);
+        length = (ULONG)min(length, (uint64_t)fcb->Header.FileSize.QuadPart - start);
         RtlZeroMemory(data, length);
         Irp->IoStatus.Information = *bytes_read = length;
         return STATUS_SUCCESS;
