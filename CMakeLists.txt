@@ -103,6 +103,7 @@ set(SRC_FILES src/balance.c
     src/fsctl.c
     src/fsrtl.c
     src/galois.c
+    src/hardlink-info.c
     src/mknod.c
     src/pnp.c
     src/read.c
