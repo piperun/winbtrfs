@@ -1,0 +1,4 @@
+tag_prefix = "v"
+
+# Keep the CMake and Windows driver versions together in a release commit.
+pre_bump_hooks = ["python3 ci/set-version.py {{version}}"]
