@@ -15,20 +15,29 @@ args = parser.parse_args()
 repo, out = args.repo.resolve(), args.build_dir.resolve()
 out.mkdir(parents=True, exist_ok=True)
 
-def read(path):
+def read(path, optional=False):
     if args.revision:
-        return subprocess.check_output(["git", "-C", str(repo), "show", f"{args.revision}:{path}"], text=True)
-    return (repo / path).read_text()
+        result = subprocess.run(["git", "-C", str(repo), "show", f"{args.revision}:{path}"], text=True, capture_output=True)
+        if result.returncode and not optional:
+            raise RuntimeError(result.stderr)
+        return result.stdout if result.returncode == 0 else ""
+    p = repo / path
+    return p.read_text() if p.exists() or not optional else ""
+
+def function(source, marker):
+    start = source.index(marker)
+    brace = source.index("{", start)
+    end, depth = brace + 1, 1
+    while depth:
+        depth += (source[end] == "{") - (source[end] == "}")
+        end += 1
+    return source[start:end] + "\n"
 
 source = read("src/file-create.c")
-start = source.index("static NTSTATUS file_create_parse_ea(")
-brace = source.index("{", start)
-end, depth = brace + 1, 1
-while depth:
-    depth += (source[end] == "{") - (source[end] == "}")
-    end += 1
 license_header = source[:source.index("#include")]
-(out / "parse_ea.inc").write_text(license_header + source[start:end] + "\n")
+(out / "parse_ea.inc").write_text(license_header + function(source, "static NTSTATUS file_create_parse_ea("))
+operations = read("src/ea.c", optional=True) or read("src/fileinfo.c")
+(out / "set_ea.inc").write_text(license_header + function(operations, "NTSTATUS __stdcall drv_set_ea("))
 header = read("src/btrfs_drv.h")
 end = header.index("} ea_item;") + len("} ea_item;")
 start = header.rindex("typedef struct {", 0, end)

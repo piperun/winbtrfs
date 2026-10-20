@@ -94,6 +94,7 @@ set(SRC_FILES src/balance.c
     src/stream-create.c
     src/devctrl.c
     src/dirctrl.c
+    src/ea.c
     src/extent-tree.c
     src/fastio.c
     src/fileinfo.c
