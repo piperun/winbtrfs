@@ -128,6 +128,7 @@ set(SRC_FILES src/balance.c
     src/volume.c
     src/worker-thread.c
     src/write.c
+    src/write-extents.c
     ${CMAKE_CURRENT_BINARY_DIR}/btrfs.rc)
 
 # Work around bug in MSVC version of cmake - see https://gitlab.kitware.com/cmake/cmake/-/merge_requests/4257
