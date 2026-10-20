@@ -178,7 +178,14 @@ if(MSVC)
     include_directories("$ENV{WindowsSdkDir}Include\\$ENV{WindowsSDKLibVersion}km")
     link_directories("$ENV{WindowsSdkDir}Lib\\$ENV{WindowsSDKLibVersion}km\\${MS_ARCH}")
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
-    include_directories("${CMAKE_FIND_ROOT_PATH}/usr/include/ddk")
+    find_path(MINGW_DDK_INCLUDE_DIR ntifs.h
+        HINTS ${CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES}
+        PATH_SUFFIXES ddk
+        NO_DEFAULT_PATH)
+    if(NOT MINGW_DDK_INCLUDE_DIR)
+        message(FATAL_ERROR "Could not find the MinGW-w64 DDK headers (ntifs.h).")
+    endif()
+    include_directories("${MINGW_DDK_INCLUDE_DIR}")
 endif()
 
 add_library(btrfs SHARED ${SRC_FILES})

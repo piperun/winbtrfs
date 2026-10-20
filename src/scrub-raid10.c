@@ -309,7 +309,7 @@ NTSTATUS scrub_extent_raid10(device_extension* Vcb, chunk* c, uint64_t offset, u
                                         uint64_t addr = offset + pos;
 
                                         for (k = 0; k < sub_stripes; k++) {
-                                            if (c->devices[j + j]->devobj) {
+                                            if (c->devices[j + k]->devobj) {
                                                 log_error(Vcb, addr, c->devices[j + k]->devitem.devid, false, false, false);
                                                 log_device_error(Vcb, c->devices[j + k], BTRFS_DEV_STAT_CORRUPTION_ERRS);
                                             }

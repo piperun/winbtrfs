@@ -7,7 +7,7 @@
 #include "raid10.inc"
 #include "caller.inc"
 
-enum repair_mode { HEALTHY, WHOLE_MIRROR, RECONSTRUCT };
+enum repair_mode { HEALTHY, WHOLE_MIRROR, RECONSTRUCT, UNRECOVERABLE };
 static const uint64_t stripe_size = 0x10000;
 
 static void fill_image(uint8_t* data, unsigned group, unsigned groups) {
@@ -27,11 +27,15 @@ static void fill_image(uint8_t* data, unsigned group, unsigned groups) {
 static void exercise(unsigned groups, unsigned mirrors, uint64_t relative, uint32_t size,
                      bool is_metadata, enum repair_mode mode, uint32_t readonly_mask, int missing) {
     metadata = is_metadata;
+    unrecoverable_case = mode == UNRECOVERABLE;
+    CHECK(!unrecoverable_case || !metadata);
     unsigned count = groups * mirrors;
     CHECK(count <= MAX_DEVICES);
     volume = (device_extension){ .superblock = { .sectorsize = 4096, .nodesize = 16384 },
                                  .sector_shift = 12, .csum_size = 4 };
-    current_chunk = (chunk){ .offset = 0x123400000ULL, .devices = device_ptrs };
+    current_chunk = (chunk){ .offset = 0x123400000ULL };
+    current_chunk.devices = malloc(count * sizeof(*current_chunk.devices));
+    CHECK(current_chunk.devices);
     current_chunk.chunk_item = calloc(1, sizeof(struct btrfs_chunk) + (count - 1) * sizeof(struct btrfs_stripe));
     CHECK(current_chunk.chunk_item);
     current_chunk.chunk_item->num_stripes = count;
@@ -64,7 +68,7 @@ static void exercise(unsigned groups, unsigned mirrors, uint64_t relative, uint3
         objects[i] = (DEVICE_OBJECT){ .id = i, .StackSize = i + 1 };
         devices[i] = (device){ .devobj = (int)i == missing ? NULL : &objects[i],
             .fileobj = &objects[i], .readonly = (readonly_mask & (1u << i)) != 0, .devitem = { .devid = 100 + i } };
-        device_ptrs[i] = &devices[i];
+        current_chunk.devices[i] = &devices[i];
     }
 
     void* csums = NULL;
@@ -84,13 +88,19 @@ static void exercise(unsigned groups, unsigned mirrors, uint64_t relative, uint3
     for (unsigned i = 0; i < count; i++) {
         if (!lengths[i] || !devices[i].devobj) continue;
         bool corrupt = mode == WHOLE_MIRROR ? i % mirrors == (relative / stripe_size) % mirrors :
-                       mode == RECONSTRUCT && lengths[i] >= 2 * unit;
+                       mode == UNRECOVERABLE || (mode == RECONSTRUCT && lengths[i] >= 2 * unit);
         if (!corrupt) continue;
         unsigned position = starts[i] + (mode == RECONSTRUCT && i % 2 ? lengths[i] - unit : 0) + unit / 2;
         CHECK(position < DISK_BYTES); disk[i][position] ^= 0x5a; damaged++;
         if (devices[i].readonly) expected[i][position] ^= 0x5a;
+        if (unrecoverable_case) {
+            unrecoverable_expected[i] = 1;
+            unsigned group = i / mirrors;
+            unrecoverable_addresses[i] = current_chunk.offset +
+                ((starts[i] / stripe_size) * groups + group) * stripe_size + starts[i] % stripe_size;
+        }
     }
-    if (fail_write || fail_read >= 0 || fail_scratch || fail_context)
+    if (unrecoverable_case || fail_write || fail_read >= 0 || fail_scratch || fail_context)
         for (unsigned i = 0; i < count; i++) memcpy(expected[i], disk[i], DISK_BYTES);
     NTSTATUS wanted = fail_write || fail_read >= 0 ? STATUS_IO_DEVICE_ERROR :
                       fail_scratch || fail_context ? STATUS_INSUFFICIENT_RESOURCES : STATUS_SUCCESS;
@@ -108,14 +118,67 @@ static void exercise(unsigned groups, unsigned mirrors, uint64_t relative, uint3
             CHECK(false);
         }
         if (written[i]) CHECK(write_addresses[i] == bases[i] + starts[i]);
+        if (unrecoverable_case) {
+            if (unrecoverable_logs[i] != unrecoverable_expected[i]) {
+                fprintf(stderr, "device %u: %u unrecoverable reports, expected %u\n",
+                    i, unrecoverable_logs[i], unrecoverable_expected[i]);
+                CHECK(false);
+            }
+            CHECK(corruption_events[i] == 2 * unrecoverable_expected[i]);
+        }
         free(disk[i]); free(expected[i]);
     }
     CHECK(read_count == expected_reads && volume.scrub.data_scrubbed == read_bytes);
-    if (!damaged || fail_read >= 0 || fail_scratch || fail_context) CHECK(writes == 0);
-    if (damaged && wanted == STATUS_SUCCESS) CHECK(recovery_logs > 0);
+    if (unrecoverable_case || !damaged || fail_read >= 0 || fail_scratch || fail_context) CHECK(writes == 0);
+    if (unrecoverable_case) CHECK(recovery_logs == 0);
+    else if (damaged && wanted == STATUS_SUCCESS) CHECK(recovery_logs > 0);
     if (fail_write) CHECK(writes == 1 && device_errors[BTRFS_DEV_STAT_WRITE_ERRS] == 1);
     if (fail_read >= 0) CHECK(device_errors[BTRFS_DEV_STAT_READ_ERRS] == 1);
-    free(csums); free(current_chunk.chunk_item);
+    free(csums); free(current_chunk.chunk_item); free(current_chunk.devices);
+}
+
+static bool unrecoverable_cases(const char* wanted, bool list) {
+    const unsigned layouts[][2] = { {1,2}, {2,2}, {3,2}, {4,2}, {2,3}, {4,3} };
+    for (unsigned layout = 0; layout < sizeof(layouts) / sizeof(layouts[0]); layout++) {
+        unsigned groups = layouts[layout][0], mirrors = layouts[layout][1];
+        for (unsigned group = 0; group < groups; group++) {
+            for (int absent = -1; absent < (int)mirrors; absent++) {
+                char name[96]; snprintf(name, sizeof(name), "unrecoverable-%ux%u-group%u-missing%d", groups, mirrors, group, absent);
+                if (list) { puts(name); continue; }
+                if (strcmp(wanted, name) == 0) {
+                    timing = (group + absent + 1) % 2;
+                    exercise(groups, mirrors, (groups + group) * stripe_size + 0x2000, 0x8000, false,
+                        UNRECOVERABLE, 0, absent < 0 ? -1 : (int)(group * mirrors) + absent);
+                    return true;
+                }
+            }
+        }
+    }
+    const unsigned unrelated_missing[] = { 0, 1, 4, 5 };
+    for (unsigned n = 0; n < 4; n++) {
+        char name[96]; snprintf(name, sizeof(name), "unrecoverable-unrelated-missing%u", unrelated_missing[n]);
+        if (list) { puts(name); continue; }
+        if (strcmp(wanted, name) == 0) {
+            timing = n % 2;
+            exercise(3, 2, 0x42000, 0x8000, false, UNRECOVERABLE, 0, unrelated_missing[n]); return true;
+        }
+    }
+    for (unsigned groups = 2; groups <= 3; groups++) {
+        char name[96]; snprintf(name, sizeof(name), "unrecoverable-readonly-%ux2", groups);
+        if (list) { puts(name); }
+        else if (strcmp(wanted, name) == 0) {
+            timing = 1;
+            exercise(groups, 2, (2 * groups - 1) * stripe_size + 0x2000, 0x8000, false,
+                UNRECOVERABLE, (1u << (2 * groups)) - 1, -1); return true;
+        }
+        snprintf(name, sizeof(name), "unrecoverable-multiple-groups-%ux2", groups);
+        if (list) { puts(name); }
+        else if (strcmp(wanted, name) == 0) {
+            timing = 1;
+            exercise(groups, 2, 0x2000, 0x28000, false, UNRECOVERABLE, 0, -1); return true;
+        }
+    }
+    return false;
 }
 
 int main(int argc, char** argv) {
@@ -153,5 +216,6 @@ int main(int argc, char** argv) {
             i == 1 ? 1u << 3 : i == 2 ? 15 : 0, i == 3 ? 3 : -1);
         return 0;
     }
+    if (unrecoverable_cases(argv[1], list)) return 0;
     CHECK(list); return 0;
 }

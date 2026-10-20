@@ -2,7 +2,7 @@
 enum { MAX_DEVICES = 12, DISK_BYTES = 0x80000, MAX_POOLS = 64 };
 static device_extension volume;
 static chunk current_chunk;
-static device devices[MAX_DEVICES], *device_ptrs[MAX_DEVICES];
+static device devices[MAX_DEVICES];
 static DEVICE_OBJECT objects[MAX_DEVICES];
 static uint8_t *disk[MAX_DEVICES], *expected[MAX_DEVICES];
 static uint64_t starts[MAX_DEVICES], bases[MAX_DEVICES], write_addresses[MAX_DEVICES];
@@ -12,6 +12,9 @@ static struct { void* p; size_t size; } pools[MAX_POOLS];
 static unsigned pool_live, irp_live, allocation_calls, read_count, completed, pending, queue_count;
 static unsigned writes, recovery_logs, device_errors[4], timing;
 static bool written[MAX_DEVICES], metadata, fail_write, fail_scratch, fail_context, allocation_failed;
+static bool unrecoverable_case;
+static unsigned unrecoverable_expected[MAX_DEVICES], unrecoverable_logs[MAX_DEVICES], corruption_events[MAX_DEVICES];
+static uint64_t unrecoverable_addresses[MAX_DEVICES];
 static int fail_read = -1;
 static KEVENT* active_event;
 static uint64_t request_offset;
@@ -57,13 +60,24 @@ static void do_calc_job(device_extension* v, uint8_t* data, uint32_t sectors, vo
 static void log_error(device_extension* v, uint64_t address, uint64_t devid, bool is_metadata, bool recoverable, bool parity) {
     CHECK(v == &volume && devid >= 100 && devid < 100u + current_chunk.chunk_item->num_stripes);
     CHECK(address >= request_offset && address < request_offset + request_size);
-    CHECK(is_metadata == metadata && recoverable && !parity);
-    recovery_logs++;
+    CHECK(is_metadata == metadata && !parity);
+    unsigned i = (unsigned)(devid - 100);
+    CHECK(devices[i].devobj != NULL);
+    if (recoverable) {
+        CHECK(!unrecoverable_case);
+        recovery_logs++;
+    } else {
+        CHECK(unrecoverable_case && !metadata && unrecoverable_expected[i]);
+        CHECK(address == unrecoverable_addresses[i]);
+        unrecoverable_logs[i]++;
+    }
 }
 
 static void log_device_error(device_extension* v, device* dev, int error) {
     CHECK(v == &volume && dev >= devices && dev < devices + MAX_DEVICES);
     CHECK(error == BTRFS_DEV_STAT_CORRUPTION_ERRS || error == BTRFS_DEV_STAT_READ_ERRS || error == BTRFS_DEV_STAT_WRITE_ERRS);
+    CHECK(dev->devobj != NULL);
+    if (error == BTRFS_DEV_STAT_CORRUPTION_ERRS) corruption_events[dev - devices]++;
     device_errors[error]++;
 }
 

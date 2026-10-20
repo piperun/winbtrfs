@@ -1081,7 +1081,6 @@ static NTSTATUS create_subvol(device_extension* Vcb, PFILE_OBJECT FileObject, vo
     fr->fcb->hash_ptrs = ExAllocatePoolWithTag(PagedPool, sizeof(LIST_ENTRY*) * 256, ALLOC_TAG);
     if (!fr->fcb->hash_ptrs) {
         ERR("out of memory\n");
-        free_fileref(fr);
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto end;
     }
@@ -1091,7 +1090,6 @@ static NTSTATUS create_subvol(device_extension* Vcb, PFILE_OBJECT FileObject, vo
     fr->fcb->hash_ptrs_uc = ExAllocatePoolWithTag(PagedPool, sizeof(LIST_ENTRY*) * 256, ALLOC_TAG);
     if (!fr->fcb->hash_ptrs_uc) {
         ERR("out of memory\n");
-        free_fileref(fr);
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto end;
     }
@@ -1152,6 +1150,8 @@ end:
 end2:
     if (fr)
         free_fileref(fr);
+
+    ExFreePool(utf8.Buffer);
 
     return Status;
 }

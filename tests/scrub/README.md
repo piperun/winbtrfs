@@ -1,4 +1,4 @@
-# RAID10 scrub repair offset regressions
+# RAID10 scrub regressions
 
 Run from the repository root with Python 3 and GCC supporting
 `-ftrivial-auto-var-init`:
@@ -11,18 +11,27 @@ ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
 ```
 
 Add `--revision 113f44b1` to reproduce the original code in `scrub.c`, or
-`--revision dfae8bbb` for the identical extracted RAID10 helper. Both pass
-72/172 scenarios with pattern/zero locals. The 100 failures write repairs at
-the logical chunk offset instead of the physical stripe offset. In the
+`--revision dfae8bbb` for the identical extracted RAID10 helper. On the original
+172 repair scenarios, both pass 72/172 with pattern/zero locals. The 100
+failures write repairs at the logical chunk offset instead of the physical
+stripe offset. In the
 four-disk example, chunk offset `0x30000` reads at device offset `0x10000`,
 then repairs at `0x30000`: damaged data remains and unrelated data changes.
-The fixed source passes all 172 scenarios, including address,
-undefined-behavior and leak sanitizers.
+The physical-offset fix makes all 172 repair scenarios pass, including
+address, undefined-behavior and leak sanitizers.
 
 This addresses [upstream issue #816, item 1](https://github.com/maharmstone/btrfs/issues/816).
 Both whole-mirror and sector-by-sector reconstruction writes now use the
 destination stripe's physical `start`, already calculated for its read,
-plus that device's stripe base. Other findings in that issue are separate.
+plus that device's stripe base.
+
+Add `--revision e104f35d` to reproduce the device-index typo from item 2 of
+the same issue. The all-mirrors-bad data branch tested `devices[j + j]`
+instead of the current mirror, `devices[j + k]`. This could read past the
+device array, skip reports for present mirrors, or report absent mirrors.
+That revision passes 184/234 scenarios; the corrected index makes all 234
+pass. The fixture allocates exactly `num_stripes` device pointers so address
+sanitizers detect an out-of-range index rather than reading unused slots.
 
 The runner extracts the production RAID10 helper, `scrub_extent` caller,
 `scrub_read_completion`, shared context types and `get_raid0_offset`. It uses
@@ -56,9 +65,18 @@ read/write sizes and addresses, return statuses, scrubbed byte counts,
 completion accounting, error reporting and balanced pool/IRP ownership.
 The maximum fixture uses about 13 MiB of RAM; it creates no disk images.
 
+Another 62 scenarios damage the same data sector on every present mirror.
+They cover every mirror group in two-, four-, six-, eight- and twelve-disk
+layouts, two or three mirrors, each possible missing mirror, unrelated
+missing devices, read-only devices and requests spanning multiple groups.
+Checks require one unrecoverable report per damaged present device at its
+exact logical address, the existing corruption-counter updates, no recovery
+reports and no writes. The existing successful scrub return status is
+preserved; the errors are reported through the scrub error log.
+
 Each case runs in its own process with a five-second timeout and core dumps
 disabled. LeakSanitizer may require execution outside a tracing sandbox.
 The native I/O model exercises neither-I/O reads; Windows buffered/direct I/O,
 MDLs, SEH, real kernel scheduling, RAID0/DUP and RAID56 are not exercised.
-Unrecoverable blocks with no valid mirror are outside these repair cases.
+Unrecoverable metadata blocks are outside these data-index regressions.
 Windows runtime testing remains outstanding.

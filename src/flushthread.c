@@ -332,6 +332,7 @@ static NTSTATUS clean_space_cache(device_extension* Vcb) {
                                           &c->deleting);
                 if (!NT_SUCCESS(Status)) {
                     release_chunk_lock(c, Vcb);
+                    ExReleaseResourceLite(&Vcb->chunk_lock);
                     return Status;
                 }
 
