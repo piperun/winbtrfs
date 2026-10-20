@@ -141,7 +141,7 @@ NTSTATUS fill_in_file_name_information(FILE_NAME_INFORMATION* fni, fcb* fcb, fil
         else {
             if (fn.Length + datasuflen > fn.MaximumLength) {
                 RtlCopyMemory(&fn.Buffer[fn.Length / sizeof(WCHAR)], datasuf, fn.MaximumLength - fn.Length);
-                reqlen += datasuflen;
+                reqlen = fn.Length + datasuflen;
                 Status = STATUS_BUFFER_OVERFLOW;
             } else {
                 RtlCopyMemory(&fn.Buffer[fn.Length / sizeof(WCHAR)], datasuf, datasuflen);
