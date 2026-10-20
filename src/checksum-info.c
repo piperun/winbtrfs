@@ -87,6 +87,8 @@ NTSTATUS get_csum_info(device_extension* Vcb, PFILE_OBJECT FileObject, btrfs_csu
 
     TRACE("get_csum_info(%p, %p, %p, %lx, %p, %x)\n", Vcb, FileObject, buf, buflen, retlen, processor_mode);
 
+    *retlen = 0;
+
     if (!FileObject)
         return STATUS_INVALID_PARAMETER;
 
@@ -113,23 +115,23 @@ NTSTATUS get_csum_info(device_extension* Vcb, PFILE_OBJECT FileObject, btrfs_csu
     try {
         LIST_ENTRY* le;
         uint8_t* ptr;
-        uint64_t last_off;
+        uint64_t last_sector;
         uint8_t sparse_hash[MAX_HASH_SIZE];
         bool sparse_hash_found = false;
 
         if (fcb->ads) {
             Status = STATUS_INVALID_DEVICE_REQUEST;
-            leave;
+            goto end;
         }
 
         if (fcb->type == BTRFS_FT_DIR) {
             Status = STATUS_FILE_IS_A_DIRECTORY;
-            leave;
+            goto end;
         }
 
         if (fcb->inode_item.flags & BTRFS_INODE_NODATASUM) {
             Status = STATUS_INVALID_DEVICE_REQUEST;
-            leave;
+            goto end;
         }
 
         buf->csum_type = Vcb->superblock.csum_type;
@@ -148,63 +150,73 @@ NTSTATUS get_csum_info(device_extension* Vcb, PFILE_OBJECT FileObject, btrfs_csu
                 buf->num_sectors = 0;
                 *retlen = offsetof(btrfs_csum_info, data[0]);
                 Status = STATUS_SUCCESS;
-                leave;
+                goto end;
             }
 
             le = le->Flink;
         }
 
-        buf->num_sectors = (fcb->inode_item.size + Vcb->superblock.sectorsize - 1) >> Vcb->sector_shift;
+        buf->num_sectors = (fcb->inode_item.size >> Vcb->sector_shift) +
+                           ((fcb->inode_item.size & (Vcb->superblock.sectorsize - 1)) != 0);
 
-        if (buflen < offsetof(btrfs_csum_info, data[0]) + (buf->csum_length * buf->num_sectors)) {
+        if (buf->num_sectors > (buflen - offsetof(btrfs_csum_info, data[0])) / buf->csum_length) {
             Status = STATUS_BUFFER_OVERFLOW;
             *retlen = offsetof(btrfs_csum_info, data[0]);
-            leave;
+            goto end;
         }
 
         ptr = buf->data;
-        last_off = 0;
+        last_sector = 0;
 
         le = fcb->extents.Flink;
         while (le != &fcb->extents) {
             extent* ext = CONTAINING_RECORD(le, extent, list_entry);
+            uint64_t first_sector, num_sectors;
 
             if (ext->ignore || ext->extent_data.type == BTRFS_FILE_EXTENT_INLINE) {
                 le = le->Flink;
                 continue;
             }
 
-            if (ext->offset > last_off) {
-                uint64_t sparse_extents = (ext->offset - last_off) >> Vcb->sector_shift;
+            first_sector = ext->offset >> Vcb->sector_shift;
+            if (first_sector >= buf->num_sectors)
+                break;
 
-                add_csum_sparse_extents(Vcb, sparse_extents, &ptr, sparse_hash_found, sparse_hash);
+            if (first_sector > last_sector) {
+                Status = add_csum_sparse_extents(Vcb, first_sector - last_sector, &ptr, sparse_hash_found, sparse_hash);
+                if (!NT_SUCCESS(Status))
+                    goto end;
                 sparse_hash_found = true;
             }
 
+            num_sectors = min(ext->extent_data.num_bytes >> Vcb->sector_shift, buf->num_sectors - first_sector);
+
             if (ext->extent_data.compression != BTRFS_COMPRESS_NONE)
-                memset(ptr, 0, (ext->extent_data.num_bytes >> Vcb->sector_shift) * Vcb->csum_size); // dummy value for compressed extents
+                memset(ptr, 0, num_sectors * Vcb->csum_size); // dummy value for compressed extents
             else {
                 if (ext->csum)
-                    memcpy(ptr, ext->csum, (ext->extent_data.num_bytes >> Vcb->sector_shift) * Vcb->csum_size);
+                    memcpy(ptr, ext->csum, num_sectors * Vcb->csum_size);
                 else
-                    memset(ptr, 0, (ext->extent_data.num_bytes >> Vcb->sector_shift) * Vcb->csum_size);
-
-                ptr += (ext->extent_data.num_bytes >> Vcb->sector_shift) * Vcb->csum_size;
+                    memset(ptr, 0, num_sectors * Vcb->csum_size);
             }
 
-            last_off = ext->offset + ext->extent_data.num_bytes;
+            ptr += num_sectors * Vcb->csum_size;
+            last_sector = first_sector + num_sectors;
 
             le = le->Flink;
         }
 
-        if (buf->num_sectors > last_off >> Vcb->sector_shift) {
-            uint64_t sparse_extents = buf->num_sectors - (last_off >> Vcb->sector_shift);
-
-            add_csum_sparse_extents(Vcb, sparse_extents, &ptr, sparse_hash_found, sparse_hash);
+        if (buf->num_sectors > last_sector) {
+            Status = add_csum_sparse_extents(Vcb, buf->num_sectors - last_sector, &ptr, sparse_hash_found, sparse_hash);
+            if (!NT_SUCCESS(Status))
+                goto end;
         }
 
         *retlen = offsetof(btrfs_csum_info, data[0]) + (buf->csum_length * buf->num_sectors);
         Status = STATUS_SUCCESS;
+
+end:
+        ;
     } finally {
         ExReleaseResourceLite(fcb->Header.Resource);
     }

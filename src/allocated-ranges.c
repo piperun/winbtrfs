@@ -18,100 +18,86 @@
 /* Allocated file ranges returned by FSCTL_QUERY_ALLOCATED_RANGES. */
 #include "allocated-ranges.h"
 
+static NTSTATUS append_range(FILE_ALLOCATED_RANGE_BUFFER* out, ULONG outlen, ULONG_PTR* retlen,
+                             uint64_t start, uint64_t end) {
+    FILE_ALLOCATED_RANGE_BUFFER* range;
+
+    if (outlen - *retlen < sizeof(*out))
+        return *retlen ? STATUS_BUFFER_OVERFLOW : STATUS_BUFFER_TOO_SMALL;
+
+    range = &out[*retlen / sizeof(*out)];
+    range->FileOffset.QuadPart = start;
+    range->Length.QuadPart = end - start;
+    *retlen += sizeof(*out);
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS query_ranges(PFILE_OBJECT FileObject, FILE_ALLOCATED_RANGE_BUFFER* inbuf, ULONG inbuflen, void* outbuf, ULONG outbuflen, ULONG_PTR* retlen) {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_SUCCESS;
     fcb* fcb;
     LIST_ENTRY* le;
-    FILE_ALLOCATED_RANGE_BUFFER* ranges = outbuf;
-    ULONG i = 0;
-    uint64_t last_start, last_end;
+    uint64_t start, end, last_start = 0, last_end = 0;
 
     TRACE("FSCTL_QUERY_ALLOCATED_RANGES\n");
 
-    if (!FileObject) {
-        ERR("FileObject was NULL\n");
-        return STATUS_INVALID_PARAMETER;
-    }
+    *retlen = 0;
 
-    if (!inbuf || inbuflen < sizeof(FILE_ALLOCATED_RANGE_BUFFER) || !outbuf)
+    if (!FileObject || !FileObject->FsContext || !inbuf || inbuflen < sizeof(*inbuf) || !outbuf)
         return STATUS_INVALID_PARAMETER;
 
+    if (inbuf->FileOffset.QuadPart < 0 || inbuf->Length.QuadPart < 0 ||
+        inbuf->Length.QuadPart > INT64_MAX - inbuf->FileOffset.QuadPart)
+        return STATUS_INVALID_PARAMETER;
+
+    start = inbuf->FileOffset.QuadPart;
+    end = start + inbuf->Length.QuadPart;
     fcb = FileObject->FsContext;
-
-    if (!fcb) {
-        ERR("FCB was NULL\n");
-        return STATUS_INVALID_PARAMETER;
-    }
 
     ExAcquireResourceSharedLite(fcb->Header.Resource, true);
 
-    // If file is not marked as sparse, claim the whole thing as an allocated range
-
-    if (!(fcb->atts & FILE_ATTRIBUTE_SPARSE_FILE)) {
-        if (fcb->inode_item.size == 0)
-            Status = STATUS_SUCCESS;
-        else if (outbuflen < sizeof(FILE_ALLOCATED_RANGE_BUFFER))
-            Status = STATUS_BUFFER_TOO_SMALL;
-        else {
-            ranges[i].FileOffset.QuadPart = 0;
-            ranges[i].Length.QuadPart = fcb->inode_item.size;
-            i++;
-            Status = STATUS_SUCCESS;
-        }
-
+    end = min(end, fcb->inode_item.size);
+    if (start >= end)
         goto end;
 
+    if (!(fcb->atts & FILE_ATTRIBUTE_SPARSE_FILE)) {
+        Status = append_range(outbuf, outbuflen, retlen, start, end);
+        goto end;
     }
 
     le = fcb->extents.Flink;
-
-    last_start = 0;
-    last_end = 0;
-
     while (le != &fcb->extents) {
         extent* ext = CONTAINING_RECORD(le, extent, list_entry);
-
-        if (!ext->ignore) {
-            uint64_t len = ext->extent_data.type == BTRFS_FILE_EXTENT_REG || ext->extent_data.type == BTRFS_FILE_EXTENT_PREALLOC ? ext->extent_data.num_bytes : ext->extent_data.ram_bytes;
-
-            if (ext->offset > last_end) { // first extent after a hole
-                if (last_end > last_start) {
-                    if ((i + 1) * sizeof(FILE_ALLOCATED_RANGE_BUFFER) <= outbuflen) {
-                        ranges[i].FileOffset.QuadPart = last_start;
-                        ranges[i].Length.QuadPart = min(fcb->inode_item.size, last_end) - last_start;
-                        i++;
-                    } else {
-                        Status = STATUS_BUFFER_TOO_SMALL;
-                        goto end;
-                    }
-                }
-
-                last_start = ext->offset;
-            }
-
-            last_end = ext->offset + len;
-        }
+        uint64_t length, extent_start, extent_end;
 
         le = le->Flink;
+        if (ext->ignore || (ext->extent_data.type != BTRFS_FILE_EXTENT_INLINE && ext->extent_data.disk_bytenr == 0))
+            continue;
+
+        if (ext->offset >= end)
+            break;
+
+        length = ext->extent_data.type == BTRFS_FILE_EXTENT_INLINE ? ext->extent_data.ram_bytes : ext->extent_data.num_bytes;
+        extent_start = ext->offset < start ? start : ext->offset;
+        extent_end = ext->offset + min(length, end - ext->offset);
+        if (extent_start >= extent_end)
+            continue;
+
+        if (last_end > last_start && extent_start > last_end) {
+            Status = append_range(outbuf, outbuflen, retlen, last_start, last_end);
+            if (!NT_SUCCESS(Status))
+                goto end;
+            last_start = extent_start;
+        } else if (last_end == last_start)
+            last_start = extent_start;
+
+        if (extent_end > last_end)
+            last_end = extent_end;
     }
 
-    if (last_end > last_start) {
-        if ((i + 1) * sizeof(FILE_ALLOCATED_RANGE_BUFFER) <= outbuflen) {
-            ranges[i].FileOffset.QuadPart = last_start;
-            ranges[i].Length.QuadPart = min(fcb->inode_item.size, last_end) - last_start;
-            i++;
-        } else {
-            Status = STATUS_BUFFER_TOO_SMALL;
-            goto end;
-        }
-    }
-
-    Status = STATUS_SUCCESS;
+    if (last_end > last_start)
+        Status = append_range(outbuf, outbuflen, retlen, last_start, last_end);
 
 end:
-    *retlen = i * sizeof(FILE_ALLOCATED_RANGE_BUFFER);
-
     ExReleaseResourceLite(fcb->Header.Resource);
-
     return Status;
 }
