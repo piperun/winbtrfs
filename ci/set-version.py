@@ -9,7 +9,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCES = (
-    ("CMakeLists.txt", re.compile(rb"(?m)^(project\(btrfs VERSION )(\d+\.\d+\.\d+)(\))$")),
+    ("CMakeLists.txt", re.compile(rb"(?m)^(project\(btrfs VERSION )(\d+\.\d+\.\d+)(\)\r?)$")),
     ("src/btrfs.inf", re.compile(rb"(?m)^(DriverVer\s*=\s*)(\d{2}/\d{2}/\d{4},\d+\.\d+\.\d+\.0)(\r?)$")),
     ("src/btrfs-vol.inf", re.compile(rb"(?m)^(DriverVer\s*=\s*)(\d{2}/\d{2}/\d{4},\d+\.\d+\.\d+\.0)(\r?)$")),
 )
