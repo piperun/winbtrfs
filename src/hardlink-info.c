@@ -136,7 +136,7 @@ NTSTATUS fill_in_hard_link_information(FILE_LINKS_INFORMATION* fli, file_ref* fi
                     if (!deleted) {
                         TRACE("fn = %.*S (found = %u)\n", (int)(fn->Length / sizeof(WCHAR)), fn->Buffer, found);
 
-                        if (feli)
+                        if (bytes_needed > (LONG)offsetof(FILE_LINKS_INFORMATION, Entry))
                             bytes_needed = (LONG)sector_align(bytes_needed, 8);
 
                         bytes_needed += sizeof(FILE_LINK_ENTRY_INFORMATION) + fn->Length - sizeof(WCHAR);
@@ -161,9 +161,10 @@ NTSTATUS fill_in_hard_link_information(FILE_LINKS_INFORMATION* fli, file_ref* fi
                             len = bytes_needed;
                         }
                     }
-
-                    free_fileref(parfr);
                 }
+
+                if (NT_SUCCESS(Status))
+                    free_fileref(parfr);
 
                 le = le->Flink;
             }
@@ -243,6 +244,11 @@ NTSTATUS fill_in_hard_link_full_id_information(FILE_LINKS_FULL_ID_INFORMATION* f
         }
     } else {
         if (IsListEmpty(&fcb->hardlinks)) {
+            if (!fileref->dc) {
+                Status = STATUS_INVALID_PARAMETER;
+                goto end;
+            }
+
             bytes_needed += offsetof(FILE_LINK_ENTRY_FULL_ID_INFORMATION, FileName[0]) + fileref->dc->name.Length;
 
             if (bytes_needed > *length)
@@ -284,7 +290,7 @@ NTSTATUS fill_in_hard_link_full_id_information(FILE_LINKS_FULL_ID_INFORMATION* f
                     while (le2 != &parfr->children) {
                         file_ref* fr2 = CONTAINING_RECORD(le2, file_ref, list_entry);
 
-                        if (fr2->dc->index == hl->index) {
+                        if (fr2->dc && fr2->dc->index == hl->index) {
                             found = true;
                             deleted = fr2->deleted;
 
@@ -303,7 +309,7 @@ NTSTATUS fill_in_hard_link_full_id_information(FILE_LINKS_FULL_ID_INFORMATION* f
                     if (!deleted) {
                         TRACE("fn = %.*S (found = %u)\n", (int)(fn->Length / sizeof(WCHAR)), fn->Buffer, found);
 
-                        if (flefii)
+                        if (bytes_needed > (LONG)offsetof(FILE_LINKS_FULL_ID_INFORMATION, Entry))
                             bytes_needed = (LONG)sector_align(bytes_needed, 8);
 
                         bytes_needed += offsetof(FILE_LINK_ENTRY_FULL_ID_INFORMATION, FileName[0]) + fn->Length;
@@ -331,9 +337,10 @@ NTSTATUS fill_in_hard_link_full_id_information(FILE_LINKS_FULL_ID_INFORMATION* f
                             len = bytes_needed;
                         }
                     }
-
-                    free_fileref(parfr);
                 }
+
+                if (NT_SUCCESS(Status))
+                    free_fileref(parfr);
 
                 le = le->Flink;
             }
@@ -346,6 +353,7 @@ NTSTATUS fill_in_hard_link_full_id_information(FILE_LINKS_FULL_ID_INFORMATION* f
 
     Status = overflow ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
 
+end:
     ExReleaseResourceLite(fcb->Header.Resource);
     ExReleaseResourceLite(&fcb->Vcb->fileref_lock);
 
