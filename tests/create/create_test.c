@@ -22,6 +22,7 @@ typedef struct {
     bool dispatch, loaded_related, relative_stream, data_suffix;
     const char* colliding_xattr;
     bool collider_after_target;
+    bool lookup_only, caller_holds_dirlock;
 } test_case;
 static const test_case* current;
 static device_extension volume;
@@ -434,6 +435,8 @@ static void release_cached_entries(fcb* parent) {
         ExFreePool(dc->utf8.Buffer); ExFreePool(dc->name.Buffer); ExFreePool(dc->name_uc.Buffer); ExFreePool(dc);
     }
 }
+#include "lookup_test.inc"
+
 static void run(void) {
     setup();
     setup_ads_cache();
@@ -600,6 +603,7 @@ static void run(void) {
 }
 int main(int argc, char** argv) {
     static const test_case cases[]={
+        #include "lookup_cases.inc"
         #include "missing_base_cases.inc"
         #include "ads_cache_cases.inc"
         {.name="dispatch-stream-live",.dispatch=true,.stream=true,.existing_stream=true,.expected=STATUS_OBJECT_NAME_COLLISION},
@@ -741,6 +745,10 @@ int main(int argc, char** argv) {
     }
     if (argc != 2) return 2;
     scenario=argv[1];
-    for (unsigned i=0;i<sizeof(cases)/sizeof(cases[0]);i++) if (!strcmp(scenario,cases[i].name)) { current=&cases[i]; run(); return 0; }
+    for (unsigned i=0;i<sizeof(cases)/sizeof(cases[0]);i++) if (!strcmp(scenario,cases[i].name)) {
+        current=&cases[i];
+        if (current->lookup_only) run_lookup(); else run();
+        return 0;
+    }
     return 2;
 }

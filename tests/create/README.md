@@ -221,6 +221,20 @@ cases, all 169 scenarios must balance tracked allocations, references and
 resources. The non-ASCII denial case checks the UTF-16 copy's ownership;
 it does not exercise the host model's ASCII-only UTF-8 conversion.
 
+Reproduce invalid-name lookup cleanup:
+
+```sh
+python3 tests/create/check_create.py . --revision 5f244783 --build-dir build/create-tests-lookup-before
+```
+
+In the 179-case matrix, this baseline passes 177/179. Two direct
+case-insensitive lookups retain their uppercase buffer when name
+validation fails, with and without a caller-held directory lock. The
+validation error must use the common cleanup path, free the owned buffer
+and preserve any lock held by the caller. Ten lookup cases also cover
+case-sensitive validation errors, uppercase conversion failure, missing
+and distinct names, and matching entries with live or reaped filerefs.
+
 The harness extracts the actual `file_create2`, `create_stream`, FCB and
 fileref constructors, dirty-queue insertion, reference releases, cache
 reapers, directory-entry creation and lookup, child fileref opening,

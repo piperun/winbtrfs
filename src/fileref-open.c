@@ -38,7 +38,7 @@ NTSTATUS find_file_in_dir(PUNICODE_STRING filename, fcb* fcb, root** subvol, uin
 
     Status = check_file_name_valid(filename, false, false);
     if (!NT_SUCCESS(Status))
-        return Status;
+        goto end;
 
     hash = calc_crc32c(0xffffffff, (uint8_t*)fnus.Buffer, fnus.Length);
 
