@@ -18,6 +18,59 @@ static fcb node;
 static file_ref fileref;
 static const WCHAR path[] = { '\\', 'f', 'i', 'l', 'e' };
 
+enum parent_state { PARENT_LIVE, PARENT_DELETED, PARENT_MISSING };
+enum path_failure { PATH_OK, PATH_QUERY_FAILED, PATH_FILL_FAILED, PATH_POOL_FAILED, PATH_TOO_LONG };
+static bool hardlink_mode, shared_parent;
+static enum parent_state parent_states[3];
+static enum path_failure path_failure;
+static file_ref parents[3];
+static hardlink links[3];
+static WCHAR parent_paths[3][6], link_names[3][3];
+static ULONG parent_lengths[3];
+static LONG parent_initial_refs;
+static unsigned lookup_calls, query_calls, fill_calls, next_link_report;
+static unsigned expected_links[3], expected_link_count;
+static bool live_range(const void* p, size_t size);
+
+static void check_parent_locks(void) {
+    CHECK(volume.tree_lock.shared == 1 && volume.fileref_lock.exclusive == 1);
+    CHECK(fileref.refcount > 0);
+}
+
+static NTSTATUS parent_filename(file_ref* fr, PUNICODE_STRING name, USHORT* offset, ULONG* length) {
+    check_parent_locks();
+    unsigned i;
+    for (i = 0; i < 3 && fr != &parents[i]; i++) {}
+    CHECK(i < 3 && fr->refcount > 0 && !fr->deleted && offset == NULL);
+    if (!name->MaximumLength) {
+        query_calls++;
+        CHECK(length != NULL);
+        if (path_failure == PATH_QUERY_FAILED) return STATUS_OBJECT_NAME_NOT_FOUND;
+        *length = path_failure == PATH_TOO_LONG ? 65534 : parent_lengths[i];
+        return STATUS_BUFFER_OVERFLOW;
+    }
+    fill_calls++;
+    CHECK(name->MaximumLength >= parent_lengths[i] && live_range(name->Buffer, name->MaximumLength));
+    if (path_failure == PATH_FILL_FAILED) return STATUS_OBJECT_NAME_NOT_FOUND;
+    CHECK(path_failure != PATH_TOO_LONG);
+    memcpy(name->Buffer, parent_paths[i], parent_lengths[i]);
+    name->Length = (USHORT)parent_lengths[i];
+    return STATUS_SUCCESS;
+}
+
+static void check_link_report(PSTRING name, USHORT offset) {
+    CHECK(next_link_report < expected_link_count);
+    unsigned i = expected_links[next_link_report++];
+    unsigned p = shared_parent ? 0 : i;
+    bool root_parent = &parents[p] == volume.root_fileref;
+    size_t prefix = parent_lengths[p] + (root_parent ? 0 : sizeof(WCHAR));
+    CHECK(name->Length == prefix + links[i].name.Length && offset == prefix);
+    CHECK(live_range(name->Buffer, name->Length));
+    CHECK(memcmp(name->Buffer, parent_paths[p], parent_lengths[p]) == 0);
+    if (!root_parent) CHECK(((WCHAR*)name->Buffer)[parent_lengths[p] / sizeof(WCHAR)] == '\\');
+    CHECK(memcmp(name->Buffer + prefix, links[i].name.Buffer, links[i].name.Length) == 0);
+}
+
 static void* allocate(size_t size, enum allocation_kind kind) {
     void* p = malloc(size ? size : 1); CHECK(p != NULL);
     memset(p, 0xa5, size);
@@ -91,6 +144,7 @@ static void ExReleaseResourceLite(ERESOURCE* r) {
 }
 
 static NTSTATUS fileref_get_filename(file_ref* fr, PUNICODE_STRING name, USHORT* offset, ULONG* length) {
+    if (hardlink_mode) return parent_filename(fr, name, offset, length);
     CHECK(fr == &fileref && fileref.refcount > 0);
     CHECK(volume.tree_lock.shared == 1 && volume.fileref_lock.exclusive == 1);
     if (length) *length = sizeof(path);
@@ -102,8 +156,15 @@ static NTSTATUS fileref_get_filename(file_ref* fr, PUNICODE_STRING name, USHORT*
 }
 
 static NTSTATUS open_fileref_by_inode(device_extension* v, root* r, uint64_t inode, file_ref** fr, void* irp) {
-    (void)v; (void)r; (void)inode; (void)fr; (void)irp;
-    CHECK(false); return STATUS_OBJECT_NAME_NOT_FOUND;
+    CHECK(hardlink_mode && v == &volume && r == &subvol && irp == NULL);
+    check_parent_locks();
+    unsigned i = lookup_calls++ % 3;
+    CHECK(inode == links[i].parent);
+    unsigned p = shared_parent ? 0 : i;
+    if (parent_states[p] == PARENT_MISSING) return STATUS_OBJECT_NAME_NOT_FOUND;
+    *fr = &parents[p];
+    InterlockedIncrement(&(*fr)->refcount);
+    return STATUS_SUCCESS;
 }
 
 static void FsRtlNotifyFilterReportChange(void* sync, LIST_ENTRY* list, PSTRING name,
@@ -112,8 +173,11 @@ static void FsRtlNotifyFilterReportChange(void* sync, LIST_ENTRY* list, PSTRING 
     CHECK(sync == volume.NotifySync && list == &volume.DirNotifyList);
     CHECK(parent == NULL && target == NULL && context == NULL);
     CHECK(volume.tree_lock.shared == 1 && volume.fileref_lock.exclusive == 1);
-    CHECK(name->Length == sizeof(path) && offset == sizeof(WCHAR));
-    CHECK(memcmp(name->Buffer, path, sizeof(path)) == 0);
+    if (hardlink_mode) check_link_report(name, offset);
+    else {
+        CHECK(name->Length == sizeof(path) && offset == sizeof(WCHAR));
+        CHECK(memcmp(name->Buffer, path, sizeof(path)) == 0);
+    }
     CHECK(current_report < report_count);
     report* wanted = &reports[current_report];
     CHECK(filter == wanted->filter && action == wanted->action);
@@ -225,6 +289,134 @@ static void run_control(unsigned n) {
     drain(false);
 }
 
+static void setup_links(unsigned combination, bool root_parent, LONG initial_refs) {
+    hardlink_mode = true;
+    parent_initial_refs = initial_refs;
+    node.inode_item.nlink = 3;
+    volume.root_fileref = root_parent ? &parents[0] : NULL;
+    for (unsigned i = 0; i < 3; i++) {
+        parent_states[i] = combination % 3;
+        combination /= 3;
+        parents[i] = (file_ref){ .fcb = &node, .refcount = initial_refs,
+                                .deleted = parent_states[i] == PARENT_DELETED };
+        const WCHAR directory[] = { '\\', 'd', 'i', 'r', (WCHAR)('0' + i) };
+        memcpy(parent_paths[i], directory, sizeof(directory));
+        parent_lengths[i] = i == 0 && root_parent ? sizeof(WCHAR) : sizeof(directory);
+        link_names[i][0] = 0x3bb; link_names[i][1] = 'l'; link_names[i][2] = (WCHAR)('0' + i);
+        links[i] = (hardlink){ .parent = 100 + i,
+            .name = { sizeof(link_names[i]), sizeof(link_names[i]), link_names[i] } };
+        LIST_ENTRY* head = &node.hardlinks;
+        links[i].list_entry = (LIST_ENTRY){ head, head->Blink };
+        head->Blink->Flink = &links[i].list_entry;
+        head->Blink = &links[i].list_entry;
+    }
+}
+
+static void run_links(bool queued_work, unsigned repeats, bool stream, bool empty) {
+    if (empty) InitializeListHead(&node.hardlinks);
+    else if (path_failure == PATH_OK) {
+        for (unsigned i = 0; i < 3; i++) {
+            if (parent_states[shared_parent ? 0 : i] == PARENT_LIVE)
+                expected_links[expected_link_count++] = i;
+        }
+    }
+    PUNICODE_STRING name = stream ? make_name(12, 0) : NULL;
+    expect_report(name, 0x20, 3);
+    for (unsigned run = 0; run < repeats; run++) {
+        next_link_report = 0;
+        if (path_failure == PATH_POOL_FAILED)
+            fail_pool = attempted_pool + (queued_work ? 2 : 1);
+        if (queued_work) {
+            queue_notification_fcb(&fileref, 0x20, 3, name);
+            CHECK(queued_count == 1 && fileref.refcount == 2);
+            if (run + 1 == repeats) free_fileref(&fileref);
+            PIO_WORKITEM item = queued[0];
+            CHECK(live_range(item, sizeof(*item)));
+            item->callback(master_devobj, item->context);
+            queued_count = 0;
+        } else {
+            ExAcquireResourceSharedLite(&volume.tree_lock, true);
+            send_notification_fcb(&fileref, 0x20, 3, name);
+            ExReleaseResourceLite(&volume.tree_lock);
+        }
+        CHECK(next_link_report == expected_link_count);
+    }
+    if (!queued_work) free_fileref(&fileref);
+    CHECK(fileref.refcount == 0 && completed_work == (queued_work ? repeats : 0));
+    CHECK(reported == repeats * expected_link_count);
+    unsigned looked_up = empty ? 0 : path_failure == PATH_OK ? 3 : 1;
+    CHECK(lookup_calls == looked_up * repeats);
+    unsigned queried = path_failure == PATH_OK ? expected_link_count : 1;
+    CHECK(query_calls == queried * repeats);
+    unsigned filled = path_failure == PATH_QUERY_FAILED || path_failure == PATH_POOL_FAILED ||
+                      path_failure == PATH_TOO_LONG ? 0 : queried;
+    CHECK(fill_calls == filled * repeats);
+    for (unsigned i = 0; i < 3; i++) {
+        if (parents[i].refcount != parent_initial_refs) {
+            fprintf(stderr, "parent %u retained %d references, expected %d after %u notifications\n",
+                i, parents[i].refcount, parent_initial_refs, repeats);
+            CHECK(false);
+        }
+    }
+    if (name) retire_name(name);
+}
+
+static bool hardlink_cases(const char* wanted, bool list) {
+    for (unsigned queued_work = 0; queued_work < 2; queued_work++) {
+        for (unsigned combination = 0; combination < 27; combination++) {
+            char name[64]; snprintf(name, sizeof(name), "hardlinks-%s-matrix-%u",
+                queued_work ? "queued" : "direct", combination);
+            if (list) { puts(name); continue; }
+            if (strcmp(wanted, name) == 0) {
+                setup_links(combination, true, 1);
+                run_links(queued_work, 1, combination % 2, false); return true;
+            }
+        }
+        for (unsigned initial = 0; initial < 2; initial++) {
+            char name[64]; snprintf(name, sizeof(name), "hardlinks-%s-repeat-deleted-refs%u",
+                queued_work ? "queued" : "direct", initial);
+            if (list) { puts(name); continue; }
+            if (strcmp(wanted, name) == 0) {
+                setup_links(13, true, (LONG)initial); /* Three deleted parents. */
+                run_links(queued_work, 64, true, false); return true;
+            }
+        }
+        for (unsigned special = 0; special < 2; special++) {
+            char name[64]; snprintf(name, sizeof(name), "hardlinks-%s-%s",
+                queued_work ? "queued" : "direct", special ? "empty" : "shared-deleted-parent");
+            if (list) { puts(name); continue; }
+            if (strcmp(wanted, name) == 0) {
+                setup_links(special ? 0 : 13, true, 1);
+                if (!special) {
+                    shared_parent = true;
+                    for (unsigned i = 0; i < 3; i++) links[i].parent = links[0].parent;
+                }
+                run_links(queued_work, 1, true, special); return true;
+            }
+        }
+        const char* failures[] = { "query", "fill", "pool" };
+        for (unsigned root_parent = 0; root_parent < 2; root_parent++) {
+            for (unsigned failure = 0; failure < 3; failure++) {
+                char name[64]; snprintf(name, sizeof(name), "hardlinks-%s-%s-%s-failure",
+                    queued_work ? "queued" : "direct", root_parent ? "root" : "nested", failures[failure]);
+                if (list) { puts(name); continue; }
+                if (strcmp(wanted, name) == 0) {
+                    setup_links(0, root_parent, 1);
+                    path_failure = PATH_QUERY_FAILED + failure;
+                    run_links(queued_work, 1, true, false); return true;
+                }
+            }
+        }
+        char name[64]; snprintf(name, sizeof(name), "hardlinks-%s-long-path", queued_work ? "queued" : "direct");
+        if (list) puts(name);
+        else if (strcmp(wanted, name) == 0) {
+            setup_links(0, false, 1); path_failure = PATH_TOO_LONG;
+            run_links(queued_work, 1, false, false); return true;
+        }
+    }
+    return false;
+}
+
 int main(int argc, char** argv) {
     CHECK(argc == 2);
     volume.NotifySync = &volume;
@@ -251,6 +443,7 @@ int main(int argc, char** argv) {
         if (list) { puts(name); continue; }
         if (strcmp(argv[1], name) == 0) { run_control(i); goto done; }
     }
+    if (hardlink_cases(argv[1], list)) goto done;
     CHECK(list); return 0;
 done:
     CHECK(fileref.refcount == 0 && !volume.tree_lock.shared && !volume.fileref_lock.exclusive);

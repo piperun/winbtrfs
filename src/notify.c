@@ -75,16 +75,18 @@ void send_notification_fcb(_In_ file_ref* fileref, _In_ ULONG filter_match, _In_
 
     ExAcquireResourceExclusiveLite(&fcb->Vcb->fileref_lock, true);
 
-    le = fcb->hardlinks.Flink;
-    while (le != &fcb->hardlinks) {
+    for (le = fcb->hardlinks.Flink; le != &fcb->hardlinks; le = le->Flink) {
         hardlink* hl = CONTAINING_RECORD(le, hardlink, list_entry);
         file_ref* parfr;
 
         Status = open_fileref_by_inode(fcb->Vcb, fcb->subvol, hl->parent, &parfr, NULL);
 
-        if (!NT_SUCCESS(Status))
+        if (!NT_SUCCESS(Status)) {
             ERR("open_fileref_by_inode returned %08lx\n", Status);
-        else if (!parfr->deleted) {
+            continue;
+        }
+
+        if (!parfr->deleted) {
             UNICODE_STRING fn;
             ULONG pathlen;
 
@@ -133,11 +135,9 @@ void send_notification_fcb(_In_ file_ref* fileref, _In_ ULONG filter_match, _In_
                                           (PSTRING)stream, NULL, filter_match, action, NULL, NULL);
 
             ExFreePool(fn.Buffer);
-
-            free_fileref(parfr);
         }
 
-        le = le->Flink;
+        free_fileref(parfr);
     }
 
     ExReleaseResourceLite(&fcb->Vcb->fileref_lock);
