@@ -201,16 +201,19 @@ static BOOLEAN __stdcall fast_io_query_network_open_info(PFILE_OBJECT FileObject
     fcb* fcb;
     ccb* ccb;
     file_ref* fileref;
+    bool ads;
+    ULONG adssize = 0;
 
-    UNUSED(Wait);
-    UNUSED(IoStatus); // FIXME - really? What about IoStatus->Information?
     UNUSED(DeviceObject);
 
     FsRtlEnterFileSystem();
 
     TRACE("(%p, %u, %p, %p, %p)\n", FileObject, Wait, fnoi, IoStatus, DeviceObject);
 
-    RtlZeroMemory(fnoi, sizeof(FILE_NETWORK_OPEN_INFORMATION));
+    if (!FileObject || !fnoi || !IoStatus) {
+        FsRtlExitFileSystem();
+        return false;
+    }
 
     fcb = FileObject->FsContext;
 
@@ -221,12 +224,42 @@ static BOOLEAN __stdcall fast_io_query_network_open_info(PFILE_OBJECT FileObject
 
     ccb = FileObject->FsContext2;
 
-    if (!ccb) {
+    if (!ccb || !(ccb->access & (FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES))) {
         FsRtlExitFileSystem();
         return false;
     }
 
     fileref = ccb->fileref;
+
+    if (!ExAcquireResourceSharedLite(fcb->Header.Resource, Wait)) {
+        FsRtlExitFileSystem();
+        return false;
+    }
+
+    ads = fcb->ads;
+
+    if (ads && (!fileref || !fileref->parent || !fileref->parent->fcb)) {
+        ERR("no fileref for stream\n");
+        ExReleaseResourceLite(fcb->Header.Resource);
+        FsRtlExitFileSystem();
+        return false;
+    }
+
+    if (ads) {
+        struct _fcb* parent_fcb;
+
+        adssize = fcb->adsdata.Length;
+        parent_fcb = fileref->parent->fcb;
+        ExReleaseResourceLite(fcb->Header.Resource);
+        fcb = parent_fcb;
+
+        if (!ExAcquireResourceSharedLite(fcb->Header.Resource, Wait)) {
+            FsRtlExitFileSystem();
+            return false;
+        }
+    }
+
+    RtlZeroMemory(fnoi, sizeof(FILE_NETWORK_OPEN_INFORMATION));
 
     if (fcb == fcb->Vcb->dummy_fcb) {
         LARGE_INTEGER time;
@@ -236,16 +269,7 @@ static BOOLEAN __stdcall fast_io_query_network_open_info(PFILE_OBJECT FileObject
     } else {
         struct btrfs_inode_item* ii;
 
-        if (fcb->ads) {
-            if (!fileref || !fileref->parent) {
-                ERR("no fileref for stream\n");
-                FsRtlExitFileSystem();
-                return false;
-            }
-
-            ii = &fileref->parent->fcb->inode_item;
-        } else
-            ii = &fcb->inode_item;
+        ii = &fcb->inode_item;
 
         fnoi->CreationTime.QuadPart = unix_time_to_win(&ii->otime);
         fnoi->LastAccessTime.QuadPart = unix_time_to_win(&ii->atime);
@@ -253,14 +277,19 @@ static BOOLEAN __stdcall fast_io_query_network_open_info(PFILE_OBJECT FileObject
         fnoi->ChangeTime.QuadPart = unix_time_to_win(&ii->ctime);
     }
 
-    if (fcb->ads) {
-        fnoi->AllocationSize.QuadPart = fnoi->EndOfFile.QuadPart = fcb->adsdata.Length;
-        fnoi->FileAttributes = fileref->parent->fcb->atts == 0 ? FILE_ATTRIBUTE_NORMAL : fileref->parent->fcb->atts;
+    if (ads) {
+        fnoi->AllocationSize.QuadPart = fnoi->EndOfFile.QuadPart = adssize;
+        fnoi->FileAttributes = fcb->atts == 0 ? FILE_ATTRIBUTE_NORMAL : fcb->atts;
     } else {
         fnoi->AllocationSize.QuadPart = fcb_alloc_size(fcb);
         fnoi->EndOfFile.QuadPart = S_ISDIR(fcb->inode_item.mode) ? 0 : fcb->inode_item.size;
         fnoi->FileAttributes = fcb->atts == 0 ? FILE_ATTRIBUTE_NORMAL : fcb->atts;
     }
+
+    IoStatus->Status = STATUS_SUCCESS;
+    IoStatus->Information = sizeof(FILE_NETWORK_OPEN_INFORMATION);
+
+    ExReleaseResourceLite(fcb->Header.Resource);
 
     FsRtlExitFileSystem();
 
