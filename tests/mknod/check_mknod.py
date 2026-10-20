@@ -47,9 +47,10 @@ start = btrfs.index("#ifdef DEBUG_FCB_REFCOUNTS\nvoid _free_fcb(")
 for name in ["reap_fcb", "free_fileref", "reap_fileref", "reap_fcbs", "reap_filerefs",
              "mark_fcb_dirty", "mark_fileref_dirty"]:
     (out / f"{name}.inc").write_text(license_header + function(btrfs, f"void {name}("))
+lookup = read("src/fileref-open.c", optional=True)
 for marker, filename in [("NTSTATUS find_file_in_dir(", "find_file_in_dir.inc"),
                          ("NTSTATUS add_dir_child(", "add_dir_child.inc")]:
-    (out / filename).write_text(license_header + function(create, marker))
+    (out / filename).write_text(license_header + function(lookup if marker in lookup else create, marker))
 (out / "add_fcb_to_subvol.inc").write_text(license_header + function(read("src/fileinfo.c"), "void add_fcb_to_subvol("))
 (out / "btrfs.h").write_text(read("src/btrfs.h"))
 protocol = read("src/btrfsioctl.h")

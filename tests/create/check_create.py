@@ -55,7 +55,7 @@ for name, marker in [("create_fcb", "fcb* create_fcb("),
                      ("add_dir_child", "NTSTATUS add_dir_child("),
                      ("find_file_in_dir", "NTSTATUS find_file_in_dir("),
                      ("open_fileref_child", "NTSTATUS open_fileref_child(")]:
-    (out / f"{name}.inc").write_text(license_header + function(opening if name == "open_fileref_child" else create, marker))
+    (out / f"{name}.inc").write_text(license_header + function(opening if marker in opening else create, marker))
 start = btrfs.index("#ifdef DEBUG_FCB_REFCOUNTS\nvoid _free_fcb(")
 (out / "free_fcb.inc").write_text(license_header + btrfs[start:btrfs.index("\nvoid reap_fcb(", start)])
 for name in ["reap_fcb", "free_fileref", "reap_fileref", "reap_fcbs", "reap_filerefs",

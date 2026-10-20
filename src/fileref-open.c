@@ -18,6 +18,145 @@
 #include "btrfs_drv.h"
 #include "crc32c.h"
 
+NTSTATUS find_file_in_dir(PUNICODE_STRING filename, fcb* fcb, root** subvol, uint64_t* inode, dir_child** pdc, bool case_sensitive) {
+    NTSTATUS Status;
+    UNICODE_STRING fnus;
+    uint32_t hash;
+    LIST_ENTRY* le;
+    uint8_t c;
+    bool locked = false;
+
+    if (!case_sensitive) {
+        Status = RtlUpcaseUnicodeString(&fnus, filename, true);
+
+        if (!NT_SUCCESS(Status)) {
+            ERR("RtlUpcaseUnicodeString returned %08lx\n", Status);
+            return Status;
+        }
+    } else
+        fnus = *filename;
+
+    Status = check_file_name_valid(filename, false, false);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    hash = calc_crc32c(0xffffffff, (uint8_t*)fnus.Buffer, fnus.Length);
+
+    c = hash >> 24;
+
+    if (!ExIsResourceAcquiredSharedLite(&fcb->nonpaged->dir_children_lock)) {
+        ExAcquireResourceSharedLite(&fcb->nonpaged->dir_children_lock, true);
+        locked = true;
+    }
+
+    if (case_sensitive) {
+        if (!fcb->hash_ptrs[c]) {
+            Status = STATUS_OBJECT_NAME_NOT_FOUND;
+            goto end;
+        }
+
+        le = fcb->hash_ptrs[c];
+        while (le != &fcb->dir_children_hash) {
+            dir_child* dc = CONTAINING_RECORD(le, dir_child, list_entry_hash);
+
+            if (dc->hash == hash) {
+                if (dc->name.Length == fnus.Length && RtlCompareMemory(dc->name.Buffer, fnus.Buffer, fnus.Length) == fnus.Length) {
+                    if (dc->key.type == BTRFS_ROOT_ITEM_KEY) {
+                        LIST_ENTRY* le2;
+
+                        *subvol = NULL;
+
+                        le2 = fcb->Vcb->roots.Flink;
+                        while (le2 != &fcb->Vcb->roots) {
+                            root* r2 = CONTAINING_RECORD(le2, root, list_entry);
+
+                            if (r2->id == dc->key.objectid) {
+                                *subvol = r2;
+                                break;
+                            }
+
+                            le2 = le2->Flink;
+                        }
+
+                        *inode = BTRFS_FIRST_FREE_OBJECTID;
+                    } else {
+                        *subvol = fcb->subvol;
+                        *inode = dc->key.objectid;
+                    }
+
+                    *pdc = dc;
+
+                    Status = STATUS_SUCCESS;
+                    goto end;
+                }
+            } else if (dc->hash > hash) {
+                Status = STATUS_OBJECT_NAME_NOT_FOUND;
+                goto end;
+            }
+
+            le = le->Flink;
+        }
+    } else {
+        if (!fcb->hash_ptrs_uc[c]) {
+            Status = STATUS_OBJECT_NAME_NOT_FOUND;
+            goto end;
+        }
+
+        le = fcb->hash_ptrs_uc[c];
+        while (le != &fcb->dir_children_hash_uc) {
+            dir_child* dc = CONTAINING_RECORD(le, dir_child, list_entry_hash_uc);
+
+            if (dc->hash_uc == hash) {
+                if (dc->name_uc.Length == fnus.Length && RtlCompareMemory(dc->name_uc.Buffer, fnus.Buffer, fnus.Length) == fnus.Length) {
+                    if (dc->key.type == BTRFS_ROOT_ITEM_KEY) {
+                        LIST_ENTRY* le2;
+
+                        *subvol = NULL;
+
+                        le2 = fcb->Vcb->roots.Flink;
+                        while (le2 != &fcb->Vcb->roots) {
+                            root* r2 = CONTAINING_RECORD(le2, root, list_entry);
+
+                            if (r2->id == dc->key.objectid) {
+                                *subvol = r2;
+                                break;
+                            }
+
+                            le2 = le2->Flink;
+                        }
+
+                        *inode = BTRFS_FIRST_FREE_OBJECTID;
+                    } else {
+                        *subvol = fcb->subvol;
+                        *inode = dc->key.objectid;
+                    }
+
+                    *pdc = dc;
+
+                    Status = STATUS_SUCCESS;
+                    goto end;
+                }
+            } else if (dc->hash_uc > hash) {
+                Status = STATUS_OBJECT_NAME_NOT_FOUND;
+                goto end;
+            }
+
+            le = le->Flink;
+        }
+    }
+
+    Status = STATUS_OBJECT_NAME_NOT_FOUND;
+
+end:
+    if (locked)
+        ExReleaseResourceLite(&fcb->nonpaged->dir_children_lock);
+
+    if (!case_sensitive)
+        ExFreePool(fnus.Buffer);
+
+    return Status;
+}
+
 static NTSTATUS open_fcb_stream(_Requires_lock_held_(_Curr_->tree_lock) _Requires_exclusive_lock_held_(_Curr_->fcb_lock) device_extension* Vcb,
                                 dir_child* dc, fcb* parent, fcb** pfcb, PIRP Irp) {
     fcb* fcb;
