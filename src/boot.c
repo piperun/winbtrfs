@@ -228,17 +228,17 @@ static void mountmgr_notification(uint8_t* uuid) {
 static void check_boot_options() {
     NTSTATUS Status;
     WCHAR* s;
+    HANDLE control = NULL;
+    KEY_VALUE_FULL_INFORMATION* kvfi = NULL;
 
     static const WCHAR pathw[] = L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control";
     static const WCHAR namew[] = L"SystemStartOptions";
     static const WCHAR subvol[] = L"SUBVOL=";
 
     try {
-        HANDLE control;
         OBJECT_ATTRIBUTES oa;
         UNICODE_STRING path;
         ULONG kvfilen = sizeof(KEY_VALUE_FULL_INFORMATION) - sizeof(WCHAR) + (255 * sizeof(WCHAR));
-        KEY_VALUE_FULL_INFORMATION* kvfi;
         UNICODE_STRING name;
         WCHAR* options;
 
@@ -250,7 +250,7 @@ static void check_boot_options() {
         Status = ZwOpenKey(&control, KEY_QUERY_VALUE, &oa);
         if (!NT_SUCCESS(Status)) {
             ERR("ZwOpenKey returned %08lx\n", Status);
-            return;
+            goto end;
         }
 
         // FIXME - don't fail if value too long (can we query for the length?)
@@ -258,8 +258,7 @@ static void check_boot_options() {
         kvfi = ExAllocatePoolWithTag(PagedPool, kvfilen, ALLOC_TAG);
         if (!kvfi) {
             ERR("out of memory\n");
-            NtClose(control);
-            return;
+            goto end;
         }
 
         name.Buffer = (WCHAR*)namew;
@@ -269,11 +268,8 @@ static void check_boot_options() {
                                  kvfilen, &kvfilen);
         if (!NT_SUCCESS(Status)) {
             ERR("ZwQueryValueKey returned %08lx\n", Status);
-            NtClose(control);
-            return;
+            goto end;
         }
-
-        NtClose(control);
 
         options = (WCHAR*)((uint8_t*)kvfi + kvfi->DataOffset);
         options[kvfi->DataLength / sizeof(WCHAR)] = 0; // FIXME - make sure buffer long enough to allow this
@@ -281,7 +277,7 @@ static void check_boot_options() {
         s = wcsstr(options, subvol);
 
         if (!s)
-            return;
+            goto end;
 
         s += (sizeof(subvol) / sizeof(WCHAR)) - 1;
 
@@ -303,12 +299,19 @@ static void check_boot_options() {
             s++;
         }
     } except (EXCEPTION_EXECUTE_HANDLER) {
-        return;
+        goto end;
     }
 
     if (boot_subvol != 0) {
         TRACE("passed subvol %I64x in boot options\n", boot_subvol);
     }
+
+end:
+    if (kvfi)
+        ExFreePool(kvfi);
+
+    if (control)
+        NtClose(control);
 }
 
 void boot_add_device(DEVICE_OBJECT* pdo) {
