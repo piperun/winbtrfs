@@ -205,7 +205,7 @@ NTSTATUS scrub_extent_raid10(device_extension* Vcb, chunk* c, uint64_t offset, u
                             // write good data over bad
 
                             if (!c->devices[j + k]->readonly) {
-                                Status = write_data_phys(c->devices[j + k]->devobj, c->devices[j + k]->fileobj, c->chunk_item->stripe[j + k].offset + offset - c->offset,
+                                Status = write_data_phys(c->devices[j + k]->devobj, c->devices[j + k]->fileobj, c->chunk_item->stripe[j + k].offset + context->stripes[j + k].start,
                                                          context->stripes[j + goodstripe].buf, context->stripes[j + goodstripe].length);
 
                                 if (!NT_SUCCESS(Status)) {
@@ -369,7 +369,7 @@ NTSTATUS scrub_extent_raid10(device_extension* Vcb, chunk* c, uint64_t offset, u
 
                     for (k = 0; k < sub_stripes; k++) {
                         if (c->devices[j + k]->devobj && !c->devices[j + k]->readonly) {
-                            Status = write_data_phys(c->devices[j + k]->devobj, c->devices[j + k]->fileobj, c->chunk_item->stripe[j + k].offset + offset - c->offset,
+                            Status = write_data_phys(c->devices[j + k]->devobj, c->devices[j + k]->fileobj, c->chunk_item->stripe[j + k].offset + context->stripes[j + k].start,
                                                      context->stripes[j + k].buf, context->stripes[j + k].length);
 
                             if (!NT_SUCCESS(Status)) {
