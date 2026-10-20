@@ -113,6 +113,7 @@ set(SRC_FILES src/balance.c
     src/rename.c
     src/reparse.c
     src/scrub.c
+    src/scrub-raid10.c
     src/search.c
     src/security.c
     src/send.c
