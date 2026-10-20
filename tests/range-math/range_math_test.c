@@ -76,6 +76,26 @@ static void check_case(uint64_t query_start, uint64_t query_end,
 }
 
 int main(void) {
+    static const struct {
+        uint64_t length;
+        uint64_t start;
+        uint64_t end;
+    } near_limit[] = {
+        {49, 0, 0}, {50, 0, 0},
+        {51, UINT64_MAX - 50, UINT64_MAX - 49},
+        {99, UINT64_MAX - 50, UINT64_MAX - 1},
+        {100, UINT64_MAX - 50, UINT64_MAX},
+        {101, UINT64_MAX - 50, UINT64_MAX},
+        {UINT64_MAX, UINT64_MAX - 50, UINT64_MAX},
+    };
+    for (unsigned i = 0; i < sizeof(near_limit) / sizeof(near_limit[0]); i++) {
+        btrfs_byte_range expected = oracle(UINT64_MAX - 50, UINT64_MAX,
+                                           UINT64_MAX - 100, near_limit[i].length);
+        report(expected.start == near_limit[i].start && expected.end == near_limit[i].end,
+               "literal near-limit threshold", UINT64_MAX - 50, UINT64_MAX,
+               UINT64_MAX - 100, near_limit[i].length);
+        check_case(UINT64_MAX - 50, UINT64_MAX, UINT64_MAX - 100, near_limit[i].length);
+    }
     static const uint64_t edges[] = {
         0, 1, 2, 3, UINT32_MAX - UINT64_C(1), UINT32_MAX, UINT32_MAX + UINT64_C(1),
         INT64_MAX - UINT64_C(1), INT64_MAX, INT64_MAX + UINT64_C(1), UINT64_MAX - 2, UINT64_MAX - 1, UINT64_MAX

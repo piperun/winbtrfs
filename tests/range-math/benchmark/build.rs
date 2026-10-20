@@ -9,6 +9,42 @@ fn run(program: &str, args: &[String], commands: &mut Vec<String>) {
     assert!(status.success(), "{program} failed with {status}");
 }
 
+fn checked_output(program: &str, args: &[&std::path::Path]) -> String {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("cannot start {program}: {e}"));
+    assert!(
+        output.status.success(),
+        "{program} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("tool output is not UTF-8")
+}
+
+fn assert_export(nm: &str, object: &std::path::Path, symbol: &str) {
+    let output = Command::new(nm)
+        .args(["-g", "--defined-only"])
+        .arg(object)
+        .output()
+        .unwrap_or_else(|e| panic!("cannot start {nm}: {e}"));
+    assert!(
+        output.status.success(),
+        "{nm} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let defined = String::from_utf8(output.stdout).expect("nm output is not UTF-8");
+    let exports: Vec<_> = defined
+        .lines()
+        .filter_map(|line| line.split_whitespace().last())
+        .collect();
+    assert_eq!(
+        exports,
+        [symbol],
+        "reference object must export only {symbol}: {defined}"
+    );
+}
+
 fn main() {
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let repo = crate_dir.ancestors().nth(3).unwrap();
@@ -39,11 +75,26 @@ fn main() {
             "nm".into()
         }
     });
+    let objcopy = env::var("BTRFS_RANGE_OBJCOPY").unwrap_or_else(|_| {
+        if windows {
+            "x86_64-w64-mingw32-objcopy".into()
+        } else {
+            "objcopy".into()
+        }
+    });
+    let objdump = env::var("BTRFS_RANGE_OBJDUMP").unwrap_or_else(|_| {
+        if windows {
+            "x86_64-w64-mingw32-objdump".into()
+        } else {
+            "objdump".into()
+        }
+    });
     let rustc = env::var("BTRFS_RANGE_RUSTC").unwrap_or_else(|_| env::var("RUSTC").unwrap());
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     let c_obj = out.join("range-c.o");
     let baseline_obj = out.join("baseline.o");
     let rust_obj = out.join("range-rust.o");
+    let reference_obj = out.join("range-reference.o");
     let archive = out.join("librange_helpers.a");
     let mut commands = Vec::new();
     run(
@@ -124,15 +175,68 @@ fn main() {
         String::from_utf8_lossy(&symbols.stdout)
     );
     commands.push(format!("{nm} -u {}", rust_obj.display()));
+    println!("cargo:rustc-check-cfg=cfg(has_reference)");
+    if let Some(source) = env::var_os("BTRFS_RANGE_REFERENCE_OBJECT") {
+        let source = PathBuf::from(source);
+        assert!(
+            source.is_file(),
+            "BTRFS_RANGE_REFERENCE_OBJECT is not a file: {}",
+            source.display()
+        );
+        println!("cargo:rerun-if-changed={}", source.display());
+        let header = Command::new(&objdump)
+            .arg("-f")
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|e| panic!("cannot start {objdump}: {e}"));
+        assert!(
+            header.status.success(),
+            "invalid reference object: {}",
+            String::from_utf8_lossy(&header.stderr)
+        );
+        let header = String::from_utf8(header.stdout).expect("objdump output is not UTF-8");
+        let format = if windows {
+            "file format pe-x86-64"
+        } else {
+            "file format elf64-x86-64"
+        };
+        assert!(
+            header.contains(format) && header.contains("architecture: i386:x86-64"),
+            "reference object has wrong target architecture or format: {header}"
+        );
+        assert_export(&nm, &source, "btrfs_clip_byte_range");
+        let undefined = checked_output(&nm, &[std::path::Path::new("-u"), &source]);
+        assert!(
+            undefined.trim().is_empty(),
+            "reference object has unresolved symbols: {undefined}"
+        );
+        fs::copy(&source, &reference_obj).expect("cannot copy reference object");
+        run(
+            &objcopy,
+            &[
+                "--redefine-sym".into(),
+                "btrfs_clip_byte_range=btrfs_clip_byte_range_reference".into(),
+                reference_obj.display().to_string(),
+            ],
+            &mut commands,
+        );
+        assert_export(&nm, &reference_obj, "btrfs_clip_byte_range_reference");
+        println!("cargo:rustc-cfg=has_reference");
+    }
+    let mut members = vec![
+        c_obj.display().to_string(),
+        baseline_obj.display().to_string(),
+        rust_obj.display().to_string(),
+    ];
+    if env::var_os("BTRFS_RANGE_REFERENCE_OBJECT").is_some() {
+        members.push(reference_obj.display().to_string());
+    }
+    if archive.exists() {
+        fs::remove_file(&archive).expect("cannot replace helper archive");
+    }
     run(
         &ar,
-        &[
-            "crs".into(),
-            archive.display().to_string(),
-            c_obj.display().to_string(),
-            baseline_obj.display().to_string(),
-            rust_obj.display().to_string(),
-        ],
+        &[vec!["crs".into(), archive.display().to_string()], members].concat(),
         &mut commands,
     );
     fs::write(out.join("build-commands.txt"), commands.join("\n") + "\n").unwrap();
@@ -151,6 +255,9 @@ fn main() {
         "BTRFS_RANGE_AR",
         "BTRFS_RANGE_NM",
         "BTRFS_RANGE_RUSTC",
+        "BTRFS_RANGE_OBJCOPY",
+        "BTRFS_RANGE_OBJDUMP",
+        "BTRFS_RANGE_REFERENCE_OBJECT",
     ] {
         println!("cargo:rerun-if-env-changed={key}");
     }

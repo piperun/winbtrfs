@@ -214,6 +214,14 @@ unsafe extern "C" {
         extent_length: u64,
         out: *mut Range,
     ) -> u32;
+    #[cfg(has_reference)]
+    fn btrfs_clip_byte_range_reference(
+        query_start: u64,
+        query_end: u64,
+        extent_offset: u64,
+        extent_length: u64,
+        out: *mut Range,
+    ) -> u32;
 }
 
 /// ABI of the production helpers and call-only baseline.
@@ -232,8 +240,36 @@ pub fn baseline_helper() -> Helper {
     btrfs_clip_byte_range_baseline
 }
 
-/// Check every case against the oracle using both production helpers.
+/// Whether a historical Rust reference object was linked into this runner.
+pub const HAS_REFERENCE: bool = cfg!(has_reference);
+
+/// Names in registration order, with the call-only baseline always last.
+pub fn backend_order(order: &str, reference: bool) -> Result<&'static [&'static str], String> {
+    match (order, reference) {
+        ("c-first", false) => Ok(&["c", "rust", "baseline"]),
+        ("rust-first", false) => Ok(&["rust", "c", "baseline"]),
+        ("c-first", true) => Ok(&["c", "reference", "rust", "baseline"]),
+        ("reference-first", true) => Ok(&["reference", "rust", "c", "baseline"]),
+        ("rust-first", true) => Ok(&["rust", "c", "reference", "baseline"]),
+        _ => Err(format!(
+            "invalid BTRFS_RANGE_ORDER={order} for reference={reference}"
+        )),
+    }
+}
+
+/// Address of the historical Rust reference helper when linked.
+#[cfg(has_reference)]
+pub fn reference_helper() -> Helper {
+    btrfs_clip_byte_range_reference
+}
+
+/// Check every case against the oracle using every linked clipping helper.
 pub fn preflight(sets: &[Dataset]) -> Result<(), String> {
+    let mut helpers = Vec::with_capacity(3);
+    helpers.push(("C", c_helper()));
+    helpers.push(("Rust", rust_helper()));
+    #[cfg(has_reference)]
+    helpers.push(("reference", reference_helper()));
     for dataset in sets {
         if dataset.cases.len() != 1024 {
             return Err(format!(
@@ -244,7 +280,7 @@ pub fn preflight(sets: &[Dataset]) -> Result<(), String> {
         }
         for (index, &case) in dataset.cases.iter().enumerate() {
             let expected = oracle(case);
-            for (name, helper) in [("C", c_helper()), ("Rust", rust_helper())] {
+            for &(name, helper) in &helpers {
                 let mut actual = Range {
                     start: u64::MAX,
                     end: u64::MAX,
@@ -299,6 +335,8 @@ macro_rules! batch {
 
 batch!(batch_c, btrfs_clip_byte_range_c);
 batch!(batch_rust, btrfs_clip_byte_range);
+#[cfg(has_reference)]
+batch!(batch_reference, btrfs_clip_byte_range_reference);
 batch!(batch_baseline, btrfs_clip_byte_range_baseline);
 
 #[cfg(test)]

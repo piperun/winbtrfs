@@ -1,4 +1,36 @@
-use crate::{Case, Expected, Range, baseline_helper, datasets, oracle, preflight};
+use crate::{Case, Expected, Range, backend_order, baseline_helper, datasets, oracle, preflight};
+
+#[test]
+fn backend_orders_balance_positions_and_leave_baseline_last() {
+    assert_eq!(
+        backend_order("c-first", false).unwrap(),
+        ["c", "rust", "baseline"]
+    );
+    assert_eq!(
+        backend_order("rust-first", false).unwrap(),
+        ["rust", "c", "baseline"]
+    );
+    assert_eq!(
+        backend_order("c-first", true).unwrap(),
+        ["c", "reference", "rust", "baseline"]
+    );
+    assert_eq!(
+        backend_order("reference-first", true).unwrap(),
+        ["reference", "rust", "c", "baseline"]
+    );
+    assert_eq!(
+        backend_order("rust-first", true).unwrap(),
+        ["rust", "c", "reference", "baseline"]
+    );
+    assert!(backend_order("reference-first", false).is_err());
+    assert!(backend_order("other", true).is_err());
+}
+
+#[cfg(has_reference)]
+#[test]
+fn preflight_checks_reference_object_too() {
+    assert!(preflight(&datasets()).is_ok());
+}
 
 #[test]
 fn corpora_are_repeatable_and_have_1024_cases_each() {

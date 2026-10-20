@@ -36,8 +36,8 @@ python3 tests/range-math/check_rust.py . --init zero --sanitize --build-dir /tmp
 This runner emits one host object directly from the production `no_std` Rust
 leaf with overflow checks enabled. It rejects unresolved runtime symbols, then
 compares C and Rust status, endpoints and surrounding output guards on every
-call made by the same independent fixture. The fixture covers 94,097 range
-cases and 66,672 idempotence/nested-clipping checks. No Cargo dependencies,
+call made by the same independent fixture. The fixture covers 94,104 range
+cases and 66,684 idempotence/nested-clipping checks. No Cargo dependencies,
 allocator or panic handler are used by the leaf.
 The compiler defaults to `rustc`, or the `RUSTC` environment variable when set;
 `--rustc /path/to/rustc` selects an exact compiler. Host and driver compilation

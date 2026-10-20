@@ -20,9 +20,10 @@ const _: [(); 8] = [(); core::mem::align_of::<BtrfsByteRange>()];
 const _: [(); 0] = [(); core::mem::offset_of!(BtrfsByteRange, start)];
 const _: [(); 8] = [(); core::mem::offset_of!(BtrfsByteRange, end)];
 
-fn clip(query_start: u64, query_end: u64, extent_offset: u64, extent_length: u64) -> BtrfsByteRange {
-    let empty = BtrfsByteRange { start: 0, end: 0 };
-    if query_start >= query_end || extent_offset >= query_end {
+fn clip(query_start: u64, query_end: u64, extent_offset: u64, extent_length: u64) -> (u32, BtrfsByteRange) {
+    let empty = (0, BtrfsByteRange { start: 0, end: 0 });
+    let start = query_start.max(extent_offset);
+    if start >= query_end {
         return empty;
     }
 
@@ -30,24 +31,15 @@ fn clip(query_start: u64, query_end: u64, extent_offset: u64, extent_length: u64
         Some(value) => value,
         None => return empty,
     };
-    let length = if extent_length < available {
-        extent_length
-    } else {
-        available
-    };
+    let length = extent_length.min(available);
     let end = match extent_offset.checked_add(length) {
         Some(value) => value,
         None => return empty,
     };
-    let start = if extent_offset < query_start {
-        query_start
-    } else {
-        extent_offset
-    };
     if start >= end {
         empty
     } else {
-        BtrfsByteRange { start, end }
+        (1, BtrfsByteRange { start, end })
     }
 }
 
@@ -69,8 +61,7 @@ pub unsafe extern "C" fn btrfs_clip_byte_range(
     extent_length: u64,
     out: *mut BtrfsByteRange,
 ) -> u32 {
-    let result = clip(query_start, query_end, extent_offset, extent_length);
-    let present = if result.start < result.end { 1 } else { 0 };
+    let (present, result) = clip(query_start, query_end, extent_offset, extent_length);
     // SAFETY: the C ABI requires an aligned, exclusively writable output slot.
     unsafe { out.write(result) };
     present
