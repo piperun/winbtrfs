@@ -256,7 +256,7 @@ NTSTATUS scrub_chunk_raid56_stripe_run(device_extension* Vcb, chunk* c, uint64_t
         RtlInitializeBitMap(&context.stripes[i].error, context.stripes[i].errorarr, (ULONG)(c->chunk_item->stripe_len >> Vcb->sector_shift));
 
         context.stripes[i].context = &context;
-        context.stripes[i].rewrite = false;
+        context.stripes[i].Irp = NULL;
     }
 
     stripe = stripe_start;
@@ -276,6 +276,10 @@ NTSTATUS scrub_chunk_raid56_stripe_run(device_extension* Vcb, chunk* c, uint64_t
             read_stripes = (ULONG)(stripe_end + 1 - stripe);
 
         context.stripes_left = c->chunk_item->num_stripes;
+
+        for (i = 0; i < c->chunk_item->num_stripes; i++) {
+            context.stripes[i].rewrite = false;
+        }
 
         // read megabyte by megabyte
         for (i = 0; i < c->chunk_item->num_stripes; i++) {
@@ -326,6 +330,7 @@ NTSTATUS scrub_chunk_raid56_stripe_run(device_extension* Vcb, chunk* c, uint64_t
                     if (!NT_SUCCESS(Status)) {
                         ERR("MmProbeAndLockPages threw exception %08lx\n", Status);
                         IoFreeMdl(context.stripes[i].Irp->MdlAddress);
+                        context.stripes[i].Irp->MdlAddress = NULL;
                         goto end4;
                     }
                 } else
