@@ -22,7 +22,7 @@
 static NTSTATUS file_create_parse_ea(fcb* fcb, FILE_FULL_EA_INFORMATION* ea) {
     NTSTATUS Status;
     LIST_ENTRY ealist, *le;
-    uint16_t size = 0;
+    ULONG size = 0;
     char* buf;
 
     InitializeListHead(&ealist);
@@ -116,7 +116,7 @@ static NTSTATUS file_create_parse_ea(fcb* fcb, FILE_FULL_EA_INFORMATION* ea) {
                 goto end;
             }
 
-            val = *(uint32_t*)item->value.Buffer;
+            RtlCopyMemory(&val, item->value.Buffer, sizeof(val));
 
             fcb->inode_item.mode &= ~allowed;
             fcb->inode_item.mode |= val & allowed;
@@ -152,8 +152,8 @@ static NTSTATUS file_create_parse_ea(fcb* fcb, FILE_FULL_EA_INFORMATION* ea) {
                 goto end;
             }
 
-            major = *(uint32_t*)item->value.Buffer;
-            minor = *(uint32_t*)&item->value.Buffer[sizeof(uint32_t)];
+            RtlCopyMemory(&major, item->value.Buffer, sizeof(major));
+            RtlCopyMemory(&minor, item->value.Buffer + sizeof(major), sizeof(minor));
 
             fcb->inode_item.rdev = (minor & 0xFFFFF) | ((major & 0xFFFFFFFFFFF) << 20);
 
@@ -177,7 +177,13 @@ static NTSTATUS file_create_parse_ea(fcb* fcb, FILE_FULL_EA_INFORMATION* ea) {
         if (size % 4 > 0)
             size += 4 - (size % 4);
 
-        size += (uint16_t)offsetof(FILE_FULL_EA_INFORMATION, EaName[0]) + item->name.Length + 1 + item->value.Length;
+        size += (ULONG)offsetof(FILE_FULL_EA_INFORMATION, EaName[0]) + item->name.Length + 1 + item->value.Length;
+
+        if (size > UINT16_MAX || size + sizeof(struct btrfs_header) + sizeof(struct btrfs_item) +
+            sizeof(struct btrfs_dir_item) + sizeof(EA_EA) - 1 > fcb->Vcb->superblock.nodesize) {
+            Status = STATUS_EA_TOO_LARGE;
+            goto end;
+        }
 
         le = le->Flink;
     }

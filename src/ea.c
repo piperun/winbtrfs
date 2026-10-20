@@ -273,6 +273,8 @@ NTSTATUS __stdcall drv_set_ea(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
     LIST_ENTRY* le;
     LARGE_INTEGER time;
     struct btrfs_timespec now;
+    uint32_t uid, gid, mode;
+    bool uid_set = false;
 
     FsRtlEnterFileSystem();
 
@@ -348,6 +350,10 @@ NTSTATUS __stdcall drv_set_ea(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
     InitializeListHead(&ealist);
 
     ExAcquireResourceExclusiveLite(fcb->Header.Resource, true);
+
+    uid = fcb->inode_item.uid;
+    gid = fcb->inode_item.gid;
+    mode = fcb->inode_item.mode;
 
     if (fcb->ea_xattr.Length > 0) {
         ea = (FILE_FULL_EA_INFORMATION*)fcb->ea_xattr.Buffer;
@@ -459,9 +465,8 @@ NTSTATUS __stdcall drv_set_ea(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
             }
 
             if (Irp->RequestorMode == KernelMode || ccb->access & FILE_WRITE_ATTRIBUTES) {
-                RtlCopyMemory(&fcb->inode_item.uid, item->value.Buffer, sizeof(uint32_t));
-                fcb->sd_dirty = true;
-                fcb->sd_deleted = false;
+                RtlCopyMemory(&uid, item->value.Buffer, sizeof(uid));
+                uid_set = true;
             }
 
             RemoveEntryList(&item->list_entry);
@@ -474,7 +479,7 @@ NTSTATUS __stdcall drv_set_ea(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
             }
 
             if (Irp->RequestorMode == KernelMode || ccb->access & FILE_WRITE_ATTRIBUTES)
-                RtlCopyMemory(&fcb->inode_item.gid, item->value.Buffer, sizeof(uint32_t));
+                RtlCopyMemory(&gid, item->value.Buffer, sizeof(gid));
 
             RemoveEntryList(&item->list_entry);
             ExFreePool(item);
@@ -491,8 +496,8 @@ NTSTATUS __stdcall drv_set_ea(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
 
                 RtlCopyMemory(&val, item->value.Buffer, sizeof(uint32_t));
 
-                fcb->inode_item.mode &= ~allowed;
-                fcb->inode_item.mode |= val & allowed;
+                mode &= ~allowed;
+                mode |= val & allowed;
             }
 
             RemoveEntryList(&item->list_entry);
@@ -511,7 +516,7 @@ NTSTATUS __stdcall drv_set_ea(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
         fcb->ea_xattr.Length = fcb->ea_xattr.MaximumLength = 0;
         fcb->ea_xattr.Buffer = NULL;
     } else {
-        uint16_t size = 0;
+        ULONG size = 0;
         char *buf, *oldbuf;
 
         le = ealist.Flink;
@@ -521,7 +526,13 @@ NTSTATUS __stdcall drv_set_ea(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
             if (size % 4 > 0)
                 size += 4 - (size % 4);
 
-            size += (uint16_t)offsetof(FILE_FULL_EA_INFORMATION, EaName[0]) + item->name.Length + 1 + item->value.Length;
+            size += (ULONG)offsetof(FILE_FULL_EA_INFORMATION, EaName[0]) + item->name.Length + 1 + item->value.Length;
+
+            if (size > UINT16_MAX || size + sizeof(struct btrfs_header) + sizeof(struct btrfs_item) +
+                sizeof(struct btrfs_dir_item) + sizeof(EA_EA) - 1 > Vcb->superblock.nodesize) {
+                Status = STATUS_EA_TOO_LARGE;
+                goto end2;
+            }
 
             le = le->Flink;
         }
@@ -546,7 +557,7 @@ NTSTATUS __stdcall drv_set_ea(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
             item = CONTAINING_RECORD(le, ea_item, list_entry);
 
             if (ea) {
-                ea->NextEntryOffset = (ULONG)offsetof(FILE_FULL_EA_INFORMATION, EaName[0]) + ea->EaNameLength + ea->EaValueLength;
+                ea->NextEntryOffset = (ULONG)offsetof(FILE_FULL_EA_INFORMATION, EaName[0]) + ea->EaNameLength + 1 + ea->EaValueLength;
 
                 if (ea->NextEntryOffset % 4 > 0)
                     ea->NextEntryOffset += 4 - (ea->NextEntryOffset % 4);
@@ -571,6 +582,14 @@ NTSTATUS __stdcall drv_set_ea(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
 
         if (oldbuf)
             ExFreePool(oldbuf);
+    }
+
+    fcb->inode_item.uid = uid;
+    fcb->inode_item.gid = gid;
+    fcb->inode_item.mode = mode;
+    if (uid_set) {
+        fcb->sd_dirty = true;
+        fcb->sd_deleted = false;
     }
 
     fcb->ea_changed = true;

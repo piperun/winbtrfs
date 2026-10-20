@@ -46,6 +46,8 @@ static void ExFreePool(void* pointer) {
 
 #include "ea_types.inc"
 #include "parse_ea.inc"
+#include "services.inc"
+#include "set_ea.inc"
 
 typedef struct {
     char name[256];
@@ -54,9 +56,13 @@ typedef struct {
 } record;
 enum kind { PAIR, SINGLE, TRIPLE, CHAIN, LARGE, DUPLICATE_GROW, DUPLICATE_SHRINK,
             DUPLICATE_LAST, LXSS_MIXED, LXSS_ONLY, LXSS_SHORT };
-typedef struct { char name[80]; enum kind kind; unsigned n, v, fail; } test_case;
-static test_case cases[80];
+typedef struct test_case {
+    char name[80]; enum kind kind; unsigned n, v, fail;
+    void (*run)(const struct test_case*);
+} test_case;
+static test_case cases[160];
 static unsigned case_count;
+static void define_size_cases(void);
 
 static void add_case(const char* name, enum kind kind, unsigned n, unsigned v, unsigned fail) {
     CHECK(case_count < sizeof(cases) / sizeof(cases[0]));
@@ -104,6 +110,7 @@ static void define_cases(void) {
         snprintf(name, sizeof(name), "duplicate-allocation-failure-%u", i);
         add_case(name, DUPLICATE_GROW, 0, 0, i);
     }
+    define_size_cases();
 }
 
 static void set_record(record* r, unsigned n, char letter, unsigned v, uint8_t flags) {
@@ -247,7 +254,8 @@ static void run(const test_case* c) {
     void* snapshot = malloc(input_size);
     CHECK(snapshot);
     memcpy(snapshot, buffer, input_size);
-    fcb node = {.type = BTRFS_FT_REG_FILE, .sd_deleted = true};
+    device_extension volume = {.superblock.nodesize = 16384};
+    fcb node = {.type = BTRFS_FT_REG_FILE, .sd_deleted = true, .Vcb = &volume};
     fail_at = c->fail;
     if (fail_at)
         want = STATUS_INSUFFICIENT_RESOURCES;
@@ -283,6 +291,8 @@ static void run(const test_case* c) {
     free(buffer);
 }
 
+#include "size_test.inc"
+
 int main(int argc, char** argv) {
     scenario = "case setup";
     define_cases();
@@ -292,7 +302,10 @@ int main(int argc, char** argv) {
             puts(cases[i].name);
         else if (strcmp(argv[1], cases[i].name) == 0) {
             scenario = cases[i].name;
-            run(&cases[i]);
+            if (cases[i].run)
+                cases[i].run(&cases[i]);
+            else
+                run(&cases[i]);
             return 0;
         }
     }
