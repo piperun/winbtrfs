@@ -116,6 +116,7 @@ static NTSTATUS query_filesystems(void* data, ULONG length) {
             RtlCopyMemory(&bfd->uuid, &dev->devitem.uuid, BTRFS_UUID_SIZE);
 
             if (dev->devobj) {
+                bfd->missing = false;
                 Status = dev_ioctl(dev->devobj, IOCTL_MOUNTDEV_QUERY_DEVICE_NAME, NULL, 0, &mdn, sizeof(MOUNTDEV_NAME), true, NULL);
                 if (!NT_SUCCESS(Status) && Status != STATUS_BUFFER_OVERFLOW) {
                     ExReleaseResourceLite(&Vcb->tree_lock);

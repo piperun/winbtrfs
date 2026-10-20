@@ -242,7 +242,7 @@ static NTSTATUS vol_is_writable(volume_device_extension* vde) {
 end:
     ExReleaseResourceLite(&pdode->child_lock);
 
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 static NTSTATUS vol_get_length(volume_device_extension* vde, PIRP Irp) {
