@@ -444,9 +444,11 @@ NTSTATUS set_rename_information(device_extension* Vcb, PIRP Irp, PFILE_OBJECT Fi
 
     if (fileref->parent->fcb->subvol != related->fcb->subvol && (fileref->fcb->subvol == fileref->parent->fcb->subvol || fileref->fcb == Vcb->dummy_fcb))
         Status = move_across_subvols(fileref, ccb, related, &utf8, &fnus, Irp);
-    else if (related == fileref->parent) // keeping file in same directory
+    else if (related == fileref->parent) { // keeping file in same directory
         Status = rename_in_same_directory(fileref, ccb, related, &utf8, &fnus, Irp);
-    else
+        free_fileref(related);
+        related = NULL;
+    } else
         Status = move_across_directories(fileref, ccb, related, &utf8, &fnus, Irp);
 
 end:
