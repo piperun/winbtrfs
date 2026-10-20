@@ -48,8 +48,38 @@ static void compressed_jobs(void) {
     }
     fail_allocation=0;
 }
+static void pending_inputs(void) {
+    const unsigned compressions[]={BTRFS_COMPRESS_ZLIB,BTRFS_COMPRESS_ZSTD};
+    for(unsigned type=0;type<2;type++)for(unsigned execution=JOB_QUEUED;execution<=JOB_RUNNING;execution++)
+    for(unsigned failed_job=0;failed_job<2;failed_job++)for(unsigned fail=0;fail<5;fail++) {
+        fcb f;device_extension v;init(&f,&v,8192,8192);
+        extent extents[2]={
+            {.offset=0,.extent_data={.type=BTRFS_FILE_EXTENT_REG,.compression=compressions[type],.num_bytes=4096,.ram_bytes=4096,.disk_bytenr=1048576,.disk_num_bytes=4096}},
+            {.offset=4096,.extent_data={.type=BTRFS_FILE_EXTENT_REG,.compression=compressions[type],.num_bytes=4096,.ram_bytes=4096,.disk_bytenr=2097152,.disk_num_bytes=4096}}
+        };
+        for(unsigned i=0;i<2;i++)InsertTailList(&f.extents,&extents[i].list_entry);
+        unsigned char data[12288];memset(data,0xa5,sizeof(data));ULONG got=0;
+        job_execution=execution;job_status=failed_job?STATUS_INTERNAL_ERROR:STATUS_SUCCESS;
+        allocation_attempt=read_calls=0;fail_read=fail==1?2:0;
+        /* Two read-part/buffer pairs and one complete job use seven allocations. */
+        fail_allocation=fail>=2?fail+6:0;
+        premature_input_frees=missing_job_inputs=blocked_waits=completed_jobs=0;
+        NTSTATUS status=read_file(&f,data,0,8192,&got,NULL);
+        NTSTATUS expected_status=fail==1?STATUS_DATA_ERROR:fail>=2?STATUS_INSUFFICIENT_RESOURCES:job_status;
+        bool ok=status==expected_status&&got==(fail?0:8192)&&allocation_count==0&&
+            premature_input_frees==0&&missing_job_inputs==0&&blocked_waits==0&&completed_jobs==(fail?1:2);
+        if(!fail&&!failed_job)for(unsigned i=0;i<8192;i++)ok=ok&&data[i]==0x7e;
+        if(fail)for(unsigned i=0;i<8192;i++)ok=ok&&data[i]==0xa5;
+        for(unsigned i=8192;i<sizeof(data);i++)ok=ok&&data[i]==0xa5;
+        record(ok,execution==JOB_QUEUED?"queued input lifetime":"running input lifetime",type,fail,got,fail?0:8192);
+        if(!ok)printf("  premature frees=%u missing inputs=%u blocked waits=%u completed jobs=%u status=%08x expected=%08x\n",
+            premature_input_frees,missing_job_inputs,blocked_waits,completed_jobs,(unsigned)status,(unsigned)expected_status);
+        reclaim_allocations();
+    }
+    job_execution=JOB_SYNCHRONOUS;fail_allocation=fail_read=0;
+}
 int main(void) {
-    eof_reads();compressed_jobs();
+    eof_reads();compressed_jobs();pending_inputs();
     printf("%u/%u file read scenarios passed\n",cases-failures,cases);
     return failures!=0;
 }

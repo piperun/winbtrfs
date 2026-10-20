@@ -15,7 +15,7 @@ typedef struct LIST_ENTRY { struct LIST_ENTRY *Flink, *Blink; } LIST_ENTRY;
 typedef struct { NTSTATUS Status; uintptr_t Information; } IO_STATUS_BLOCK;
 typedef struct { LARGE_INTEGER AllocationSize, FileSize, ValidDataLength; } CC_FILE_SIZES;
 typedef struct { bool completed; } KEVENT;
-typedef struct { NTSTATUS Status; KEVENT event; } calc_job;
+typedef struct { NTSTATUS Status; KEVENT event; void* out; unsigned outlen; } calc_job;
 typedef struct { int unused; } chunk;
 typedef struct {
     struct { uint32_t sectorsize; } superblock;

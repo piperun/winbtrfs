@@ -599,6 +599,22 @@ nextitem:
         *pbr = bytes_read;
 
 exit:
+    // Decompression jobs borrow read-part buffers until they complete.
+    while (!IsListEmpty(&calc_jobs)) {
+        comp_calc_job* ccj = CONTAINING_RECORD(RemoveHeadList(&calc_jobs), comp_calc_job, list_entry);
+
+        calc_thread_main(fcb->Vcb, ccj->cj);
+
+        KeWaitForSingleObject(&ccj->cj->event, Executive, KernelMode, false, NULL);
+
+        if (ccj->decomp)
+            ExFreePool(ccj->decomp);
+
+        ExFreePool(ccj->cj);
+
+        ExFreePool(ccj);
+    }
+
     while (!IsListEmpty(&read_parts)) {
         read_part* rp = CONTAINING_RECORD(RemoveHeadList(&read_parts), read_part, list_entry);
 
@@ -609,19 +625,6 @@ exit:
             ExFreePool(rp->csum);
 
         ExFreePool(rp);
-    }
-
-    while (!IsListEmpty(&calc_jobs)) {
-        comp_calc_job* ccj = CONTAINING_RECORD(RemoveHeadList(&calc_jobs), comp_calc_job, list_entry);
-
-        KeWaitForSingleObject(&ccj->cj->event, Executive, KernelMode, false, NULL);
-
-        if (ccj->decomp)
-            ExFreePool(ccj->decomp);
-
-        ExFreePool(ccj->cj);
-
-        ExFreePool(ccj);
     }
 
     return Status;
