@@ -200,7 +200,7 @@ static NTSTATUS file_create_parse_ea(fcb* fcb, FILE_FULL_EA_INFORMATION* ea) {
         ea_item* item = CONTAINING_RECORD(le, ea_item, list_entry);
 
         if (ea) {
-            ea->NextEntryOffset = (ULONG)offsetof(FILE_FULL_EA_INFORMATION, EaName[0]) + ea->EaNameLength + ea->EaValueLength;
+            ea->NextEntryOffset = (ULONG)offsetof(FILE_FULL_EA_INFORMATION, EaName[0]) + ea->EaNameLength + 1 + ea->EaValueLength;
 
             if (ea->NextEntryOffset % 4 > 0)
                 ea->NextEntryOffset += 4 - (ea->NextEntryOffset % 4);
