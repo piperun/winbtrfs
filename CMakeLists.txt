@@ -104,6 +104,7 @@ set(SRC_FILES src/balance.c
     src/fastio.c
     src/fileinfo.c
     src/file-name.c
+    src/file-read.c
     src/flushthread.c
     src/free-space.c
     src/fsctl.c
@@ -131,6 +132,7 @@ set(SRC_FILES src/balance.c
     src/treefuncs.c
     src/trim.c
     src/volume.c
+    src/volume-ioctl.c
     src/worker-thread.c
     src/write.c
     src/write-extents.c
