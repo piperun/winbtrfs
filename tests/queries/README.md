@@ -32,7 +32,22 @@ extents and adjacent allocations. A page containing one range returns
 the returned range's end returns the later allocation. Empty intersections,
 including requests beginning at or beyond EOF, return success with zero bytes.
 
-These are native contract checks with modeled kernel services. The finished
-driver still needs Windows API verification. See the
+These are native contract checks with modeled kernel services. See the
 [Microsoft FSCTL_QUERY_ALLOCATED_RANGES documentation](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_query_allocated_ranges)
 for the requested input interval and returned ranges.
+
+For Windows API checks on the disposable RAID6 fixture:
+
+```sh
+x86_64-w64-mingw32-gcc -std=c11 -O2 -Wall -Wextra -Werror -municode -I src \
+  tests/queries/windows.c -lntdll -o /tmp/query-regression.exe
+```
+
+Run `query-regression.exe H:` in the test guest. The client requires a Btrfs
+volume labeled `WB_RAID6` with 4 KiB sectors and CRC32C checksums. It creates
+exclusive fixture files in its own directory and removes them after success.
+Checks cover independently calculated ordinary checksums, compressed checksum
+placeholders followed by ordinary checksums, sparse and ordinary subranges,
+EOF clipping, zero length and empty files. The mixed fixture must have proven
+compressed and ordinary mappings; failure to establish that layout returns
+exit code 3 rather than passing the checksum assertion.

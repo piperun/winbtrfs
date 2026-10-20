@@ -38,6 +38,7 @@ typedef struct {
 } extended_both_information;
 typedef struct {uint64_t serial;unsigned char id[16];} file_identity;
 typedef union {uint64_t align;unsigned char bytes[2048];} output;
+_Static_assert(sizeof(names_information)==16,"Windows minimum names information buffer");
 _Static_assert(offsetof(extended_information,FileName)==88,"Windows extended directory layout");
 _Static_assert(offsetof(extended_both_information,FileName)==114,"Windows extended both directory layout");
 static ULONG read32(const void* p){ULONG n;memcpy(&n,p,sizeof(n));return n;}
@@ -106,15 +107,19 @@ static int alignment(void){
 }
 static int short_buffers(void){
     HANDLE handle=open_directory(FALSE);CHECK(handle!=INVALID_HANDLE_VALUE);output out;ULONG_PTR bytes;wchar_t name[128];
-    CHECK(scan(handle,&out,14,12,TRUE,L"long*",FALSE,&bytes)==STATUS_BUFFER_OVERFLOW);
-    CHECK(bytes==14 && read32(out.bytes)==0 && read32(out.bytes+8)==wcslen(names[5])*sizeof(WCHAR));
-    CHECK(!memcmp(out.bytes+12,L"l",sizeof(WCHAR)));CHECK(CloseHandle(handle));
+    CHECK(scan(handle,&out,16,12,TRUE,L"long*",FALSE,&bytes)==STATUS_BUFFER_OVERFLOW);
+    CHECK(bytes==16 && read32(out.bytes)==0 && read32(out.bytes+8)==wcslen(names[5])*sizeof(WCHAR));
+    CHECK(!memcmp(out.bytes+12,L"lo",2*sizeof(WCHAR)));CHECK(CloseHandle(handle));
     handle=open_directory(FALSE);CHECK(handle!=INVALID_HANDLE_VALUE);
     CHECK(scan(handle,&out,sizeof(out),12,TRUE,NULL,FALSE,&bytes)==STATUS_SUCCESS);
     CHECK(read_name(&out,bytes,0,12,8,name)==0 && !wcscmp(name,L"."));
-    CHECK(scan(handle,&out,14,12,TRUE,NULL,FALSE,&bytes)==STATUS_SUCCESS && bytes==0);
     CHECK(scan(handle,&out,sizeof(out),12,TRUE,NULL,FALSE,&bytes)==STATUS_SUCCESS);
-    CHECK(read_name(&out,bytes,0,12,8,name)==0 && !wcscmp(name,L".."));CHECK(CloseHandle(handle));
+    CHECK(read_name(&out,bytes,0,12,8,name)==0 && !wcscmp(name,L".."));
+    CHECK(scan(handle,&out,sizeof(out),12,TRUE,NULL,FALSE,&bytes)==STATUS_SUCCESS);
+    CHECK(read_name(&out,bytes,0,12,8,name)==0 && !wcscmp(name,L"a.txt"));
+    CHECK(scan(handle,&out,16,12,TRUE,NULL,FALSE,&bytes)==STATUS_SUCCESS && bytes==0);
+    CHECK(scan(handle,&out,sizeof(out),12,TRUE,NULL,FALSE,&bytes)==STATUS_SUCCESS);
+    CHECK(read_name(&out,bytes,0,12,8,name)==0 && !wcscmp(name,L"b.bin"));CHECK(CloseHandle(handle));
     puts("PASS short directory buffers and retry");return 0;
 }
 static int captured_patterns(void){
@@ -134,7 +139,11 @@ static int captured_patterns(void){
     CHECK(read_name(&out,bytes,0,12,8,name)==0 && !wcscmp(name,L"a.txt"));CHECK(CloseHandle(handle));
     handle=open_directory(TRUE);CHECK(handle!=INVALID_HANDLE_VALUE);
     CHECK(scan(handle,&out,sizeof(out),12,TRUE,L"al*",FALSE,&bytes)==STATUS_SUCCESS);
-    CHECK(read_name(&out,bytes,0,12,8,name)==0 && !wcscmp(name,L"alpine.txt"));
+    CHECK(read_name(&out,bytes,0,12,8,name)==0);
+    if (wcscmp(name,L"alpine.txt")) {
+        fprintf(stderr,"case-sensitive wildcard expected alpine.txt, got %ls\n",name);
+        return 1;
+    }
     CHECK(scan(handle,&out,sizeof(out),12,TRUE,NULL,FALSE,&bytes)==STATUS_NO_MORE_FILES);CHECK(CloseHandle(handle));
     puts("PASS captured patterns and case-sensitive wildcard");return 0;
 }

@@ -47,3 +47,18 @@ residues for names and extended records, partial output, a subsequent short
 buffer followed by a larger retry, captured exact and wildcard patterns, and
 case-sensitive native directory handles. Host tests cover the other record
 classes and special subvolume entries.
+
+The Windows I/O manager rejects a `FileNamesInformation` buffer smaller than
+`sizeof(FILE_NAMES_INFORMATION)` (16 bytes) before dispatching the query. The
+Windows client uses 16 bytes for the partial and pending-entry tests. Native
+fixtures also use 14-byte buffers to exercise the serializer directly; they
+bypass I/O dispatch and do not claim that such requests reach the driver.
+
+Windows can force even native case-sensitive opens to be case insensitive.
+The client requires `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\kernel\ObCaseInsensitive`
+to be `0` at boot for its case-sensitive wildcard assertion. Use this only in
+the disposable test VM: record the original value and registry type, reboot
+with the test setting, then restore the exact original value and type and
+reboot again. An ordinary case-insensitive guest must not be counted as
+passing this assertion. Microsoft describes the global override in
+[Per-directory case sensitivity and WSL](https://devblogs.microsoft.com/commandline/per-directory-case-sensitivity-and-wsl/).
