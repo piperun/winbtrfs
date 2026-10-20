@@ -108,6 +108,7 @@ set(SRC_FILES src/balance.c
     src/pnp.c
     src/read.c
     src/registry.c
+    src/rename.c
     src/reparse.c
     src/scrub.c
     src/search.c
