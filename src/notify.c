@@ -177,7 +177,7 @@ void queue_notification_fcb(_In_ file_ref* fileref, _In_ ULONG filter_match, _In
     if (shutting_down)
         return;
 
-    nf = ExAllocatePoolWithTag(PagedPool, sizeof(notification_fcb), ALLOC_TAG);
+    nf = ExAllocatePoolWithTag(PagedPool, sizeof(notification_fcb) + (stream ? sizeof(UNICODE_STRING) + stream->Length : 0), ALLOC_TAG);
     if (!nf) {
         ERR("out of memory\n");
         return;
@@ -195,7 +195,14 @@ void queue_notification_fcb(_In_ file_ref* fileref, _In_ ULONG filter_match, _In
     nf->fileref = fileref;
     nf->filter_match = filter_match;
     nf->action = action;
-    nf->stream = stream;
+    nf->stream = stream ? (PUNICODE_STRING)(nf + 1) : NULL;
+    if (stream) {
+        nf->stream->Length = nf->stream->MaximumLength = stream->Length;
+        nf->stream->Buffer = (WCHAR*)(nf->stream + 1);
+
+        if (stream->Length > 0)
+            RtlCopyMemory(nf->stream->Buffer, stream->Buffer, stream->Length);
+    }
     nf->work_item = work_item;
 
     IoQueueWorkItem(work_item, notification_work_item, DelayedWorkQueue, nf);
