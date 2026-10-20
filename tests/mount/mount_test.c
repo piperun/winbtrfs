@@ -7,7 +7,7 @@
 #include "cleanup.inc"
 #include "failure.inc"
 
-static void exercise(unsigned stage, unsigned devices, NTSTATUS failure) {
+static void exercise(unsigned stage, unsigned devices, NTSTATUS failure, unsigned dummy_stage) {
     if (stage == 0) {
         CHECK(fail_mount(NULL, NULL, false, failure, NULL) == failure);
         CHECK(!allocations && !device_deletions); return;
@@ -30,12 +30,20 @@ static void exercise(unsigned stage, unsigned devices, NTSTATUS failure) {
     } else CHECK(!devices);
     InitializeListHead(&subvolume.fcbs);
     if (stage >= 4) volume.volume_fcb = make_fcb(false, false);
+    if (dummy_stage) {
+        volume.dummy_fcb = make_fcb(true, false);
+        volume.dummy_fcb->hash = 0;
+        if (dummy_stage >= 2)
+            volume.dummy_fcb->hash_ptrs = allocate(sizeof(LIST_ENTRY*) * 256, NULL);
+        if (dummy_stage >= 3)
+            volume.dummy_fcb->hash_ptrs_uc = allocate(sizeof(LIST_ENTRY*) * 256, NULL);
+    }
     fcb* root_fcb = stage >= 5 ? make_fcb(stage >= 6, stage == 7) : NULL;
     new_device.DeviceExtension = &volume;
     NTSTATUS status = fail_mount(&volume, root_fcb, initialized_lists, failure, &new_device);
     CHECK(status == failure && new_device.deleted && device_deletions == 1);
     CHECK(!allocations && !resource_live);
-    unsigned count = stage >= 5 ? 2 : stage == 4 ? 1 : 0;
+    unsigned count = (stage >= 5 ? 2 : stage == 4 ? 1 : 0) + (dummy_stage != 0);
     CHECK(freed_fcbs == count && volume.fcb_np_lookaside.returned == count);
     for (unsigned i = 0; i < 8; i++) CHECK(!lists[i]->live && !lists[i]->outstanding);
 }
@@ -50,7 +58,19 @@ int main(int argc, char** argv) {
             char name[100]; snprintf(name, sizeof(name), "%s-devices%u-error%u", stages[stage], counts[d], error);
             if (strcmp(argv[1], "--list") == 0) { puts(name); continue; }
             if (strcmp(argv[1], name) != 0) continue;
-            exercise(stage, counts[d], error ? STATUS_INTERNAL_ERROR : STATUS_INSUFFICIENT_RESOURCES); return 0;
+            exercise(stage, counts[d], error ? STATUS_INTERNAL_ERROR : STATUS_INSUFFICIENT_RESOURCES, 0); return 0;
+        }
+    const char* dummy_stages[] = { "dummy-no-hashes", "dummy-one-hash", "dummy-two-hashes",
+        "dummy-root-fcb", "dummy-root-subvolume", "dummy-root-payload-control" };
+    const unsigned root_stages[] = { 4, 4, 4, 5, 6, 7 };
+    const unsigned hash_stages[] = { 1, 2, 3, 3, 3, 3 };
+    for (unsigned stage = 0; stage < 6; stage++) for (unsigned d = 0; d < 3; d++)
+        for (unsigned error = 0; error < 2; error++) {
+            char name[100]; snprintf(name, sizeof(name), "%s-devices%u-error%u", dummy_stages[stage], counts[d], error);
+            if (strcmp(argv[1], "--list") == 0) { puts(name); continue; }
+            if (strcmp(argv[1], name) != 0) continue;
+            exercise(root_stages[stage], counts[d],
+                error ? STATUS_INTERNAL_ERROR : STATUS_INSUFFICIENT_RESOURCES, hash_stages[stage]); return 0;
         }
     CHECK(strcmp(argv[1], "--list") == 0); return 0;
 }

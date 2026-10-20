@@ -43,6 +43,7 @@ struct device_extension {
     void* root_file;
     file_ref* root_fileref;
     fcb* volume_fcb;
+    fcb* dummy_fcb;
     LIST_ENTRY devices;
 };
 typedef struct { bool deleted; device_extension* DeviceExtension; } DEVICE_OBJECT, *PDEVICE_OBJECT;

@@ -32,6 +32,9 @@ void cleanup_failed_mount(device_extension* Vcb, fcb* root_fcb, bool init_lookas
     if (Vcb->volume_fcb)
         reap_fcb(Vcb->volume_fcb);
 
+    if (Vcb->dummy_fcb)
+        reap_fcb(Vcb->dummy_fcb);
+
     // FCB destructors return allocations to these lookaside lists.
     if (init_lookaside) {
         ExDeletePagedLookasideList(&Vcb->tree_data_lookaside);
