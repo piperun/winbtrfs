@@ -1,4 +1,4 @@
-# Free-space list merge regressions
+# Free-space list merge and cache-writer regressions
 
 Run from the repository root with Python 3 and GCC supporting
 `-ftrivial-auto-var-init`:
@@ -11,10 +11,18 @@ ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
 python3 tests/free-space/check_free_space.py . --bench --build-dir /tmp/winbtrfs-free-space/bench
 ```
 
-Add `--revision 96fe76d4` to run the merge that searched from the head of the
-list for every freed range: 25/29 cases pass. The four step-count cases that
-merge many ranges fail; the large merge takes 400,020,000 address-list steps
-against a limit of 160,000.
+Add `--revision` to run the sources before each fix. Each revision also fails
+the cases of the fixes after it.
+
+- `96fe76d4` merges by searching from the head of the list for every freed
+  range: 25/32 cases pass. The four step-count cases that merge many ranges
+  fail; the large merge takes 400,020,000 address-list steps against a limit
+  of 160,000.
+- `23c741d8` runs `update_chunk_cache` before it freed the lists it copies:
+  29/32 cases pass. A written cache leaves 8 allocations behind, the 5 merged
+  entries and the 3 copied freed ranges, and so does a failed flush. Failing an
+  allocation while copying either list leaves the entries copied before it, and
+  failing one in the merge leaves both copies.
 
 The runner extracts the production `space` type, `order_space_entry`,
 `space_list_add2` and `space_list_merge`, plus the `place_space_entry`,
@@ -67,6 +75,24 @@ second range extends the entry before its gap. The runner adds a counter to each
 list-cursor step (`le = le->Flink`) in the extracted functions. Address-list
 steps must stay within 4(n + m), and size-list steps within 2(n + m⌈log2 m⌉).
 
+`cache_test` runs the production `update_chunk_cache`, which writes a chunk's
+v1 free-space cache, with `copy_space_list` and the merge functions without
+counters or calls into the test. It uses the same list primitives, and a pool
+allocator that can fail any chosen allocation and frees memory at once. The
+free-space header item, `flush_fcb`, `do_write_file` and the checksum are
+native models. The chunk has three free entries and three freed ranges; one
+range extends an entry and two join nothing, so the merged list has five
+entries.
+
+- A successful write must set five entries in the header and write them in
+  address order after the two sector checksums and the cache generation.
+- Failing each of the nine allocations in turn must return
+  `STATUS_INSUFFICIENT_RESOURCES` and write nothing, and a failed `flush_fcb`
+  must return its status.
+- In every case the chunk's lists must be unchanged, and nothing else may stay
+  allocated. A case reports each step that leaves allocations behind before it
+  fails.
+
 `--bench` builds the functions without counters or calls into the test, with
 `-O2`, and prints `CLOCK_MONOTONIC` timings of a merge: the best of five for
 m = 5,000 to 40,000 freed ranges between as many entries, and the best of twenty
@@ -74,5 +100,6 @@ for m = 1 to 64 into random gaps between 33,015 entries. The timings illustrate
 the change; the step counts are the regression check.
 
 Each case runs in its own process with core dumps disabled, a 30-second limit,
-or 120 seconds for the large step-count cases. Rollback lists, chunk locking
-and real Windows pool allocation are not exercised.
+or 120 seconds for the large step-count cases. Rollback lists, chunk locking,
+real tree searches and file writes, and real Windows pool allocation are not
+exercised.

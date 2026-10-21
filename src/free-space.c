@@ -1939,11 +1939,6 @@ static NTSTATUS update_chunk_cache(device_extension* Vcb, chunk* c, struct btrfs
     Status = copy_space_list(&c->deleting, &deleting);
     if (!NT_SUCCESS(Status)) {
         ERR("copy_space_list returned %08lx\n", Status);
-
-        while (!IsListEmpty(&space_list)) {
-            ExFreePool(CONTAINING_RECORD(RemoveHeadList(&space_list), space, list_entry));
-        }
-
         goto end;
     }
 
@@ -1971,6 +1966,8 @@ static NTSTATUS update_chunk_cache(device_extension* Vcb, chunk* c, struct btrfs
         num_entries++;
 
         off += sizeof(struct btrfs_free_space_entry);
+
+        ExFreePool(s);
     }
 
     // update INODE_ITEM
@@ -2050,6 +2047,14 @@ static NTSTATUS update_chunk_cache(device_extension* Vcb, chunk* c, struct btrfs
     Status = STATUS_SUCCESS;
 
 end:
+    while (!IsListEmpty(&space_list)) {
+        ExFreePool(CONTAINING_RECORD(RemoveHeadList(&space_list), space, list_entry));
+    }
+
+    while (!IsListEmpty(&deleting)) {
+        ExFreePool(CONTAINING_RECORD(RemoveHeadList(&deleting), space, list_entry));
+    }
+
     ExFreePool(data);
 
     return Status;

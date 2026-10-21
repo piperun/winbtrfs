@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check production space-list merging against an interval oracle and visit bounds."""
+"""Check production space-list merging and the cache writers that use it."""
 import argparse
 from pathlib import Path
 import re
@@ -78,27 +78,38 @@ for marker, counter, walks in functions:
     counted += instrumented
 
 test = Path(__file__).with_name("free_space_test.c")
-for name, text in (("counted", counted), ("bench", plain)):
+for name, text in (("counted", counted), ("plain", plain)):
     (out / name).mkdir(exist_ok=True)
     (out / name / "space.inc").write_text(text)
 
 if args.bench:
     binary = out / "free_space_bench"
     subprocess.run(["gcc", "-std=c11", "-O2", "-g", "-Wall", "-Wextra", "-Werror",
-                    "-I", str(out / "bench"), "-I", str(out), str(test), "-o", str(binary)],
+                    "-I", str(out / "plain"), "-I", str(out), str(test), "-o", str(binary)],
                    check=True, timeout=60)
     raise SystemExit(subprocess.run([str(binary), "--bench"], timeout=900).returncode)
 
-binary = out / "free_space_test"
+# The cache writers copy the chunk's lists and merge them with the plain functions.
+(out / "cache.inc").write_text("".join(function(source, marker) for marker in (
+    "static NTSTATUS copy_space_list(", "static NTSTATUS update_chunk_cache(")))
+(out / "btrfs.h").write_text(read("src/btrfs.h"))
+
 flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie"] if args.sanitize else []
-subprocess.run(["gcc", "-std=c11", "-O0", "-g", "-Wall", "-Wextra", "-Werror",
-                f"-ftrivial-auto-var-init={args.init}", *flags, f"-DMERGE_HOOKS={int(helper)}",
-                "-I", str(out / "counted"), "-I", str(out), str(test), "-o", str(binary)],
-               check=True, timeout=60)
+binaries = []
+for name, program, functions_dir, defines in (
+        ("free_space_test", test, "counted", [f"-DMERGE_HOOKS={int(helper)}"]),
+        ("cache_test", test.with_name("cache_test.c"), "plain", [])):
+    binary = out / name
+    subprocess.run(["gcc", "-std=c11", "-O0", "-g", "-Wall", "-Wextra", "-Werror",
+                    f"-ftrivial-auto-var-init={args.init}", *flags, *defines,
+                    "-I", str(out / functions_dir), "-I", str(out), str(program), "-o", str(binary)],
+                   check=True, timeout=60)
+    binaries.append(binary)
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-cases = subprocess.check_output([str(binary), "--list"], text=True, timeout=5).splitlines()
+cases = [(binary, case) for binary in binaries for case in
+         subprocess.check_output([str(binary), "--list"], text=True, timeout=5).splitlines()]
 failed = 0
-for case in cases:
+for binary, case in cases:
     # A quadratic merge takes seconds to finish counting, so it gets a longer limit.
     limit = 120 if case.startswith("complexity") else 30
     try:
