@@ -1479,8 +1479,24 @@ static NTSTATUS add_rollback_space(LIST_ENTRY* rollback, bool add, LIST_ENTRY* l
     return STATUS_SUCCESS;
 }
 
-NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t address,
-                         uint64_t length, chunk* c, LIST_ENTRY* rollback) {
+// Puts s into the size list in order or, if touched is not NULL, onto touched
+// for order_space_entries to place later.
+static void place_space_entry(space* s, LIST_ENTRY* list_size, LIST_ENTRY* touched) {
+    if (touched)
+        InsertTailList(touched, &s->list_entry_size);
+    else
+        order_space_entry(s, list_size);
+}
+
+// Adds the range to the address-sorted list, comparing it with the entries
+// from start onwards. Every entry before start must end strictly below
+// address: an entry ending at address is adjacent and has to be merged, so it
+// must not lie before start. If touched is not NULL, entries that would be
+// ordered into the size list go onto it instead, for order_space_entries to
+// place. On success, *ps is the entry that now holds the range.
+static NTSTATUS space_list_add_from(LIST_ENTRY* list, LIST_ENTRY* list_size, LIST_ENTRY* touched,
+                                    LIST_ENTRY* start, uint64_t address, uint64_t length,
+                                    chunk* c, LIST_ENTRY* rollback, space** ps) {
     NTSTATUS Status;
     LIST_ENTRY* le;
     space *s, *s2;
@@ -1507,16 +1523,19 @@ NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t addre
                 return Status;
         }
 
+        *ps = s;
         return STATUS_SUCCESS;
     }
 
-    le = list->Flink;
+    le = start;
     do {
         s2 = CONTAINING_RECORD(le, space, list_entry);
 
         // old entry envelops new one completely
-        if (s2->address <= address && s2->address + s2->size >= address + length)
+        if (s2->address <= address && s2->address + s2->size >= address + length) {
+            *ps = s2;
             return STATUS_SUCCESS;
+        }
 
         // new entry envelops old one completely
         if (address <= s2->address && address + length >= s2->address + s2->size) {
@@ -1580,9 +1599,10 @@ NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t addre
 
             if (list_size) {
                 RemoveEntryList(&s2->list_entry_size);
-                order_space_entry(s2, list_size);
+                place_space_entry(s2, list_size, touched);
             }
 
+            *ps = s2;
             return STATUS_SUCCESS;
         }
 
@@ -1617,9 +1637,10 @@ NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t addre
 
             if (list_size) {
                 RemoveEntryList(&s2->list_entry_size);
-                order_space_entry(s2, list_size);
+                place_space_entry(s2, list_size, touched);
             }
 
+            *ps = s2;
             return STATUS_SUCCESS;
         }
 
@@ -1652,9 +1673,10 @@ NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t addre
 
             if (list_size) {
                 RemoveEntryList(&s2->list_entry_size);
-                order_space_entry(s2, list_size);
+                place_space_entry(s2, list_size, touched);
             }
 
+            *ps = s2;
             return STATUS_SUCCESS;
         }
 
@@ -1681,8 +1703,9 @@ NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t addre
             InsertHeadList(s2->list_entry.Blink, &s->list_entry);
 
             if (list_size)
-                order_space_entry(s, list_size);
+                place_space_entry(s, list_size, touched);
 
+            *ps = s;
             return STATUS_SUCCESS;
         }
 
@@ -1695,9 +1718,10 @@ NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t addre
 
         if (list_size) {
             RemoveEntryList(&s2->list_entry_size);
-            order_space_entry(s2, list_size);
+            place_space_entry(s2, list_size, touched);
         }
 
+        *ps = s2;
         return STATUS_SUCCESS;
     }
 
@@ -1723,28 +1747,140 @@ NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t addre
     InsertTailList(list, &s->list_entry);
 
     if (list_size)
-        order_space_entry(s, list_size);
+        place_space_entry(s, list_size, touched);
 
+    *ps = s;
     return STATUS_SUCCESS;
+}
+
+NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t address,
+                         uint64_t length, chunk* c, LIST_ENTRY* rollback) {
+    space* s;
+
+    return space_list_add_from(list, list_size, NULL, list->Flink, address, length, c, rollback, &s);
+}
+
+// Moves the entries on touched into the size list, which stays ordered by size,
+// largest first. touched is sorted with a bottom-up merge sort, then spliced in
+// during one pass along the size list, so for m entries on touched and n in the
+// size list this takes O(n + m log m) time, without allocating or recursing.
+static void order_space_entries(LIST_ENTRY* list_size, LIST_ENTRY* touched) {
+    LIST_ENTRY *le, *head, **tail;
+    size_t run = 1, merges;
+
+    if (IsListEmpty(touched))
+        return;
+
+    // treat touched as a chain through Flink that ends in NULL
+    head = touched->Flink;
+    touched->Blink->Flink = NULL;
+    InitializeListHead(touched);
+
+    // merge each pair of neighbouring sorted runs, doubling the run length on each pass
+    do {
+        LIST_ENTRY* p = head;
+
+        head = NULL;
+        tail = &head;
+        merges = 0;
+
+        while (p) {
+            LIST_ENTRY* q = p;
+            size_t psize = 0, qsize = run;
+
+            merges++;
+
+            while (q && psize < run) {
+                psize++;
+                q = q->Flink;
+            }
+
+            while (psize > 0 || (qsize > 0 && q)) {
+                LIST_ENTRY* e;
+
+                if (psize > 0 && (qsize == 0 || !q ||
+                    CONTAINING_RECORD(p, space, list_entry_size)->size >= CONTAINING_RECORD(q, space, list_entry_size)->size)) {
+                    e = p;
+                    p = p->Flink;
+                    psize--;
+                } else {
+                    e = q;
+                    q = q->Flink;
+                    qsize--;
+                }
+
+                *tail = e;
+                tail = &e->Flink;
+            }
+
+            p = q;
+        }
+
+        *tail = NULL;
+        run *= 2;
+    } while (merges > 1);
+
+    // Splice the chain into the size list in one forward pass: each entry goes
+    // before the first entry ahead of the cursor that is no bigger. The order
+    // of entries of equal size is not significant.
+    le = list_size->Flink;
+
+    while (head) {
+        space* s = CONTAINING_RECORD(head, space, list_entry_size);
+
+        head = head->Flink;
+
+        while (le != list_size && CONTAINING_RECORD(le, space, list_entry_size)->size > s->size) {
+            le = le->Flink;
+        }
+
+        InsertHeadList(le->Blink, &s->list_entry_size);
+    }
 }
 
 NTSTATUS space_list_merge(LIST_ENTRY* spacelist, LIST_ENTRY* spacelist_size,
                           LIST_ENTRY* deleting) {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_SUCCESS;
     LIST_ENTRY* le = deleting->Flink;
+    LIST_ENTRY* start = spacelist->Flink;
+    LIST_ENTRY touched;
+
+    if (IsListEmpty(deleting))
+        return STATUS_SUCCESS;
+
+    // Ordering each added or resized entry into the size list straight away
+    // would mean a walk along the size list for every range. Collect them on
+    // touched instead and order them all in at the end, which also happens
+    // after a failed allocation.
+    InitializeListHead(&touched);
 
     while (le != deleting) {
         space* s = CONTAINING_RECORD(le, space, list_entry);
+        space* s2;
 
-        Status = space_list_add2(spacelist, spacelist_size, s->address,
-                                 s->size, NULL, NULL);
+        // Both lists are sorted by address, so each search can carry on from
+        // the entry that took the previous range: the entries before it end
+        // strictly below where it starts. If the range starts before that
+        // entry, deleting is out of order: start again from the head.
+        if (start != spacelist && s->address < CONTAINING_RECORD(start, space, list_entry)->address)
+            start = spacelist->Flink;
+
+        Status = space_list_add_from(spacelist, spacelist_size, &touched, start,
+                                     s->address, s->size, NULL, NULL, &s2);
         if (!NT_SUCCESS(Status))
-            return Status;
+            break;
+
+        // Adding a range can free the entries next to the one that took it,
+        // so carry on from that entry rather than an older one.
+        start = &s2->list_entry;
 
         le = le->Flink;
     }
 
-    return STATUS_SUCCESS;
+    if (spacelist_size)
+        order_space_entries(spacelist_size, &touched);
+
+    return Status;
 }
 
 static NTSTATUS copy_space_list(LIST_ENTRY* old_list, LIST_ENTRY* new_list) {
