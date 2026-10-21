@@ -19,6 +19,7 @@
 
 NTSTATUS fsctl_request(PDEVICE_OBJECT DeviceObject, PIRP* Pirp, uint32_t type);
 void do_unlock_volume(device_extension* Vcb);
+void get_uuid(uint8_t* uuid);
 void trim_whole_device(device* dev);
 void flush_subvol_fcbs(root* subvol);
 bool fcb_is_inline(fcb* fcb);
