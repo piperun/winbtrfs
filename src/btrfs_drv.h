@@ -1416,12 +1416,7 @@ file_ref* create_fileref(device_extension* Vcb);
 NTSTATUS open_fileref_by_inode(_Requires_exclusive_lock_held_(_Curr_->fcb_lock) device_extension* Vcb, root* subvol, uint64_t inode, file_ref** pfr, PIRP Irp);
 
 // in fsctl.c
-NTSTATUS fsctl_request(PDEVICE_OBJECT DeviceObject, PIRP* Pirp, uint32_t type);
-void do_unlock_volume(device_extension* Vcb);
-void trim_whole_device(device* dev);
-void flush_subvol_fcbs(root* subvol);
-bool fcb_is_inline(fcb* fcb);
-NTSTATUS dismount_volume(device_extension* Vcb, bool shutdown, PIRP Irp);
+#include "fsctl.h"
 
 // in flushthread.c
 
