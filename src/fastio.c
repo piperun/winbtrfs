@@ -402,7 +402,14 @@ static BOOLEAN __stdcall fast_io_write(PFILE_OBJECT FileObject, PLARGE_INTEGER F
         return false;
     }
 
-    ret = FsRtlCopyWrite(FileObject, FileOffset, Length, Wait, LockKey, Buffer, IoStatus, DeviceObject);
+    // FsRtlCopyWrite mustn't wait while we hold tree_lock. Its first step, CcCanIWrite,
+    // can sleep until the lazy writer has written out dirty pages, and the lazy writer
+    // takes tree_lock in acquire_for_lazy_write. If the flush thread is waiting for
+    // tree_lock exclusively, that acquire blocks too, and the three threads deadlock.
+    // When FsRtlCopyWrite returns false, the I/O manager sends an IRP instead, and
+    // write_file2 calls CcCanIWrite before acquiring any locks.
+
+    ret = FsRtlCopyWrite(FileObject, FileOffset, Length, false, LockKey, Buffer, IoStatus, DeviceObject);
 
     if (ret)
         fcb->inode_item.size = fcb->Header.FileSize.QuadPart;
