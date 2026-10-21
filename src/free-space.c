@@ -602,6 +602,12 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
         fse = (struct btrfs_free_space_entry*)&data[off];
 
         if (fse->type == BTRFS_FREE_SPACE_EXTENT) {
+            if (fse->bytes == 0 || fse->offset < c->offset || fse->offset >= c->offset + c->chunk_item->length ||
+                fse->bytes > c->offset + c->chunk_item->length - fse->offset) {
+                WARN("invalidating cache for chunk %I64x: entry at %I64x of %I64x bytes is empty or outside chunk\n", c->offset, fse->offset, fse->bytes);
+                goto clearcache;
+            }
+
             Status = add_space_entry(&c->space, &c->space_size, fse->offset, fse->bytes);
             if (!NT_SUCCESS(Status)) {
                 ERR("add_space_entry returned %08lx\n", Status);
@@ -770,6 +776,13 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
 
         if (tp.item->key.objectid >= c->offset + c->chunk_item->length)
             break;
+
+        // The search started at the chunk's info item, so the item starts inside the chunk.
+        if ((tp.item->key.type == BTRFS_FREE_SPACE_EXTENT_KEY || tp.item->key.type == BTRFS_FREE_SPACE_BITMAP_KEY) &&
+            (tp.item->key.offset == 0 || tp.item->key.offset > c->offset + c->chunk_item->length - tp.item->key.objectid)) {
+            WARN("(%I64x,%x,%I64x) is empty or extends past end of chunk %I64x\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset, c->offset);
+            goto clearcache;
+        }
 
         if (tp.item->key.type == BTRFS_FREE_SPACE_EXTENT_KEY) {
             Status = add_space_entry(&c->space, &c->space_size, tp.item->key.objectid, tp.item->key.offset);
