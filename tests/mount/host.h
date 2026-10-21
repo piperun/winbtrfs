@@ -8,13 +8,26 @@
 #include <string.h>
 
 typedef int32_t NTSTATUS, LONG;
+typedef uint32_t ULONG;
 typedef struct LIST_ENTRY { struct LIST_ENTRY *Flink, *Blink; } LIST_ENTRY;
 typedef struct { bool live; unsigned held; } ERESOURCE;
 typedef struct { bool live, nonpaged; unsigned outstanding, returned; } LOOKASIDE;
 typedef struct { void* Buffer; } STRING;
 typedef struct { ERESOURCE load_tree_lock; } root_nonpaged;
-typedef struct { bool dropped; LIST_ENTRY fcbs; LIST_ENTRY* fcbs_ptrs[256]; root_nonpaged* nonpaged; } root;
+typedef struct _tree tree;
+typedef struct { uint64_t address, generation; tree* tree; } tree_holder;
+typedef struct {
+    LIST_ENTRY list_entry, fcbs; bool dropped; LIST_ENTRY* fcbs_ptrs[256]; root_nonpaged* nonpaged; tree_holder treeholder;
+} root;
 typedef struct device_extension device_extension;
+typedef struct {
+    LIST_ENTRY list_entry; bool ignore, inserted;
+    union { tree_holder treeholder; struct { uint16_t size; uint8_t* data; }; };
+} tree_data;
+struct _tree {
+    void* nonpaged; struct { uint8_t level; } header; uint32_t hash; device_extension* Vcb;
+    tree* parent; tree_data* paritem; root* root; LIST_ENTRY itemlist, list_entry, list_entry_hash; uint8_t* buf;
+};
 typedef struct { ERESOURCE resource, paging_resource, dir_children_lock; } fcb_nonpaged;
 typedef struct _fcb {
     uint32_t hash;
@@ -34,6 +47,12 @@ typedef struct { LIST_ENTRY list_entry; STRING name, utf8; } hardlink;
 typedef struct { LIST_ENTRY list_entry; } xattr;
 typedef struct { LIST_ENTRY list_entry_index; STRING utf8, name, name_uc; } dir_child;
 typedef struct { LIST_ENTRY list_entry; } device;
+typedef struct { LIST_ENTRY list_entry; } space;
+typedef struct { LIST_ENTRY list_entry; void* data; } sys_chunk;
+typedef struct {
+    LIST_ENTRY list_entry, space, deleting; fcb* cache; device** devices; void* chunk_item;
+    ERESOURCE lock, changed_extents_lock, range_locks_lock, partial_stripes_lock;
+} chunk;
 struct device_extension {
     LOOKASIDE tree_data_lookaside, traverse_ptr_lookaside, batch_item_lookaside, fileref_lookaside,
               fcb_lookaside, name_bit_lookaside, range_lock_lookaside, fcb_np_lookaside;
@@ -44,7 +63,8 @@ struct device_extension {
     file_ref* root_fileref;
     fcb* volume_fcb;
     fcb* dummy_fcb;
-    LIST_ENTRY devices;
+    LIST_ENTRY devices, roots, sys_chunks, chunks, trees, trees_hash, all_fcbs;
+    LIST_ENTRY* trees_ptrs[256];
 };
 typedef struct { bool deleted; device_extension* DeviceExtension; } DEVICE_OBJECT, *PDEVICE_OBJECT;
 

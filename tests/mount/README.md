@@ -1,4 +1,4 @@
-# Failed-mount FCB cleanup regressions
+# Failed-mount cleanup regressions
 
 Run from the repository root with Python 3 and GCC supporting
 `-ftrivial-auto-var-init`:
@@ -10,11 +10,14 @@ ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
   python3 tests/mount/check_mount.py . --sanitize --build-dir build/mount-tests-asan
 ```
 
-Add `--revision 4a99d1c5` to reproduce the missing dummy-FCB cleanup. It
-passes the 40 earlier controls but fails all 36 new cases because the dummy
-FCB, its nonpaged component, resources and allocated name-hash arrays survive
-device deletion. The corrected source passes all 76 with pattern/zero locals
-and address, undefined-behavior and leak sanitizers.
+Add `--revision 96fe76d4` to reproduce the missing metadata cleanup: 76/112
+cases pass and all 36 metadata cases fail, because trees, roots, chunks,
+system chunks and chunk free-space caches survive device deletion. Add
+`--revision 4a99d1c5` to reproduce the missing dummy-FCB cleanup as well. It
+passes the 40 earlier controls but fails the 36 dummy-FCB cases because the
+dummy FCB, its nonpaged component, resources and allocated name-hash arrays
+survive device deletion. The corrected source passes all 112 with pattern/zero
+locals and address, undefined-behavior and leak sanitizers.
 
 The original 40-case lookaside-lifetime regression is also retained. Before
 that correction, revisions `774da4b3` (inline cleanup) and `0a1d140d`
@@ -30,7 +33,8 @@ using the same destructor as normal volume teardown. Its subvolume must
 remain alive until this destruction finishes.
 
 The runner executes the actual failure exit from `mount_vol`, the extracted
-helper when present, and production `free_fcb` and `reap_fcb`.
+helper when present, and production `free_fcb`, `reap_fcb`, `reap_fcbs`,
+`free_tree` and `free_trees_root`.
 It supports both source layouts. Native services track lookaside lifetime,
 allocation ownership, resource release/deletion and the final device-object
 deletion. Returning an allocation to a deleted list fails immediately.
@@ -54,12 +58,38 @@ the root-of-roots subvolume and zero hash, as mount initializes them. Tests
 require exact destructor and nonpaged-lookaside return counts, no remaining
 allocations or live resources, and preservation of the original failure.
 
+The 36 metadata cases construct what mount loads before it creates its FCBs,
+in load order. Failure after the system chunks are read leaves the chunk
+root and two system chunks, with the tree, chunk and FCB lists and the
+lookasides not yet initialized. Failure after the chunk tree is read adds a
+cached leaf holding an inserted item and two chunks with free-space,
+deleting and device entries and four live resources. Failure after the
+roots are read adds three roots with two-level trees in the hash list.
+Failure after free-space caches are loaded adds three cache FCBs from the
+paged FCB lookaside in the root tree's subvolume: one attached to a chunk,
+one released but still listed for reaping, and one shared by two chunks
+whose free-space headers name the same inode, as `open_fcb` returns an
+already open FCB with another reference. The next stage also has the volume,
+dummy and root FCBs, with the dummy FCB's subvolume the loaded root tree and
+the root FCB's the loaded default subvolume. The last stage fails after the
+root stream file was created: the root FCB is linked into its subvolume and
+the FCB list with its fileref, and the stream file still points at it after
+mount drops its reference, so the FCB, its nonpaged part and the fileref
+must survive the cleanup. Tests require every tree item back on its
+lookaside before deletion, each FCB destroyed exactly once, exact FCB
+counts, and no other remaining allocations or live resources.
+
 Fixtures construct partial-mount state directly. They do not execute disk
 discovery, full mount initialization, root cache-file close, concurrent
-kernel activity or Windows pools. The root-file and root-fileref cleanup
-branches are not exercised. Other #817 mount-unwind leaks (roots, trees,
-chunks, system chunks and batch entries) remain separate work.
-No complete mount-failure cleanup or #832 hang fix is claimed.
+kernel activity or Windows pools. The root-fileref branch is not exercised.
+Still leaking on some failure paths: batch entries left when
+`commit_batch_list` fails; FCBs marked dirty and changed-extent records
+created while clearing the free-space cache; the root fileref and root FCB
+on the root-fileref branch; the notify synchronization object set up with
+`FsRtlNotifyInitializeSync`; and device free-space lists after a failure in
+or after `find_disk_holes`. The first device is allocated without zeroing,
+so the cleanup cannot tell whether its free-space list was initialized. No
+complete mount-failure cleanup or #832 hang fix is claimed.
 
 Each case runs separately with a five-second timeout and core dumps disabled.
 Windows runtime validation remains outstanding. LeakSanitizer may require

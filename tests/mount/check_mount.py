@@ -45,7 +45,11 @@ cleanup = read("src/mount-cleanup.c", optional=True)
 start = btrfs.index("#ifdef DEBUG_FCB_REFCOUNTS\nvoid _free_fcb(")
 (out / "free.inc").write_text(btrfs[start:btrfs.index("\nvoid reap_fcb(", start)])
 (out / "reap.inc").write_text(block(btrfs, btrfs.index("void reap_fcb(")) + "\n")
+(out / "reap_fcbs.inc").write_text(block(btrfs, btrfs.index("void reap_fcbs(")) + "\n")
 (out / "free_fileref.inc").write_text(block(btrfs, btrfs.index("void free_fileref(")) + "\n")
+treefuncs = read("src/treefuncs.c")
+(out / "trees.inc").write_text("".join(block(treefuncs, treefuncs.index(f"void {name}(")) + "\n"
+                                       for name in ("free_tree", "free_trees_root")))
 binary = out / "mount_test"
 flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie"] if args.sanitize else []
 subprocess.run(["gcc", "-std=c11", "-O0", "-g", "-Wall", "-Wextra", "-Werror",
