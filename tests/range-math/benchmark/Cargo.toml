@@ -5,12 +5,20 @@ edition = "2024"
 publish = false
 build = "build.rs"
 
+[features]
+paired = []
+
 [lib]
 path = "src/lib.rs"
 
 [[bench]]
 name = "ranges"
 harness = false
+
+[[bench]]
+name = "paired"
+harness = false
+required-features = ["paired"]
 
 [dev-dependencies]
 criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }

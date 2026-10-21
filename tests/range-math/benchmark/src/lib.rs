@@ -4,6 +4,8 @@
 //! a measured iteration.
 #![warn(missing_docs)]
 
+pub mod paired;
+
 /// One query and extent pair supplied to a helper call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Case {
