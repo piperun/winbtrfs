@@ -2479,12 +2479,22 @@ static NTSTATUS update_chunk_cache_tree(device_extension* Vcb, chunk* c, PIRP Ir
     Status = copy_space_list(&c->space, &space_list);
     if (!NT_SUCCESS(Status)) {
         ERR("copy_space_list returned %08lx\n", Status);
+
+        while (!IsListEmpty(&space_list)) {
+            ExFreePool(CONTAINING_RECORD(RemoveHeadList(&space_list), space, list_entry));
+        }
+
         return Status;
     }
 
     Status = space_list_merge(&space_list, NULL, &c->deleting);
-    if (!NT_SUCCESS(Status))
+    if (!NT_SUCCESS(Status)) {
+        while (!IsListEmpty(&space_list)) {
+            ExFreePool(CONTAINING_RECORD(RemoveHeadList(&space_list), space, list_entry));
+        }
+
         return Status;
+    }
 
     if (should_write_fst_bitmaps(Vcb, c, &space_list)) {
         Status = update_chunk_cache_tree_bitmaps(Vcb, c, Irp, &space_list);

@@ -91,7 +91,8 @@ if args.bench:
 
 # The cache writers copy the chunk's lists and merge them with the plain functions.
 (out / "cache.inc").write_text("".join(function(source, marker) for marker in (
-    "static NTSTATUS copy_space_list(", "static NTSTATUS update_chunk_cache(")))
+    "static NTSTATUS copy_space_list(", "static NTSTATUS update_chunk_cache(",
+    "static NTSTATUS update_chunk_cache_tree(")))
 (out / "btrfs.h").write_text(read("src/btrfs.h"))
 
 flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie"] if args.sanitize else []

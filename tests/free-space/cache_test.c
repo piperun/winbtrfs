@@ -28,6 +28,7 @@ typedef struct {
 } device_extension;
 
 #define NonPagedPool 0
+#define STATUS_NOT_FOUND ((NTSTATUS)0xc0000225)
 #define STATUS_INTERNAL_ERROR ((NTSTATUS)0xc00000e5)
 #define STATUS_IO_DEVICE_ERROR ((NTSTATUS)0xc0000185)
 #define RtlZeroMemory(p, n) memset(p, 0, n)
@@ -96,9 +97,11 @@ static const range merged_ranges[] = {
 /* The cache buffer, a copy of each entry and of each freed range, and an entry for
    each freed range that joins nothing. */
 #define CACHE_ALLOCATIONS (1 + COUNT(space_ranges) + COUNT(freed_ranges) + 2)
+/* A copy of each entry, and an entry for each freed range that joins nothing. */
+#define TREE_ALLOCATIONS (COUNT(space_ranges) + 2)
 
 static device_extension volume;
-static root root_tree;
+static root root_tree, space_tree;
 static struct btrfs_chunk chunk_item;
 static fcb cache_file;
 static chunk cache_chunk;
@@ -107,6 +110,9 @@ static tree_data header_item;
 static uint8_t written[2 * SECTOR];
 static unsigned flushes, writes;
 static NTSTATUS flush_status;
+static range inserted[2 * COUNT(merged_ranges)];
+static unsigned insert_count, info_updates;
+static uint32_t info_extent_count;
 
 static NTSTATUS flush_fcb(fcb* f, bool cache, LIST_ENTRY* batchlist, PIRP Irp) {
     (void)Irp;
@@ -118,7 +124,14 @@ static NTSTATUS flush_fcb(fcb* f, bool cache, LIST_ENTRY* batchlist, PIRP Irp) {
 static NTSTATUS find_item(device_extension* Vcb, root* r, traverse_ptr* tp,
                           const struct btrfs_key* searchkey, bool ignore, PIRP Irp) {
     (void)Irp;
-    CHECK(Vcb == &volume && r == &root_tree && !ignore);
+    CHECK(Vcb == &volume && !ignore);
+    if (r == &space_tree) {
+        /* The free space tree holds no items for the chunk yet. */
+        CHECK(searchkey->objectid == cache_chunk.offset && searchkey->type == BTRFS_FREE_SPACE_EXTENT_KEY &&
+              searchkey->offset == UINT64_MAX);
+        return STATUS_NOT_FOUND;
+    }
+    CHECK(r == &root_tree);
     CHECK(searchkey->objectid == BTRFS_FREE_SPACE_OBJECTID && searchkey->type == 0 &&
           searchkey->offset == cache_chunk.offset);
     tp->tree = NULL;
@@ -137,6 +150,49 @@ static NTSTATUS do_write_file(fcb* f, uint64_t start, uint64_t end, void* data, 
     CHECK(f == &cache_file && start == 0 && end == sizeof(written) && !file_write && !rollback);
     memcpy(written, data, sizeof(written));
     writes++;
+    return STATUS_SUCCESS;
+}
+
+static bool should_write_fst_bitmaps(device_extension* Vcb, chunk* c, LIST_ENTRY* space_list) {
+    CHECK(Vcb == &volume && c == &cache_chunk && space_list);
+    return false;
+}
+
+static NTSTATUS update_chunk_cache_tree_bitmaps(device_extension* Vcb, chunk* c, PIRP Irp,
+                                                LIST_ENTRY* space_list) {
+    (void)Vcb; (void)c; (void)Irp; (void)space_list;
+    CHECK(false); /* should_write_fst_bitmaps chooses extent items */
+    return STATUS_INTERNAL_ERROR;
+}
+
+static bool find_next_item(device_extension* Vcb, const traverse_ptr* tp, traverse_ptr* next_tp,
+                           bool ignore, PIRP Irp) {
+    (void)Vcb; (void)tp; (void)next_tp; (void)ignore; (void)Irp;
+    CHECK(false); /* the free space tree holds no items to walk */
+    return false;
+}
+
+static NTSTATUS delete_tree_item(device_extension* Vcb, traverse_ptr* tp) {
+    (void)Vcb; (void)tp;
+    CHECK(false); /* the free space tree holds no items to delete */
+    return STATUS_INTERNAL_ERROR;
+}
+
+static NTSTATUS insert_tree_item(device_extension* Vcb, root* r, uint64_t objectid, uint8_t type,
+                                 uint64_t offset, void* data, uint16_t size, traverse_ptr* ptp, PIRP Irp) {
+    (void)Irp;
+    CHECK(Vcb == &volume && r == &space_tree && type == BTRFS_FREE_SPACE_EXTENT_KEY);
+    CHECK(!data && !size && !ptp && insert_count < COUNT(inserted));
+    inserted[insert_count++] = (range){ objectid, objectid + offset };
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS update_free_space_info(device_extension* Vcb, chunk* c, uint32_t extent_count,
+                                       uint32_t flags, PIRP Irp) {
+    (void)Irp;
+    CHECK(Vcb == &volume && c == &cache_chunk && flags == 0);
+    info_updates++;
+    info_extent_count = extent_count;
     return STATUS_SUCCESS;
 }
 
@@ -171,7 +227,7 @@ static void free_list(LIST_ENTRY* list) {
 }
 
 static void set_up(void) {
-    volume = (device_extension){ .sector_shift = 12, .root_root = &root_tree };
+    volume = (device_extension){ .sector_shift = 12, .root_root = &root_tree, .space_root = &space_tree };
     volume.superblock.generation = 42;
     volume.superblock.sectorsize = SECTOR;
     chunk_item = (struct btrfs_chunk){ .length = 0x40000000 };
@@ -187,6 +243,7 @@ static void set_up(void) {
     allocations = fail_allocation = 0;
     flushes = writes = 0;
     flush_status = STATUS_SUCCESS;
+    insert_count = info_updates = 0;
 }
 
 static unsigned leaks;
@@ -248,10 +305,35 @@ static void cache_flush_failure(void) {
     tear_down("flush failed");
 }
 
+static void tree_written(void) {
+    set_up();
+    cache_chunk.using_fst_bitmaps = true;
+    CHECK(update_chunk_cache_tree(&volume, &cache_chunk, NULL) == STATUS_SUCCESS);
+    CHECK(allocations == TREE_ALLOCATIONS && !cache_chunk.using_fst_bitmaps);
+    CHECK(insert_count == COUNT(merged_ranges) && memcmp(inserted, merged_ranges, sizeof(merged_ranges)) == 0);
+    CHECK(info_updates == 1 && info_extent_count == COUNT(merged_ranges));
+    tear_down("written tree");
+}
+
+/* Fails each allocation in turn. */
+static void tree_allocation_failures(void) {
+    for (unsigned k = 1; k <= TREE_ALLOCATIONS; k++) {
+        char step[48];
+        snprintf(step, sizeof(step), "allocation %u of %zu failed", k, TREE_ALLOCATIONS);
+        set_up();
+        fail_allocation = k;
+        CHECK(update_chunk_cache_tree(&volume, &cache_chunk, NULL) == STATUS_INSUFFICIENT_RESOURCES);
+        CHECK(allocations == k && insert_count == 0 && info_updates == 0);
+        tear_down(step);
+    }
+}
+
 static const struct { const char* name; void (*run)(void); } cases[] = {
     { "update-chunk-cache-written", cache_written },
     { "update-chunk-cache-allocation-failures", cache_allocation_failures },
     { "update-chunk-cache-flush-failure", cache_flush_failure },
+    { "update-chunk-cache-tree-written", tree_written },
+    { "update-chunk-cache-tree-allocation-failures", tree_allocation_failures },
 };
 
 int main(int argc, char** argv) {
