@@ -15,36 +15,40 @@ Add `--revision` to run the sources before each fix. Each revision also fails
 the cases of the fixes after it.
 
 - `96fe76d4` merges by searching from the head of the list for every freed
-  range: 29/58 cases pass. The four step-count cases that merge many ranges
+  range: 29/59 cases pass. The four step-count cases that merge many ranges
   fail; the large merge takes 400,020,000 address-list steps against a limit
   of 160,000.
 - `23c741d8` runs `update_chunk_cache` before it freed the lists it copies:
-  33/58 cases pass. A written cache leaves 8 allocations behind, the 5 merged
+  33/59 cases pass. A written cache leaves 8 allocations behind, the 5 merged
   entries and the 3 copied freed ranges, and so does a failed flush. Failing an
   allocation while copying either list leaves the entries copied before it, and
   failing one in the merge leaves both copies.
 - `5c9895e7` runs `update_chunk_cache_tree` before it freed its copy of the
-  space list on failure: 36/58 cases pass. Failing the second or third
+  space list on failure: 36/59 cases pass. Failing the second or third
   allocation, in the copy, leaves 1 or 2 entries behind, and failing the fourth
   or fifth, in the merge, leaves 3 or 4.
 - `550f234e` runs `add_space_entry` before it linked an entry at the last
-  entry's address into the address list: 37/58 cases pass. With a size list the
+  entry's address into the address list: 37/59 cases pass. With a size list the
   entry is only on the size list, which still offers its range after an
   allocation took it; without one the entry is on neither list.
 - `03af14bb` runs `load_stored_free_space_tree` before it freed what it had
-  loaded when it rejects a bitmap item: 43/58 cases pass. The entries of the
+  loaded when it rejects a bitmap item: 43/59 cases pass. The entries of the
   first bitmap stay in front of the free space regenerated from the extent tree:
   the address list holds 6 entries instead of 3, each loaded entry overlapping a
   regenerated one, and the bitmap buffer stays allocated.
-- `872b041a` keeps overlapping stored ranges as separate entries: 45/58 cases
+- `872b041a` keeps overlapping stored ranges as separate entries: 45/59 cases
   pass. Two entries cover the same space, and after an allocation inside the
   overlap the second one still offers it. The v1 cache whose entries add up to
   the chunk's free space despite the overlap is kept, not discarded.
 - `469ce25c` loads stored ranges without checking them against the chunk:
-  49/58 cases pass. Ranges before the chunk or past its end load as free space
+  49/59 cases pass. Ranges before the chunk or past its end load as free space
   outside it, a range of size 0 loads as an empty entry, and a range whose end
   wraps past 2^64 stays, with the entry after it inside its range. The v1
   caches, whose entries add up to the chunk's free space, are kept.
+- `29616b43` rounds the size a bitmap item's bits need down to whole bytes:
+  58/59 cases pass. A bitmap item over 12 sectors that holds 1 byte passes the
+  size check, and the bits of its last 4 sectors come from the rest of the
+  loader's buffer: 2 sectors inside an extent load as free.
 
 The runner extracts the production `space` type, `order_space_entry`,
 `space_list_add2`, `space_list_merge`, `add_space_entry` and
@@ -146,9 +150,11 @@ extent items or in 16 bitmap items of 2,048 sectors.
   free ranges in address order and the size list the same entries in
   non-increasing size order. The extent tree must not be searched, and the
   cache must be kept.
-- A second bitmap item shorter than its range needs, or an empty one, makes the
-  loader reject the free space tree. The lists must then hold the three ranges
-  regenerated from the extent tree, and nothing else may stay allocated.
+- A second bitmap item shorter than its range needs, an empty one over half a
+  sector, or a bitmap item over 12 sectors that holds 1 byte where its bits need
+  2, makes the loader reject the free space tree. The lists must then hold the
+  three ranges regenerated from the extent tree, and nothing else may stay
+  allocated.
 - Overlapping stored ranges make the loaders reject what they loaded: an extent
   item inside another, two extent items with the same start, an extent item
   over free space a bitmap item also gives, and a v1 entry inside another with

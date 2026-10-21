@@ -457,16 +457,31 @@ static void tree_short_bitmap(void) {
     tear_down();
 }
 
-/* The same for an empty bitmap item over 4 sectors. The loader expects 4 / 8 bytes,
-   rounded down to 0, so the item reaches its check for an empty item. */
+/* The same for an empty bitmap item over half a sector. It covers no whole sector, so
+   the loader expects no bytes and the item reaches its check for an empty item; over a
+   sector or more it would fail the size check first. */
 static void tree_empty_bitmap(void) {
     set_up_tree(BTRFS_FREE_SPACE_USING_BITMAPS);
     add_bitmap(0, sizeof(bitmaps[0]));
-    add_item(BASE + BITMAP_LENGTH, BTRFS_FREE_SPACE_BITMAP_KEY, 4 * SECTOR, bitmaps[1], 0);
+    add_item(BASE + BITMAP_LENGTH, BTRFS_FREE_SPACE_BITMAP_KEY, SECTOR / 2, bitmaps[1], 0);
     CHECK(load_tree() == STATUS_SUCCESS);
     check_space(free_ranges, COUNT(free_ranges));
     check_regenerated(true);
     tear_down();
+}
+
+/* The same for a bitmap item over the chunk's first 12 sectors, inside an extent, that
+   holds 1 byte where its bits need 2. Loaded, sectors 8 to 11 would take their bits from
+   the rest of the loader's buffer, which the model's allocator fills with 0xa5, marking
+   sectors 8 and 10 free. */
+static void tree_bitmap_missing_bits(void) {
+    static uint8_t bits[1];
+    set_up_tree(BTRFS_FREE_SPACE_USING_BITMAPS);
+    add_item(BASE, BTRFS_FREE_SPACE_BITMAP_KEY, 12 * SECTOR, bits, sizeof(bits));
+    add_extent(BASE + 0x10000, BASE + 0x14000);
+    add_extent(BASE + 0x18000, BASE + 0x20000);
+    add_extent(BASE + 0x40000, BASE + LENGTH);
+    load_rejected_tree();
 }
 
 /* Extent items whose ranges overlap make the loader regenerate the chunk's free space.
@@ -653,6 +668,7 @@ static const struct { const char* name; void (*run)(void); } cases[] = {
     { "load-tree-extents", tree_extents_loaded },
     { "load-tree-short-bitmap", tree_short_bitmap },
     { "load-tree-empty-bitmap", tree_empty_bitmap },
+    { "load-tree-bitmap-missing-bits", tree_bitmap_missing_bits },
     { "load-tree-overlapping-extents", tree_overlapping_extents },
     { "load-tree-same-start-extents", tree_same_start_extents },
     { "load-tree-extent-over-bitmap", tree_extent_over_bitmap },

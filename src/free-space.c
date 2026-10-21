@@ -797,7 +797,7 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
             uint64_t lastoff;
             ULONG bmpl;
 
-            explen = (ULONG)(tp.item->key.offset >> Vcb->sector_shift) / 8;
+            explen = (ULONG)sector_align(tp.item->key.offset >> Vcb->sector_shift, 8) / 8;
 
             if (tp.item->size < explen) {
                 WARN("(%I64x,%x,%I64x) was %u bytes, expected %lu\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset, tp.item->size, explen);
