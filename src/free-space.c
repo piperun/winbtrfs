@@ -728,9 +728,15 @@ clearcache:
     Status = STATUS_NOT_FOUND;
 
 end:
-    // Nothing loaded from the cache may stay. After STATUS_NOT_FOUND the caller
-    // regenerates the chunk's free space from the extent tree, and after an error
-    // the chunk is loaded again.
+    // Nothing loaded from the cache may stay, and the cache file is released unless
+    // it became the chunk's old cache. After STATUS_NOT_FOUND the caller regenerates
+    // the chunk's free space from the extent tree, and after an error the chunk is
+    // loaded again.
+
+    if (c->cache) {
+        free_fcb(c->cache);
+        c->cache = NULL;
+    }
 
     le = c->space.Flink;
     while (le != &c->space) {
@@ -1046,9 +1052,12 @@ static NTSTATUS load_free_space_cache(device_extension* Vcb, chunk* c, PIRP Irp)
 NTSTATUS load_cache_chunk(device_extension* Vcb, chunk* c, PIRP Irp) {
     NTSTATUS Status;
     bool space_changed;
+    fcb* cache;
 
     if (c->cache_loaded)
         return STATUS_SUCCESS;
+
+    cache = c->cache;
 
     Status = load_free_space_cache(Vcb, c, Irp);
     if (!NT_SUCCESS(Status)) {
@@ -1060,10 +1069,11 @@ NTSTATUS load_cache_chunk(device_extension* Vcb, chunk* c, PIRP Irp) {
 
     Status = protect_superblocks(c);
     if (!NT_SUCCESS(Status)) {
-        // The next call loads the chunk again, so free what was loaded. Through
-        // space_list_subtract, protect_superblocks has set space_changed, and the
-        // flush would write the empty lists out as the chunk's free space, so
-        // restore it too. changed is left set: nocow writes set it without the
+        // The next call loads the chunk again, so free what was loaded, and release
+        // the v1 cache file if this load opened it, as the next call opens it again.
+        // Through space_list_subtract, protect_superblocks has set space_changed,
+        // and the flush would write the empty lists out as the chunk's free space,
+        // so restore it too. changed is left set: nocow writes set it without the
         // chunk lock, and it only makes the flush write out partial stripes.
 
         while (!IsListEmpty(&c->space)) {
@@ -1071,6 +1081,11 @@ NTSTATUS load_cache_chunk(device_extension* Vcb, chunk* c, PIRP Irp) {
 
             RemoveEntryList(&s->list_entry_size);
             ExFreePool(s);
+        }
+
+        if (c->cache && c->cache != cache) {
+            free_fcb(c->cache);
+            c->cache = cache;
         }
 
         c->space_changed = space_changed;
