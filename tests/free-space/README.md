@@ -1,4 +1,4 @@
-# Free-space list merge and cache-writer regressions
+# Free-space list, loader and cache-writer regressions
 
 Run from the repository root with Python 3 and GCC supporting
 `-ftrivial-auto-var-init`:
@@ -15,23 +15,27 @@ Add `--revision` to run the sources before each fix. Each revision also fails
 the cases of the fixes after it.
 
 - `96fe76d4` merges by searching from the head of the list for every freed
-  range: 26/34 cases pass. The four step-count cases that merge many ranges
+  range: 26/40 cases pass. The four step-count cases that merge many ranges
   fail; the large merge takes 400,020,000 address-list steps against a limit
   of 160,000.
 - `23c741d8` runs `update_chunk_cache` before it freed the lists it copies:
-  30/34 cases pass. A written cache leaves 8 allocations behind, the 5 merged
+  30/40 cases pass. A written cache leaves 8 allocations behind, the 5 merged
   entries and the 3 copied freed ranges, and so does a failed flush. Failing an
   allocation while copying either list leaves the entries copied before it, and
   failing one in the merge leaves both copies.
 - `5c9895e7` runs `update_chunk_cache_tree` before it freed its copy of the
-  space list on failure: 33/34 cases pass. Failing the second or third
+  space list on failure: 33/40 cases pass. Failing the second or third
   allocation, in the copy, leaves 1 or 2 entries behind, and failing the fourth
   or fifth, in the merge, leaves 3 or 4.
+- `550f234e` runs `add_space_entry` before it linked an entry at the last
+  entry's address into the address list: 34/40 cases pass. With a size list the
+  entry is only on the size list, which still offers its range after an
+  allocation took it; without one the entry is on neither list.
 
 The runner extracts the production `space` type, `order_space_entry`,
-`space_list_add2` and `space_list_merge`, plus the `place_space_entry`,
-`space_list_add_from` and `order_space_entries` helpers when present. The host
-models are:
+`space_list_add2`, `space_list_merge`, `add_space_entry` and
+`space_list_subtract2`, plus the `place_space_entry`, `space_list_add_from` and
+`order_space_entries` helpers when present. The host models are:
 
 - a pool allocator that can fail any chosen allocation;
 - `ExFreePool` that poisons a freed entry, which then reads as an empty range at
@@ -72,6 +76,16 @@ starting after the first entry, restarts for out-of-order ranges, entries freed
 after taking the previous range, entries on the list of changed entries resized
 again or freed, and failed allocations while that list is not empty.
 
+The loaders add the entries of a stored cache with `add_space_entry`. Its trials
+add up to 40 entries, with and without a size list, at addresses drawn from 12,
+so many entries share an address. After each add the address list must hold
+exactly the added ranges in non-decreasing address order, and the size list the
+same entries in non-increasing size order. The trials must add into an empty
+list, after the last entry, at the last entry's address, at another entry's
+address and below the last entry's address. Two more cases add an entry at the
+last entry's address and take its range with `space_list_subtract2`, as an
+allocation does; neither list may offer any of that range afterwards.
+
 The large step-count cases merge 20,000 freed ranges interleaved with 20,000
 separate entries, with and without a size list. The small ones merge 1, 16 or
 64 freed ranges into random gaps between 20,000 entries with a size list; every
@@ -108,5 +122,5 @@ the change; the step counts are the regression check.
 
 Each case runs in its own process with core dumps disabled, a 30-second limit,
 or 120 seconds for the large step-count cases. Rollback lists, chunk locking,
-real tree searches and file writes, and real Windows pool allocation are not
-exercised.
+the loaders themselves, real tree searches and file writes, and real Windows
+pool allocation are not exercised.

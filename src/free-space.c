@@ -201,7 +201,7 @@ NTSTATUS add_space_entry(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t offse
     else {
         space* s2 = CONTAINING_RECORD(list->Blink, space, list_entry);
 
-        if (s2->address < offset)
+        if (s2->address <= offset)
             InsertTailList(list, &s->list_entry);
         else {
             LIST_ENTRY* le;

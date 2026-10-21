@@ -226,10 +226,29 @@ static size_t snapshot(LIST_ENTRY* list, range* r, size_t limit) {
     return count;
 }
 
+/* The size list must hold exactly the given address-list entries, in non-increasing
+   size order. Reorders nodes. */
+static void check_size_list(LIST_ENTRY* list_size, space** nodes, size_t count) {
+    space** sized = malloc((count + 1) * sizeof(*sized));
+    uint64_t previous = UINT64_MAX;
+    size_t i = 0;
+    CHECK(sized != NULL);
+    CHECK(list_length(list_size, count) == count);
+    for (LIST_ENTRY* le = list_size->Flink; le != list_size; le = le->Flink, i++) {
+        sized[i] = CONTAINING_RECORD(le, space, list_entry_size);
+        CHECK(sized[i]->size <= previous);
+        previous = sized[i]->size;
+    }
+    qsort(nodes, count, sizeof(*nodes), by_pointer);
+    qsort(sized, count, sizeof(*sized), by_pointer);
+    for (i = 0; i < count; i++) CHECK(nodes[i] == sized[i]);
+    free(sized);
+}
+
 /* The address list must hold exactly the expected ranges, with gaps between them. The
    size list must hold the same entries, in non-increasing size order. */
 static void check_lists(LIST_ENTRY* list, LIST_ENTRY* list_size, const range* expected, size_t count) {
-    space** nodes = malloc(2 * (count + 1) * sizeof(*nodes));
+    space** nodes = malloc((count + 1) * sizeof(*nodes));
     CHECK(nodes != NULL);
     CHECK(list_length(list, count) == count);
     size_t i = 0;
@@ -244,20 +263,7 @@ static void check_lists(LIST_ENTRY* list, LIST_ENTRY* list_size, const range* ex
         CHECK(i == 0 || nodes[i - 1]->address + nodes[i - 1]->size < s->address);
         nodes[i] = s;
     }
-    if (list_size) {
-        space** sized = nodes + count;
-        uint64_t previous = UINT64_MAX;
-        CHECK(list_length(list_size, count) == count);
-        i = 0;
-        for (LIST_ENTRY* le = list_size->Flink; le != list_size; le = le->Flink, i++) {
-            sized[i] = CONTAINING_RECORD(le, space, list_entry_size);
-            CHECK(sized[i]->size <= previous);
-            previous = sized[i]->size;
-        }
-        qsort(nodes, count, sizeof(*nodes), by_pointer);
-        qsort(sized, count, sizeof(*sized), by_pointer);
-        for (i = 0; i < count; i++) CHECK(nodes[i] == sized[i]);
-    }
+    if (list_size) check_size_list(list_size, nodes, count);
     free(nodes);
 }
 
@@ -487,6 +493,121 @@ static void add2_trial(bool with_size) {
     CHECK(pool_live == 0);
 }
 
+static int by_start_then_end(const void* a, const void* b) {
+    const range* x = a;
+    const range* y = b;
+    if (x->start != y->start) return (x->start > y->start) - (x->start < y->start);
+    return (x->end > y->end) - (x->end < y->end);
+}
+
+/* The address list must hold exactly the added ranges, in non-decreasing address order;
+   entries with the same address may be in any order. The size list must hold the same
+   entries, in non-increasing size order. */
+static void check_added(LIST_ENTRY* list, LIST_ENTRY* list_size, const range* added, size_t count) {
+    range* want = malloc((count + 1) * sizeof(*want));
+    range* got = malloc((count + 1) * sizeof(*got));
+    space** nodes = malloc((count + 1) * sizeof(*nodes));
+    CHECK(want != NULL && got != NULL && nodes != NULL);
+    size_t length = list_length(list, count + 1), i = 0;
+    if (length != count) {
+        fprintf(stderr, "address list holds %zu entries, expected %zu\n", length, count);
+        CHECK(false);
+    }
+    for (LIST_ENTRY* le = list->Flink; le != list; le = le->Flink, i++) {
+        nodes[i] = CONTAINING_RECORD(le, space, list_entry);
+        got[i] = (range){ nodes[i]->address, nodes[i]->address + nodes[i]->size };
+        CHECK(i == 0 || got[i - 1].start <= got[i].start);
+    }
+    memcpy(want, added, count * sizeof(*want));
+    qsort(want, count, sizeof(*want), by_start_then_end);
+    qsort(got, count, sizeof(*got), by_start_then_end);
+    CHECK(memcmp(want, got, count * sizeof(*got)) == 0);
+    if (list_size) check_size_list(list_size, nodes, count);
+    free(nodes);
+    free(got);
+    free(want);
+}
+
+/* Fails if a list still holds part of a range that has been taken. */
+static void check_not_offered(LIST_ENTRY* head, size_t link, const char* name, range taken) {
+    for (LIST_ENTRY* le = head->Flink; le != head; le = le->Flink) {
+        space* s = (space*)((char*)le - link);
+        if (s->address < taken.end && taken.start < s->address + s->size) {
+            fprintf(stderr, "%s list still offers %llx-%llx after %llx-%llx was taken\n", name,
+                    (unsigned long long)s->address, (unsigned long long)(s->address + s->size),
+                    (unsigned long long)taken.start, (unsigned long long)taken.end);
+            CHECK(false);
+        }
+    }
+}
+
+/* Adds an entry at the address of the last entry, then takes its range as an
+   allocation does. Neither list may offer any of that range afterwards. */
+static void add_at_last_address(bool with_size) {
+    const range added[] = { { base, base + 0x1000 }, { base + 0x3000, base + 0x4000 },
+                            { base + 0x3000, base + 0x7000 } };
+    list_head lh, sh;
+    LIST_ENTRY* list = address_head(&lh);
+    LIST_ENTRY* sizes = with_size ? size_head(&sh) : NULL;
+    for (size_t i = 0; i < 3; i++)
+        CHECK(add_space_entry(list, sizes, added[i].start, added[i].end - added[i].start) == STATUS_SUCCESS);
+    CHECK(space_list_subtract2(list, sizes, added[2].start, added[2].end - added[2].start, NULL, NULL)
+          == STATUS_SUCCESS);
+    check_not_offered(list, offsetof(space, list_entry), "address", added[2]);
+    if (sizes) check_not_offered(sizes, offsetof(space, list_entry_size), "size", added[2]);
+    check_added(list, sizes, added, 1);
+    free_list(list);
+    if (pool_live != 0) {
+        fprintf(stderr, "entries on neither list: %llu\n", pool_live);
+        CHECK(false);
+    }
+}
+
+enum { ADD_EMPTY, ADD_AFTER_LAST, ADD_AT_LAST, ADD_AT_OTHER, ADD_BELOW_LAST, ADD_CLASSES };
+static const char* const add_class_names[ADD_CLASSES] = {
+    "empty list", "after the last entry", "at the last entry's address",
+    "at another entry's address", "below the last entry's address" };
+static unsigned long long add_coverage[ADD_CLASSES];
+
+/* Adds entries at random, often equal, addresses and checks both lists after each. */
+static void add_entry_trial(bool with_size) {
+    range added[MAX_RANGES];
+    size_t n = 1 + below(MAX_RANGES);
+    list_head lh, sh;
+    LIST_ENTRY* list = address_head(&lh);
+    LIST_ENTRY* sizes = with_size ? size_head(&sh) : NULL;
+    for (size_t i = 0; i < n; i++) {
+        uint64_t start = base + below(12) * 0x1000, last = 0;
+        bool equal = false;
+        for (size_t j = 0; j < i; j++) {
+            last = max(last, added[j].start);
+            equal |= added[j].start == start;
+        }
+        if (i == 0) add_coverage[ADD_EMPTY]++;
+        else if (start > last) add_coverage[ADD_AFTER_LAST]++;
+        else if (start == last) add_coverage[ADD_AT_LAST]++;
+        else if (equal) add_coverage[ADD_AT_OTHER]++;
+        else add_coverage[ADD_BELOW_LAST]++;
+        added[i] = (range){ start, start + (1 + below(8)) * 0x1000 };
+        allocations = 0;
+        CHECK(add_space_entry(list, sizes, start, added[i].end - start) == STATUS_SUCCESS);
+        CHECK(allocations == 1);
+        check_added(list, sizes, added, i + 1);
+    }
+    free_list(list);
+    release_quarantine();
+    CHECK(pool_live == 0);
+}
+
+static void check_add_coverage(void) {
+    for (unsigned i = 0; i < ADD_CLASSES; i++) {
+        if (!add_coverage[i]) {
+            fprintf(stderr, "no trial added an entry: %s\n", add_class_names[i]);
+            CHECK(false);
+        }
+    }
+}
+
 /* n separate entries, with m separate freed ranges between them. */
 static void build_interleaved(LIST_ENTRY* list, LIST_ENTRY* list_size, LIST_ENTRY* deleting,
                               range* all, size_t n, size_t m) {
@@ -626,11 +747,11 @@ static void bench(void) {
     time_merges(few, sizeof(few) / sizeof(*few), 33015, true, 20);
 }
 
-enum { MERGE, UNSORTED, FAILURE, ADD2, FAILURE_UNSORTED, KINDS };
+enum { MERGE, UNSORTED, FAILURE, ADD2, FAILURE_UNSORTED, ADD_ENTRY, KINDS };
 static const char* const kind_names[KINDS] = { "merge", "unsorted", "failure", "add2",
-                                               "failure-unsorted" };
-static const unsigned seeds[KINDS] = { 4, 2, 2, 2, 2 };
-static const unsigned trials[KINDS] = { 2000, 1000, 300, 300, 300 };
+                                               "failure-unsorted", "add-entry" };
+static const unsigned seeds[KINDS] = { 4, 2, 2, 2, 2, 2 };
+static const unsigned trials[KINDS] = { 2000, 1000, 300, 300, 300, 300 };
 
 static void run_trials(unsigned kind, unsigned seed, bool with_size) {
     bool sorted = kind == MERGE || kind == FAILURE, failing = kind == FAILURE || kind == FAILURE_UNSORTED;
@@ -638,8 +759,14 @@ static void run_trials(unsigned kind, unsigned seed, bool with_size) {
     random_state = (uint64_t)seed << 8 | kind;
     for (unsigned t = 0; t < trials[kind]; t++) {
         if (kind == ADD2) add2_trial(with_size);
+        else if (kind == ADD_ENTRY) add_entry_trial(with_size);
         else if (failing) injected += failure_trial(with_size, !sorted);
         else merge_trial(with_size, !sorted);
+    }
+    if (kind == ADD_ENTRY) {
+        /* add_space_entry neither merges nor goes through the merge's hooks. */
+        check_add_coverage();
+        return;
     }
     if (kind == MERGE || kind == UNSORTED) check_coverage();
     if (failing) CHECK(injected > 0);
@@ -675,6 +802,11 @@ int main(int argc, char** argv) {
                 if (strcmp(argv[1], name) == 0) { run_trials(kind, seed, with_size); goto done; }
             }
         }
+    }
+    for (unsigned with_size = 0; with_size < 2; with_size++) {
+        const char* name = with_size ? "add-at-last-address-size" : "add-at-last-address-nosize";
+        if (list) { puts(name); continue; }
+        if (strcmp(argv[1], name) == 0) { add_at_last_address(with_size); goto done; }
     }
     for (unsigned with_size = 0; with_size < 2; with_size++) {
         const char* name = with_size ? "complexity-size" : "complexity-nosize";

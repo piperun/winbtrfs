@@ -42,13 +42,16 @@ end = header.index("} space;") + len("} space;")
 source = read("src/free-space.c")
 helper = "static NTSTATUS space_list_add_from(" in source
 # Marker, the counter for its list steps, and whether it must walk a list. The
-# helpers are absent before the one-pass merge.
+# helpers are absent before the one-pass merge. The loaders add entries with
+# add_space_entry; allocations take space with space_list_subtract2.
 functions = [("static void order_space_entry(", "size_visits", True),
              ("static void place_space_entry(", "size_visits", False),
              ("static NTSTATUS space_list_add_from(", "address_visits", True),
              ("NTSTATUS space_list_add2(", "address_visits", not helper),
              ("static void order_space_entries(", "size_visits", True),
-             ("NTSTATUS space_list_merge(", "address_visits", True)]
+             ("NTSTATUS space_list_merge(", "address_visits", True),
+             ("NTSTATUS add_space_entry(", "address_visits", True),
+             ("NTSTATUS space_list_subtract2(", "address_visits", False)]
 # Calls into the test where each insert starts, where an entry takes a range,
 # where entries are resized or freed, where the merge restarts from the head and
 # where an allocation fails, with the number of places each pattern must match.
