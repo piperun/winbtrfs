@@ -783,10 +783,10 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
 
             if (tp.item->size < explen) {
                 WARN("(%I64x,%x,%I64x) was %u bytes, expected %lu\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset, tp.item->size, explen);
-                return STATUS_NOT_FOUND;
+                goto clearcache;
             } else if (tp.item->size == 0) {
                 WARN("(%I64x,%x,%I64x) has size of 0\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset);
-                return STATUS_NOT_FOUND;
+                goto clearcache;
             }
 
             if (bmplen < tp.item->size) {
@@ -882,6 +882,22 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
     }
 
     return STATUS_SUCCESS;
+
+clearcache:
+    // The caller regenerates the chunk's free space from the extent tree, so
+    // nothing loaded from the free space tree may stay.
+
+    if (bmparr)
+        ExFreePool(bmparr);
+
+    while (!IsListEmpty(&c->space)) {
+        space* s = CONTAINING_RECORD(RemoveHeadList(&c->space), space, list_entry);
+
+        RemoveEntryList(&s->list_entry_size);
+        ExFreePool(s);
+    }
+
+    return STATUS_NOT_FOUND;
 }
 
 static NTSTATUS load_free_space_cache(device_extension* Vcb, chunk* c, PIRP Irp) {

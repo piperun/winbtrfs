@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check production space-list merging and the cache writers that use it."""
+"""Check production space-list merging and the cache writers and loaders that use it."""
 import argparse
 from pathlib import Path
 import re
@@ -96,13 +96,17 @@ if args.bench:
 (out / "cache.inc").write_text("".join(function(source, marker) for marker in (
     "static NTSTATUS copy_space_list(", "static NTSTATUS update_chunk_cache(",
     "static NTSTATUS update_chunk_cache_tree(")))
+# The loaders add stored entries with the plain add_space_entry.
+(out / "load.inc").write_text("".join(function(source, marker) for marker in (
+    "static NTSTATUS load_stored_free_space_tree(", "static NTSTATUS load_free_space_cache(")))
 (out / "btrfs.h").write_text(read("src/btrfs.h"))
 
 flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie"] if args.sanitize else []
 binaries = []
 for name, program, functions_dir, defines in (
         ("free_space_test", test, "counted", [f"-DMERGE_HOOKS={int(helper)}"]),
-        ("cache_test", test.with_name("cache_test.c"), "plain", [])):
+        ("cache_test", test.with_name("cache_test.c"), "plain", []),
+        ("load_test", test.with_name("load_test.c"), "plain", [])):
     binary = out / name
     subprocess.run(["gcc", "-std=c11", "-O0", "-g", "-Wall", "-Wextra", "-Werror",
                     f"-ftrivial-auto-var-init={args.init}", *flags, *defines,

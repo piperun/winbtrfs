@@ -15,22 +15,27 @@ Add `--revision` to run the sources before each fix. Each revision also fails
 the cases of the fixes after it.
 
 - `96fe76d4` merges by searching from the head of the list for every freed
-  range: 26/40 cases pass. The four step-count cases that merge many ranges
+  range: 27/43 cases pass. The four step-count cases that merge many ranges
   fail; the large merge takes 400,020,000 address-list steps against a limit
   of 160,000.
 - `23c741d8` runs `update_chunk_cache` before it freed the lists it copies:
-  30/40 cases pass. A written cache leaves 8 allocations behind, the 5 merged
+  31/43 cases pass. A written cache leaves 8 allocations behind, the 5 merged
   entries and the 3 copied freed ranges, and so does a failed flush. Failing an
   allocation while copying either list leaves the entries copied before it, and
   failing one in the merge leaves both copies.
 - `5c9895e7` runs `update_chunk_cache_tree` before it freed its copy of the
-  space list on failure: 33/40 cases pass. Failing the second or third
+  space list on failure: 34/43 cases pass. Failing the second or third
   allocation, in the copy, leaves 1 or 2 entries behind, and failing the fourth
   or fifth, in the merge, leaves 3 or 4.
 - `550f234e` runs `add_space_entry` before it linked an entry at the last
-  entry's address into the address list: 34/40 cases pass. With a size list the
+  entry's address into the address list: 35/43 cases pass. With a size list the
   entry is only on the size list, which still offers its range after an
   allocation took it; without one the entry is on neither list.
+- `03af14bb` runs `load_stored_free_space_tree` before it freed what it had
+  loaded when it rejects a bitmap item: 41/43 cases pass. The entries of the
+  first bitmap stay in front of the free space regenerated from the extent tree:
+  the address list holds 6 entries instead of 3, each loaded entry overlapping a
+  regenerated one, and the bitmap buffer stays allocated.
 
 The runner extracts the production `space` type, `order_space_entry`,
 `space_list_add2`, `space_list_merge`, `add_space_entry` and
@@ -114,6 +119,23 @@ entry and two join nothing, so the merged list has five entries.
   allocated. A case reports each step that leaves allocations behind before it
   fails.
 
+`load_test` runs the production `load_free_space_cache`, which loads a chunk's
+free space from the free space tree with `load_stored_free_space_tree` and
+otherwise regenerates it from the extent tree, with the plain
+`add_space_entry`. It uses the same list primitives and a pool allocator that
+frees memory at once. The two trees are native models searched as the
+production `find_item` and `find_next_item` search them. The extent tree holds
+the chunk's block group item, two data extents and a tree block, between items
+of the chunks before and after it, and leaves three ranges of the chunk free.
+The free space tree describes the chunk in two bitmap items of 2,048 sectors.
+
+- With both bitmaps valid, the address list must hold the three free ranges in
+  address order and the size list the same entries in non-increasing size
+  order, and the extent tree must not be searched.
+- A second bitmap item shorter than its range needs, or an empty one, makes the
+  loader reject the free space tree. The lists must then hold the three ranges
+  regenerated from the extent tree, and nothing else may stay allocated.
+
 `--bench` builds the functions without counters or calls into the test, with
 `-O2`, and prints `CLOCK_MONOTONIC` timings of a merge: the best of five for
 m = 5,000 to 40,000 freed ranges between as many entries, and the best of twenty
@@ -122,5 +144,5 @@ the change; the step counts are the regression check.
 
 Each case runs in its own process with core dumps disabled, a 30-second limit,
 or 120 seconds for the large step-count cases. Rollback lists, chunk locking,
-the loaders themselves, real tree searches and file writes, and real Windows
-pool allocation are not exercised.
+the v1 cache loader, real tree searches and file writes, and real Windows pool
+allocation are not exercised.
