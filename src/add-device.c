@@ -323,6 +323,7 @@ NTSTATUS add_device(device_extension* Vcb, PIRP Irp, KPROCESSOR_MODE processor_m
     di = ExAllocatePoolWithTag(PagedPool, sizeof(struct btrfs_dev_item), ALLOC_TAG);
     if (!di) {
         ERR("out of memory\n");
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto end;
     }
 
