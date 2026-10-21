@@ -98,7 +98,8 @@ if args.bench:
     "static NTSTATUS update_chunk_cache_tree(")))
 # The loaders add stored entries with the plain add_space_entry.
 (out / "load.inc").write_text("".join(function(source, marker) for marker in (
-    "static NTSTATUS load_stored_free_space_tree(", "static NTSTATUS load_free_space_cache(")))
+    "NTSTATUS load_stored_free_space_cache(", "static NTSTATUS load_stored_free_space_tree(",
+    "static NTSTATUS load_free_space_cache(")))
 (out / "btrfs.h").write_text(read("src/btrfs.h"))
 
 flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie"] if args.sanitize else []

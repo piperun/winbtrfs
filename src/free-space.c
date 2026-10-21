@@ -659,6 +659,11 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
         if (le2 != &c->space) {
             space* s2 = CONTAINING_RECORD(le2, space, list_entry);
 
+            if (s2->address < s->address + s->size) {
+                WARN("invalidating cache for chunk %I64x: entry at %I64x overlaps entry at %I64x\n", c->offset, s2->address, s->address);
+                goto clearcache;
+            }
+
             if (s2->address == s->address + s->size) {
                 s->size += s2->size;
 
@@ -853,9 +858,6 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
         }
     }
 
-    if (bmparr)
-        ExFreePool(bmparr);
-
     le = c->space.Flink;
     while (le != &c->space) {
         space* s = CONTAINING_RECORD(le, space, list_entry);
@@ -863,6 +865,11 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
 
         if (le2 != &c->space) {
             space* s2 = CONTAINING_RECORD(le2, space, list_entry);
+
+            if (s2->address < s->address + s->size) {
+                WARN("free space tree for chunk %I64x: entry at %I64x overlaps entry at %I64x\n", c->offset, s2->address, s->address);
+                goto clearcache;
+            }
 
             if (s2->address == s->address + s->size) {
                 s->size += s2->size;
@@ -880,6 +887,9 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
 
         le = le2;
     }
+
+    if (bmparr)
+        ExFreePool(bmparr);
 
     return STATUS_SUCCESS;
 
