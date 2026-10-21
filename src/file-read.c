@@ -164,9 +164,23 @@ NTSTATUS read_file(fcb* fcb, uint8_t* data, uint64_t start, uint64_t length, ULO
                     uint32_t read;
 
                     if (ed->compression == BTRFS_COMPRESS_NONE) {
-                        read = (uint32_t)min(min(len, ext->datalen) - off, length);
+                        // ram_bytes (len) comes from disk and can exceed what the item stores; the rest reads as zeros
+                        uint64_t stored = ext->datalen - offsetof(struct btrfs_file_extent_item, disk_bytenr);
+                        uint32_t copied;
 
-                        RtlCopyMemory(data + bytes_read, (uint8_t*)&ed->disk_bytenr + off, read);
+                        if (off >= len) {
+                            ERR("inline extent at %I64x ends before offset %I64x\n", ext->offset, start + bytes_read);
+                            Status = STATUS_INTERNAL_ERROR;
+                            goto exit;
+                        }
+
+                        read = (uint32_t)min(len - off, length);
+                        copied = off < stored ? (uint32_t)min(stored - off, read) : 0;
+
+                        if (copied > 0)
+                            RtlCopyMemory(data + bytes_read, (uint8_t*)&ed->disk_bytenr + off, copied);
+
+                        RtlZeroMemory(data + bytes_read + copied, read - copied);
                     } else if (ed->compression == BTRFS_COMPRESS_ZLIB || ed->compression == BTRFS_COMPRESS_LZO || ed->compression == BTRFS_COMPRESS_ZSTD) {
                         uint8_t* decomp;
                         bool decomp_alloc;

@@ -5,6 +5,7 @@ static NTSTATUS job_status;
 static bool diskacc;
 enum { JOB_SYNCHRONOUS, JOB_QUEUED, JOB_RUNNING };
 static unsigned job_execution, read_calls, fail_read;
+static uint64_t last_read_address;
 static unsigned premature_input_frees, missing_job_inputs, blocked_waits, completed_jobs;
 static struct { calc_job* job; uintptr_t input; unsigned length; } pending_jobs[16];
 
@@ -59,6 +60,7 @@ static void reclaim_allocations(void) {
 static chunk* get_chunk_from_address(device_extension* v, uint64_t address) { static chunk c; (void)v; (void)address; return &c; }
 static NTSTATUS read_data(device_extension* v,uint64_t address,uint32_t length,void* csum,bool tree,uint8_t* out,chunk* c,void* addr,PIRP irp,unsigned flags,bool mdl,int priority) {
     (void)v;(void)address;(void)csum;(void)tree;(void)c;(void)addr;(void)irp;(void)flags;(void)mdl;(void)priority;
+    last_read_address = address;
     if (++read_calls == fail_read) return STATUS_DATA_ERROR;
     memset(out,0x22,length); return STATUS_SUCCESS;
 }

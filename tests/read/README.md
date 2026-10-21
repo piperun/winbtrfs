@@ -15,9 +15,19 @@ until modeled completion. Two discontiguous compressed extents cover queued
 and running jobs, a later read failure, allocation failures while submitting
 the second job, and preservation of the original error. The ownership checks
 compare allocation ranges and never read freed input. Use `--revision 5ed6211f`
-to reproduce the cleanup ordering bug: 140/172 scenarios pass. The corrected
-implementation passes 172/172 with patterned and zero initialization and
+to reproduce the cleanup ordering bug: 144/184 scenarios pass. The corrected
+implementation passes 184/184 with patterned and zero initialization and
 ASan/UBSan.
+
+Uncompressed inline extents are read from an item whose `ram_bytes` may claim
+more data than the item stores, as a damaged or crafted image can. The bytes
+after the stored data are filled with a marker, so a copy past the item shows
+up in the output. A read must return the stored bytes and zeros for the rest
+of `ram_bytes`, wherever it starts. A regular extent after a short inline
+extent must still be read from its own disk address into its own file range.
+An inline extent that an earlier extent has already read past must fail with
+`STATUS_INTERNAL_ERROR` without copying. Use `--revision 96fe76d4` to
+reproduce the over-read: 176/184 scenarios pass.
 
 Cache, disk, hashing, decompression and worker execution are modeled services.
 The compressed fixtures test the production reader's resource ownership, not

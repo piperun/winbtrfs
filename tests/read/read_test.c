@@ -78,8 +78,87 @@ static void pending_inputs(void) {
     }
     job_execution=JOB_SYNCHRONOUS;fail_allocation=fail_read=0;
 }
+/* Uncompressed inline extents whose ram_bytes may claim more than the item stores, as a damaged or
+ * crafted image can. The bytes after the stored data hold 0xc3, so copying past the item shows up in
+ * the output. Each item stores the ten bytes '0' to '9'. */
+static const uint8_t inline_stored[10]={'0','1','2','3','4','5','6','7','8','9'};
+static extent* make_inline(uint64_t offset,uint64_t ram_bytes) {
+    const size_t inline_start=offsetof(struct btrfs_file_extent_item,disk_bytenr),marker=9000;
+    extent* e=malloc(offsetof(extent,extent_data)+sizeof(struct btrfs_file_extent_item)+marker);if(!e)abort();
+    memset(e,0,offsetof(extent,extent_data));
+    memset(&e->extent_data,0xc3,sizeof(struct btrfs_file_extent_item)+marker);
+    e->offset=offset;
+    e->extent_data.generation=1;e->extent_data.ram_bytes=ram_bytes;
+    e->extent_data.compression=BTRFS_COMPRESS_NONE;e->extent_data.encryption=0;e->extent_data.other_encoding=0;
+    e->extent_data.type=BTRFS_FILE_EXTENT_INLINE;
+    memcpy((uint8_t*)&e->extent_data+inline_start,inline_stored,sizeof(inline_stored));
+    e->datalen=(unsigned)(inline_start+sizeof(inline_stored));
+    return e;
+}
+static void inline_reads(void) {
+    static const struct { const char* name; unsigned ram, size, start, length, got; } reads[]={
+        {"inline extent read",10,10,0,10,10},
+        {"inline extent read",10,10,3,4,4},
+        {"inline extent read",10,10,9,1,1},
+        {"inline extent shorter than ram_bytes, file ends at stored data",30,10,0,10,10},
+        {"inline extent shorter than ram_bytes",30,30,0,30,30},
+        {"inline extent shorter than ram_bytes",30,30,5,20,20},
+        {"inline extent shorter than ram_bytes, read past stored data",30,30,15,5,5},
+        {"inline extent shorter than ram_bytes",40,40,9,31,31},
+        {"inline extent shorter than ram_bytes, read past stored data",40,40,10,1,1},
+        {"inline extent shorter than ram_bytes, read past stored data",100,100,50,20,20},
+    };
+    for(unsigned i=0;i<sizeof(reads)/sizeof(reads[0]);i++) {
+        fcb f;device_extension v;init(&f,&v,reads[i].size,reads[i].size);
+        extent* e=make_inline(0,reads[i].ram);InsertTailList(&f.extents,&e->list_entry);
+        uint8_t data[64];memset(data,0xa5,sizeof(data));ULONG got=123;
+        NTSTATUS status=read_file(&f,data,reads[i].start,reads[i].length,&got,NULL);
+        bool ok=status==STATUS_SUCCESS&&got==reads[i].got&&allocation_count==0;
+        /* Stored bytes are copied; the rest of ram_bytes and of the file reads as zeros. */
+        for(unsigned n=0;n<sizeof(data);n++) {
+            unsigned pos=reads[i].start+n;
+            ok=ok&&data[n]==(n>=reads[i].got?0xa5:pos<sizeof(inline_stored)?inline_stored[pos]:0);
+        }
+        record(ok,reads[i].name,reads[i].start,reads[i].length,got,reads[i].got);
+        if(!ok)printf("  ram_bytes=%u size=%u status=%08x first bytes %02x %02x %02x\n",reads[i].ram,reads[i].size,
+            (unsigned)status,data[0],data[reads[i].length>10?10:0],data[reads[i].length?reads[i].length-1:0]);
+        reclaim_allocations();free(e);
+    }
+    /* The next extent starts where ram_bytes ends, not where the stored data ends. */
+    {
+        fcb f;device_extension v;init(&f,&v,40,40);
+        extent* e=make_inline(0,30);
+        extent reg={.offset=30,.extent_data={.type=BTRFS_FILE_EXTENT_REG,.compression=BTRFS_COMPRESS_NONE,.num_bytes=10,.ram_bytes=10,
+            .disk_bytenr=1048576,.disk_num_bytes=4096}};
+        InsertTailList(&f.extents,&e->list_entry);InsertTailList(&f.extents,&reg.list_entry);
+        uint8_t data[64];memset(data,0xa5,sizeof(data));ULONG got=0;read_calls=0;last_read_address=0;
+        NTSTATUS status=read_file(&f,data,0,40,&got,NULL);
+        bool ok=status==STATUS_SUCCESS&&got==40&&allocation_count==0&&read_calls==1&&last_read_address==1048576;
+        for(unsigned n=0;n<sizeof(data);n++)
+            ok=ok&&data[n]==(n<10?inline_stored[n]:n<30?0:n<40?0x22:0xa5);
+        record(ok,"regular extent after a short inline extent",0,40,got,40);
+        if(!ok)printf("  status=%08x reads=%u address=%llx bytes 10 and 30: %02x %02x\n",(unsigned)status,read_calls,
+            (unsigned long long)last_read_address,data[10],data[30]);
+        reclaim_allocations();free(e);
+    }
+    /* An earlier extent that runs past the inline extent's end leaves nothing of it to read. */
+    {
+        fcb f;device_extension v;init(&f,&v,8292,8292);
+        extent reg={.offset=0,.extent_data={.type=BTRFS_FILE_EXTENT_REG,.compression=BTRFS_COMPRESS_NONE,.num_bytes=8192,.ram_bytes=8192,
+            .disk_bytenr=1048576,.disk_num_bytes=8192}};
+        extent* e=make_inline(100,50);
+        InsertTailList(&f.extents,&reg.list_entry);InsertTailList(&f.extents,&e->list_entry);
+        static uint8_t data[8448];memset(data,0xa5,sizeof(data));ULONG got=123;read_calls=0;
+        NTSTATUS status=read_file(&f,data,0,8292,&got,NULL);
+        bool ok=status==STATUS_INTERNAL_ERROR&&got==0&&allocation_count==0&&read_calls==0;
+        for(unsigned n=0;n<sizeof(data);n++)ok=ok&&data[n]==0xa5;
+        record(ok,"inline extent overlapped by an earlier extent",0,8292,got,0);
+        if(!ok)printf("  status=%08x reads=%u byte 8192: %02x\n",(unsigned)status,read_calls,data[8192]);
+        reclaim_allocations();free(e);
+    }
+}
 int main(void) {
-    eof_reads();compressed_jobs();pending_inputs();
+    eof_reads();compressed_jobs();pending_inputs();inline_reads();
     printf("%u/%u file read scenarios passed\n",cases-failures,cases);
     return failures!=0;
 }
