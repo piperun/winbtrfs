@@ -233,12 +233,6 @@ static NTSTATUS protect_superblocks(chunk* c) {
                                NULL);
 }
 
-static void load_free_space_bitmap(device_extension* Vcb, chunk* c, uint64_t offset, void* data,
-                                   uint64_t* total_space) {
-    (void)Vcb; (void)c; (void)offset; (void)data; (void)total_space;
-    CHECK(false); /* the v1 caches here hold no bitmaps */
-}
-
 /* Takes the chunk's header item out of the root tree, so a later search does not find it. */
 static NTSTATUS delete_tree_item(device_extension* Vcb, traverse_ptr* tp) {
     CHECK(Vcb == &volume && tp->tree == &root_tree.t && tp->item == &root_items[1]);
@@ -649,6 +643,27 @@ static void set_up_protected_cache(void) {
     superblock_stripe = (range){ SUPERBLOCK, SUPERBLOCK + STRIPE };
 }
 
+/* The same with the last two ranges in a bitmap entry after the extent entries. The
+   bitmap fills the sector after the entries and covers the chunk, with a set bit for
+   each free sector. */
+static void set_up_bitmap_cache(void) {
+    _Static_assert(LENGTH == SECTOR * 8 * SECTOR, "a sector of bitmap covers the chunk");
+    set_up_cache(protected_ranges, 2);
+    struct btrfs_free_space_entry e = { BASE, 0, BTRFS_FREE_SPACE_BITMAP };
+    uint8_t* bitmap = cache_data + SECTOR;
+    for (size_t i = 2; i < COUNT(protected_ranges); i++) {
+        for (uint64_t a = protected_ranges[i].start; a < protected_ranges[i].end; a += SECTOR) {
+            uint64_t bit = (a - BASE) / SECTOR;
+            bitmap[bit / 8] |= 1 << (bit % 8);
+            e.bytes += SECTOR;
+        }
+    }
+    memcpy(cache_data + 2 * sizeof(uint32_t) + sizeof(uint64_t) + 2 * sizeof(e), &e, sizeof(e));
+    header.num_entries = 3;
+    header.num_bitmaps = 1;
+    superblock_stripe = (range){ SUPERBLOCK, SUPERBLOCK + STRIPE };
+}
+
 /* No free space tree and no v1 cache from the last transaction, so the loader
    regenerates the free space from the extent tree. */
 static void set_up_no_stored_space(void) {
@@ -665,6 +680,9 @@ static void set_up_no_stored_space(void) {
 /* The buffer the cache file is read into, its 4 entries, and the superblock stripe
    while it is counted. */
 #define CACHE_ALLOCATIONS (1 + 4 + 1)
+/* The buffer, the 2 extent entries, an entry for each of the bitmap's 2 runs, and the
+   superblock stripe while it is counted. */
+#define BITMAP_CACHE_ALLOCATIONS (1 + 2 + 2 + 1)
 /* An entry for each free range and the entry split off below the superblock stripe. */
 #define REGENERATED_ALLOCATIONS (3 + 1)
 
@@ -684,7 +702,8 @@ static void check_loaded(bool regenerated, bool cached) {
 
 /* Fails each allocation of a load in turn, then loads the chunk again, as callers do
    after a failure. The failed load must return the failure and leave the chunk as it
-   found it, and the next load must give what a load that failed nothing gives. */
+   found it, and the next load must give what a load that failed nothing gives. A
+   load that succeeds despite the failure is reported with what it loaded. */
 static void fail_each_allocation(void (*set_up)(void), unsigned count, bool regenerated, bool cached) {
     char text[64];
     set_up();
@@ -697,7 +716,15 @@ static void fail_each_allocation(void (*set_up)(void), unsigned count, bool rege
         fail_allocation = k;
         snprintf(text, sizeof(text), "allocation %u of %u failed: ", k, count);
         step = text;
-        CHECK(load_cache_chunk(&volume, &load_chunk, NULL) == STATUS_INSUFFICIENT_RESOURCES);
+        NTSTATUS status = load_cache_chunk(&volume, &load_chunk, NULL);
+        if (status == STATUS_SUCCESS) {
+            fprintf(stderr, "%sload succeeded, expected STATUS_INSUFFICIENT_RESOURCES\n", step);
+            failures++;
+            check_loaded(regenerated, cached);
+            free_entries();
+            continue;
+        }
+        CHECK(status == STATUS_INSUFFICIENT_RESOURCES);
         CHECK(allocations == k);
         check_unloaded(false);
         fail_allocation = 0;
@@ -721,6 +748,10 @@ static void mixed_tree_allocation_failures(void) {
 
 static void cache_allocation_failures(void) {
     fail_each_allocation(set_up_protected_cache, CACHE_ALLOCATIONS, false, true);
+}
+
+static void bitmap_cache_allocation_failures(void) {
+    fail_each_allocation(set_up_bitmap_cache, BITMAP_CACHE_ALLOCATIONS, false, true);
 }
 
 static void regenerated_allocation_failures(void) {
@@ -802,6 +833,7 @@ static const struct { const char* name; void (*run)(void); } cases[] = {
     { "load-tree-allocation-failures", tree_allocation_failures },
     { "load-tree-mixed-allocation-failures", mixed_tree_allocation_failures },
     { "load-cache-allocation-failures", cache_allocation_failures },
+    { "load-cache-bitmap-allocation-failures", bitmap_cache_allocation_failures },
     { "load-cache-discard-failures", cache_discard_failures },
     { "load-regenerated-allocation-failures", regenerated_allocation_failures },
     { "load-protect-failure-marks", protect_failure_marks },

@@ -96,11 +96,14 @@ if args.bench:
 (out / "cache.inc").write_text("".join(function(source, marker) for marker in (
     "static NTSTATUS copy_space_list(", "static NTSTATUS update_chunk_cache(",
     "static NTSTATUS update_chunk_cache_tree(")))
-# The loaders add stored entries with the plain add_space_entry. load_cache_chunk
-# runs them, and the test's protect_superblocks takes the superblock stripes off the
+# The loaders add stored entries with the plain add_space_entry, the v1 loader the
+# runs of a bitmap through load_free_space_bitmap. That returned void before it
+# reported failures, so its marker takes any return type. load_cache_chunk runs the
+# loaders, and the test's protect_superblocks takes the superblock stripes off the
 # loaded entries with space_list_subtract.
+bitmap = re.search(r"static \w+ load_free_space_bitmap\(", source)[0]
 (out / "load.inc").write_text("".join(function(source, marker) for marker in (
-    "NTSTATUS load_stored_free_space_cache(", "static NTSTATUS load_stored_free_space_tree(",
+    bitmap, "NTSTATUS load_stored_free_space_cache(", "static NTSTATUS load_stored_free_space_tree(",
     "static NTSTATUS load_free_space_cache(", "NTSTATUS load_cache_chunk(",
     "NTSTATUS space_list_subtract(")))
 (out / "btrfs.h").write_text(read("src/btrfs.h"))

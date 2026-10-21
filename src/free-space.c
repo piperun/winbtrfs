@@ -251,10 +251,11 @@ size:
     return STATUS_SUCCESS;
 }
 
-static void load_free_space_bitmap(device_extension* Vcb, chunk* c, uint64_t offset, void* data, uint64_t* total_space) {
+static NTSTATUS load_free_space_bitmap(device_extension* Vcb, chunk* c, uint64_t offset, void* data, uint64_t* total_space) {
     RTL_BITMAP bmph;
     uint32_t i, len, *dwords = data;
     ULONG runlength, index;
+    NTSTATUS Status;
 
     // flip bits
     for (i = 0; i < Vcb->superblock.sectorsize / sizeof(uint32_t); i++) {
@@ -284,12 +285,19 @@ static void load_free_space_bitmap(device_extension* Vcb, chunk* c, uint64_t off
         addr = offset + (index << Vcb->sector_shift);
         length = runlength << Vcb->sector_shift;
 
-        add_space_entry(&c->space, &c->space_size, addr, length);
+        Status = add_space_entry(&c->space, &c->space_size, addr, length);
+        if (!NT_SUCCESS(Status)) {
+            ERR("add_space_entry returned %08lx\n", Status);
+            return Status;
+        }
+
         index += runlength;
         *total_space += length;
 
         runlength = RtlFindNextForwardRunClear(&bmph, index, &index);
     }
+
+    return STATUS_SUCCESS;
 }
 
 static void order_space_entry(space* s, LIST_ENTRY* list_size) {
@@ -629,7 +637,13 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
 
             if (fse->type == BTRFS_FREE_SPACE_BITMAP) {
                 // FIXME - make sure we don't overflow the buffer here
-                load_free_space_bitmap(Vcb, c, fse->offset, &data[bmpnum << Vcb->sector_shift], &total_space);
+                Status = load_free_space_bitmap(Vcb, c, fse->offset, &data[bmpnum << Vcb->sector_shift], &total_space);
+                if (!NT_SUCCESS(Status)) {
+                    ERR("load_free_space_bitmap returned %08lx\n", Status);
+                    ExFreePool(data);
+                    goto end;
+                }
+
                 bmpnum++;
             }
 
