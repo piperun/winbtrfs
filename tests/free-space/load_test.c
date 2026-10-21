@@ -21,8 +21,8 @@ struct chunk {
     struct btrfs_chunk* chunk_item;
     uint64_t offset, used;
     fcb *cache, *old_cache;
-    LIST_ENTRY space, space_size;
-    bool using_fst_bitmaps;
+    LIST_ENTRY space, space_size, deleting;
+    bool cache_loaded, changed, space_changed, using_fst_bitmaps;
 };
 typedef struct {
     struct btrfs_super_block superblock;
@@ -33,6 +33,7 @@ typedef struct {
 } device_extension;
 
 #define STATUS_NOT_FOUND ((NTSTATUS)0xc0000225)
+#define STATUS_INTERNAL_ERROR ((NTSTATUS)0xc00000e5)
 #define TRACE(...) ((void)0)
 #define WARN(...) ((void)0)
 #define RtlCopyMemory(d, s, n) memcpy(d, s, n)
@@ -51,10 +52,11 @@ static uint64_t sector_align(uint64_t n, uint64_t a) {
     return n & (a - 1) ? (n + a) & ~(a - 1) : n;
 }
 
-static unsigned long long pool_live;
+static unsigned long long allocations, fail_allocation, pool_live;
 
 static void* ExAllocatePoolWithTag(unsigned pool, size_t size, unsigned tag) {
     CHECK(pool == PagedPool && tag == ALLOC_TAG && size > 0);
+    if (++allocations == fail_allocation) return NULL;
     void* p = malloc(size);
     CHECK(p != NULL);
     memset(p, 0xa5, size);
@@ -99,6 +101,8 @@ static ULONG RtlFindFirstRunClear(RTL_BITMAP* b, ULONG* start) { return RtlFindN
 #define BITMAPS 16
 #define LENGTH (BITMAPS * BITMAP_LENGTH) /* the v1 loader discards caches of chunks under 100 MB */
 #define USED 0x34000 /* the extents below */
+#define SUPERBLOCK (BASE + 0x4000000) /* a superblock copy, in the last free range */
+#define STRIPE 0x10000 /* the stripe around a superblock copy, which allocations must skip */
 #define CACHE_INODE 0x101
 #define CACHE_GENERATION 41
 
@@ -119,16 +123,24 @@ static const range free_ranges[] = {
     { BASE + 0x18000, BASE + 0x20000 },
     { BASE + 0x40000, BASE + LENGTH },
 };
+/* The free ranges without the stripe around the superblock copy. */
+static const range protected_ranges[] = {
+    { BASE + 0x10000, BASE + 0x14000 },
+    { BASE + 0x18000, BASE + 0x20000 },
+    { BASE + 0x40000, SUPERBLOCK },
+    { SUPERBLOCK + STRIPE, BASE + LENGTH },
+};
 
 static device_extension volume;
 static root root_tree, space_tree, extent_tree;
 static struct btrfs_free_space_header header;
 /* The v1 cache header items of the chunk and of the chunks around it. */
-static tree_data root_items[] = {
+static const tree_data root_template[] = {
     { { BTRFS_FREE_SPACE_OBJECTID, 0, BASE - LENGTH }, 0, NULL },
     { { BTRFS_FREE_SPACE_OBJECTID, 0, BASE }, sizeof(header), (uint8_t*)&header },
     { { BTRFS_FREE_SPACE_OBJECTID, 0, BASE + LENGTH }, 0, NULL },
 };
+static tree_data root_items[COUNT(root_template)];
 static tree_data space_items[BITMAPS + 4];
 static struct btrfs_free_space_info info;
 static uint8_t bitmaps[BITMAPS][BITMAP_LENGTH / SECTOR / 8];
@@ -137,6 +149,13 @@ static chunk load_chunk;
 static fcb cache_file;
 static uint8_t cache_data[2 * SECTOR];
 static unsigned extent_searches, header_deletes, cache_excises, dirty_marks, failures;
+/* What deleting the header item and excising the cache's extents return. */
+static NTSTATUS delete_status, excise_status;
+/* The stripe around a superblock copy in the chunk, or an empty range. */
+static range superblock_stripe;
+/* Whether a nocow write marks the chunk changed, without its chunk lock, while
+   protect_superblocks runs. */
+static bool write_during_protect;
 
 /* As the production search: the item with the search key, else the last item before
    it, else the first item. */
@@ -172,9 +191,9 @@ static NTSTATUS open_fcb(device_extension* Vcb, root* subvol, uint64_t inode, ui
     return STATUS_SUCCESS;
 }
 
+/* The loader releases the cache file it opened when it cannot read it. */
 static void free_fcb(fcb* f) {
-    (void)f;
-    CHECK(false); /* the chunk keeps the cache file it opened */
+    CHECK(f == &cache_file && load_chunk.cache == f);
 }
 
 static NTSTATUS read_file(fcb* f, uint8_t* data, uint64_t start, uint64_t length, ULONG* pbr, PIRP Irp) {
@@ -189,11 +208,29 @@ static uint32_t calc_crc32c(uint32_t seed, uint8_t* msg, ULONG msglen) {
     return seed;
 }
 
-/* No superblock copy lies in the chunk. */
+/* As the production function, it allocates an entry for each superblock stripe in the
+   chunk while it counts them. */
 static NTSTATUS get_superblock_size(chunk* c, uint64_t* size) {
     CHECK(c == &load_chunk);
-    *size = 0;
+    if (superblock_stripe.end > superblock_stripe.start) {
+        uint64_t* stripe = ExAllocatePoolWithTag(PagedPool, sizeof(*stripe), ALLOC_TAG);
+        if (!stripe) return STATUS_INSUFFICIENT_RESOURCES;
+        ExFreePool(stripe);
+    }
+    *size = superblock_stripe.end - superblock_stripe.start;
     return STATUS_SUCCESS;
+}
+
+NTSTATUS space_list_subtract(chunk* c, uint64_t address, uint64_t length, LIST_ENTRY* rollback);
+
+/* As the production function, it takes the stripe around each superblock copy in the
+   chunk off its lists with space_list_subtract. */
+static NTSTATUS protect_superblocks(chunk* c) {
+    CHECK(c == &load_chunk);
+    if (write_during_protect) c->changed = true;
+    if (superblock_stripe.end == superblock_stripe.start) return STATUS_SUCCESS;
+    return space_list_subtract(c, superblock_stripe.start, superblock_stripe.end - superblock_stripe.start,
+                               NULL);
 }
 
 static void load_free_space_bitmap(device_extension* Vcb, chunk* c, uint64_t offset, void* data,
@@ -202,8 +239,12 @@ static void load_free_space_bitmap(device_extension* Vcb, chunk* c, uint64_t off
     CHECK(false); /* the v1 caches here hold no bitmaps */
 }
 
+/* Takes the chunk's header item out of the root tree, so a later search does not find it. */
 static NTSTATUS delete_tree_item(device_extension* Vcb, traverse_ptr* tp) {
-    CHECK(Vcb == &volume && tp->item == &root_items[1]);
+    CHECK(Vcb == &volume && tp->tree == &root_tree.t && tp->item == &root_items[1]);
+    if (delete_status != STATUS_SUCCESS) return delete_status;
+    root_items[1] = root_items[2];
+    root_tree.t.count--;
     header_deletes++;
     return STATUS_SUCCESS;
 }
@@ -212,13 +253,13 @@ static NTSTATUS excise_extents(device_extension* Vcb, fcb* f, uint64_t start, ui
                                LIST_ENTRY* rollback) {
     (void)Irp;
     CHECK(Vcb == &volume && f == &cache_file && start == 0 && end == sizeof(cache_data) && rollback);
+    if (excise_status != STATUS_SUCCESS) return excise_status;
     cache_excises++;
     return STATUS_SUCCESS;
 }
 
 static void do_rollback(device_extension* Vcb, LIST_ENTRY* rollback) {
-    (void)Vcb; (void)rollback;
-    CHECK(false); /* excise_extents does not fail */
+    CHECK(Vcb == &volume && IsListEmpty(rollback)); /* excise_extents adds nothing to roll back */
 }
 
 static void clear_rollback(LIST_ENTRY* rollback) { CHECK(IsListEmpty(rollback)); }
@@ -268,10 +309,16 @@ static void set_up_chunk(void) {
     load_chunk = (chunk){ .chunk_item = &chunk_item, .offset = BASE, .used = USED };
     InitializeListHead(&load_chunk.space);
     InitializeListHead(&load_chunk.space_size);
+    InitializeListHead(&load_chunk.deleting);
+    memcpy(root_items, root_template, sizeof(root_items));
     root_tree.t = (tree){ root_items, COUNT(root_items) };
     space_tree.t = (tree){ space_items, 0 };
     extent_tree.t = (tree){ extent_items, COUNT(extent_items) };
-    extent_searches = header_deletes = cache_excises = dirty_marks = failures = 0;
+    extent_searches = header_deletes = cache_excises = dirty_marks = 0;
+    allocations = fail_allocation = 0;
+    delete_status = excise_status = STATUS_SUCCESS;
+    superblock_stripe = (range){ 0, 0 };
+    write_during_protect = false;
 }
 
 /* A free space tree whose info item for the chunk has the given flags; each case adds
@@ -284,14 +331,18 @@ static void set_up_tree(uint32_t flags) {
     add_item(BASE, BTRFS_FREE_SPACE_INFO_KEY, LENGTH, &info, sizeof(info));
 }
 
-static NTSTATUS load_tree(void) {
+static void end_tree(void) {
     add_item(BASE + LENGTH, BTRFS_FREE_SPACE_INFO_KEY, LENGTH, &info, sizeof(info)); /* the chunk after */
+}
+
+static NTSTATUS load_tree(void) {
+    end_tree();
     return load_free_space_cache(&volume, &load_chunk, NULL);
 }
 
 /* A v1 cache written in the last transaction, holding the ranges as extent entries:
    two sector checksums, the generation, then the entries. */
-static NTSTATUS load_cache(const range* r, size_t count) {
+static void set_up_cache(const range* r, size_t count) {
     set_up_chunk();
     volume.superblock.generation = CACHE_GENERATION + 1;
     volume.superblock.cache_generation = CACHE_GENERATION;
@@ -306,8 +357,16 @@ static NTSTATUS load_cache(const range* r, size_t count) {
         struct btrfs_free_space_entry e = { r[i].start, r[i].end - r[i].start, BTRFS_FREE_SPACE_EXTENT };
         memcpy(at, &e, sizeof(e));
     }
+}
+
+static NTSTATUS load_cache(const range* r, size_t count) {
+    set_up_cache(r, count);
     return load_free_space_cache(&volume, &load_chunk, NULL);
 }
+
+/* Printed before each failure the checks report, to name the step of a case that
+   loads the chunk many times. */
+static const char* step = "";
 
 static void print_ranges(const char* what, const range* r, size_t count) {
     fprintf(stderr, "%s", what);
@@ -316,17 +375,24 @@ static void print_ranges(const char* what, const range* r, size_t count) {
     fprintf(stderr, "\n");
 }
 
+/* The ranges of the chunk's address list, in list order. */
+static size_t list_ranges(range* got, size_t max) {
+    size_t n = 0;
+    for (LIST_ENTRY* le = load_chunk.space.Flink; le != &load_chunk.space; le = le->Flink) {
+        space* s = CONTAINING_RECORD(le, space, list_entry);
+        CHECK(n < max);
+        got[n++] = (range){ s->address, s->address + s->size };
+    }
+    return n;
+}
+
 /* Reports an address list that does not hold exactly the given ranges, in address
    order. The size list must hold the same entries, in non-increasing size order. */
 static void check_space(const range* want, size_t count) {
     range got[32];
-    size_t n = 0;
-    for (LIST_ENTRY* le = load_chunk.space.Flink; le != &load_chunk.space; le = le->Flink) {
-        space* s = CONTAINING_RECORD(le, space, list_entry);
-        CHECK(n < COUNT(got));
-        got[n++] = (range){ s->address, s->address + s->size };
-    }
+    size_t n = list_ranges(got, COUNT(got));
     if (n != count || memcmp(got, want, n * sizeof(*got)) != 0) {
+        fprintf(stderr, "%s", step);
         print_ranges("address list holds", got, n);
         print_ranges("expected", want, count);
         failures++;
@@ -350,7 +416,7 @@ static void check_space(const range* want, size_t count) {
 static void check_regenerated(bool regenerated) {
     unsigned want = regenerated;
     if (extent_searches != want) {
-        fprintf(stderr, "extent tree searched %u times, expected %u\n", extent_searches, want);
+        fprintf(stderr, "%sextent tree searched %u times, expected %u\n", step, extent_searches, want);
         failures++;
     }
 }
@@ -365,8 +431,32 @@ static void check_cache_discarded(bool discarded) {
                 load_chunk.cache == &cache_file && !load_chunk.old_cache;
     CHECK(gone || kept);
     if (gone != discarded) {
-        fprintf(stderr, "cache %s, expected it %s\n", gone ? "discarded" : "kept",
+        fprintf(stderr, "%scache %s, expected it %s\n", step, gone ? "discarded" : "kept",
                 discarded ? "discarded" : "kept");
+        failures++;
+    }
+}
+
+/* Reports a failed load that left entries or other allocations behind, or changed the
+   chunk's space_changed from what it was before the load. The next load must start
+   from an empty list, and the flush writes the lists of a chunk with space_changed
+   set out as its free space. */
+static void check_unloaded(bool space_changed) {
+    CHECK(!load_chunk.cache_loaded);
+    if (!IsListEmpty(&load_chunk.space)) {
+        range got[32];
+        size_t n = list_ranges(got, COUNT(got));
+        fprintf(stderr, "%s", step);
+        print_ranges("address list holds", got, n);
+        fprintf(stderr, "expected none\n");
+        failures++;
+    } else if (pool_live) {
+        fprintf(stderr, "%spool allocations not freed: %llu\n", step, pool_live);
+        failures++;
+    }
+    if (load_chunk.space_changed != space_changed) {
+        fprintf(stderr, "%sspace_changed %s, expected %s\n", step,
+                load_chunk.space_changed ? "set" : "clear", space_changed ? "set" : "clear");
         failures++;
     }
 }
@@ -388,17 +478,22 @@ static void take(range taken) {
 }
 
 /* Frees the chunk's entries; anything still allocated after that is a leak. */
-static void tear_down(void) {
+static void free_entries(void) {
     while (!IsListEmpty(&load_chunk.space)) {
         space* s = CONTAINING_RECORD(RemoveHeadList(&load_chunk.space), space, list_entry);
         RemoveEntryList(&s->list_entry_size);
         ExFreePool(s);
     }
-    CHECK(IsListEmpty(&load_chunk.space_size));
+    CHECK(IsListEmpty(&load_chunk.space_size) && IsListEmpty(&load_chunk.deleting));
     if (pool_live) {
-        fprintf(stderr, "pool allocations not freed: %llu\n", pool_live);
+        fprintf(stderr, "%spool allocations not freed: %llu\n", step, pool_live);
+        pool_live = 0;
         failures++;
     }
+}
+
+static void tear_down(void) {
+    free_entries();
     CHECK(failures == 0);
 }
 
@@ -527,6 +622,173 @@ static void cache_overlapping_entries(void) {
     tear_down();
 }
 
+/* The bitmap items of load-tree, with a superblock copy in the chunk. */
+static void set_up_bitmap_tree(void) {
+    set_up_tree(BTRFS_FREE_SPACE_USING_BITMAPS);
+    add_bitmaps(0, BITMAPS);
+    end_tree();
+    superblock_stripe = (range){ SUPERBLOCK, SUPERBLOCK + STRIPE };
+}
+
+/* Extent items over the first bitmap's span and bitmap items for the rest, so the
+   loader allocates its bitmap buffer after loading entries. */
+static void set_up_mixed_tree(void) {
+    set_up_tree(BTRFS_FREE_SPACE_USING_BITMAPS);
+    add_extent(BASE + 0x10000, BASE + 0x14000);
+    add_extent(BASE + 0x18000, BASE + 0x20000);
+    add_extent(BASE + 0x40000, BASE + BITMAP_LENGTH);
+    add_bitmaps(1, BITMAPS);
+    end_tree();
+    superblock_stripe = (range){ SUPERBLOCK, SUPERBLOCK + STRIPE };
+}
+
+/* A v1 cache that leaves out the superblock stripe, which the loader counts with
+   get_superblock_size instead. */
+static void set_up_protected_cache(void) {
+    set_up_cache(protected_ranges, COUNT(protected_ranges));
+    superblock_stripe = (range){ SUPERBLOCK, SUPERBLOCK + STRIPE };
+}
+
+/* No free space tree and no v1 cache from the last transaction, so the loader
+   regenerates the free space from the extent tree. */
+static void set_up_no_stored_space(void) {
+    set_up_chunk();
+    superblock_stripe = (range){ SUPERBLOCK, SUPERBLOCK + STRIPE };
+}
+
+/* The bitmap buffer, 3 entries from the first bitmap and 1 from each other, and the
+   entry split off below the superblock stripe. */
+#define BITMAP_TREE_ALLOCATIONS (1 + 3 + (BITMAPS - 1) + 1)
+/* An entry for each extent item, the bitmap buffer, 1 entry from each bitmap and the
+   entry split off below the superblock stripe. */
+#define MIXED_TREE_ALLOCATIONS (3 + 1 + (BITMAPS - 1) + 1)
+/* The buffer the cache file is read into, its 4 entries, and the superblock stripe
+   while it is counted. */
+#define CACHE_ALLOCATIONS (1 + 4 + 1)
+/* An entry for each free range and the entry split off below the superblock stripe. */
+#define REGENERATED_ALLOCATIONS (3 + 1)
+
+/* The chunk must be loaded with the free ranges less the superblock stripe, from the
+   extent tree or not, and keep its v1 cache if it has one. It must keep the
+   space_changed mark protect_superblocks sets: only a failed load takes it back. */
+static void check_loaded(bool regenerated, bool cached) {
+    CHECK(load_chunk.cache_loaded);
+    check_space(protected_ranges, COUNT(protected_ranges));
+    check_regenerated(regenerated);
+    if (cached) check_cache_discarded(false);
+    if (!load_chunk.space_changed) {
+        fprintf(stderr, "%sspace_changed clear after the load, expected set\n", step);
+        failures++;
+    }
+}
+
+/* Fails each allocation of a load in turn, then loads the chunk again, as callers do
+   after a failure. The failed load must return the failure and leave the chunk as it
+   found it, and the next load must give what a load that failed nothing gives. */
+static void fail_each_allocation(void (*set_up)(void), unsigned count, bool regenerated, bool cached) {
+    char text[64];
+    set_up();
+    CHECK(load_cache_chunk(&volume, &load_chunk, NULL) == STATUS_SUCCESS);
+    CHECK(allocations == count);
+    check_loaded(regenerated, cached);
+    free_entries();
+    for (unsigned k = 1; k <= count; k++) {
+        set_up();
+        fail_allocation = k;
+        snprintf(text, sizeof(text), "allocation %u of %u failed: ", k, count);
+        step = text;
+        CHECK(load_cache_chunk(&volume, &load_chunk, NULL) == STATUS_INSUFFICIENT_RESOURCES);
+        CHECK(allocations == k);
+        check_unloaded(false);
+        fail_allocation = 0;
+        extent_searches = 0;
+        snprintf(text, sizeof(text), "load after allocation %u of %u failed: ", k, count);
+        CHECK(load_cache_chunk(&volume, &load_chunk, NULL) == STATUS_SUCCESS);
+        check_loaded(regenerated, cached);
+        free_entries();
+    }
+    step = "";
+    CHECK(failures == 0);
+}
+
+static void tree_allocation_failures(void) {
+    fail_each_allocation(set_up_bitmap_tree, BITMAP_TREE_ALLOCATIONS, false, false);
+}
+
+static void mixed_tree_allocation_failures(void) {
+    fail_each_allocation(set_up_mixed_tree, MIXED_TREE_ALLOCATIONS, false, false);
+}
+
+static void cache_allocation_failures(void) {
+    fail_each_allocation(set_up_protected_cache, CACHE_ALLOCATIONS, false, true);
+}
+
+static void regenerated_allocation_failures(void) {
+    fail_each_allocation(set_up_no_stored_space, REGENERATED_ALLOCATIONS, true, false);
+}
+
+/* Loads that fail in protect_superblocks, as it takes the stripe out of the free space
+   regenerated from the extent tree. A chunk marked space_changed before the load must
+   stay marked, and so must a chunk a nocow write marks changed while
+   protect_superblocks runs. */
+static void protect_failure_marks(void) {
+    set_up_no_stored_space();
+    load_chunk.space_changed = true;
+    fail_allocation = REGENERATED_ALLOCATIONS;
+    step = "chunk marked before the load: ";
+    CHECK(load_cache_chunk(&volume, &load_chunk, NULL) == STATUS_INSUFFICIENT_RESOURCES);
+    check_unloaded(true);
+    free_entries();
+    set_up_no_stored_space();
+    write_during_protect = true;
+    fail_allocation = REGENERATED_ALLOCATIONS;
+    step = "chunk marked during the load: ";
+    CHECK(load_cache_chunk(&volume, &load_chunk, NULL) == STATUS_INSUFFICIENT_RESOURCES);
+    check_unloaded(false);
+    if (!load_chunk.changed) {
+        fprintf(stderr, "%schanged clear, expected set\n", step);
+        failures++;
+    }
+    free_entries();
+    step = "";
+    CHECK(failures == 0);
+}
+
+/* The cache's entries add up to less than the chunk's free space, so the loader
+   discards the cache after loading them. Deleting its header item or excising its
+   extents fails in turn: the load must return the failure and leave the chunk as it
+   found it. The next load regenerates the free space from the extent tree, discarding
+   the cache again or finding its header item gone. */
+static void cache_discard_failures(void) {
+    static const range entries[] = {
+        { BASE + 0x10000, BASE + 0x14000 },
+        { BASE + 0x18000, BASE + 0x20000 },
+    };
+    struct { const char* what; NTSTATUS* status; NTSTATUS failure; } calls[] = {
+        { "deleting the header item", &delete_status, STATUS_INTERNAL_ERROR },
+        { "excising the cache's extents", &excise_status, STATUS_INSUFFICIENT_RESOURCES },
+    };
+    char text[64];
+    for (size_t i = 0; i < COUNT(calls); i++) {
+        set_up_cache(entries, COUNT(entries));
+        *calls[i].status = calls[i].failure;
+        snprintf(text, sizeof(text), "%s failed: ", calls[i].what);
+        step = text;
+        CHECK(load_cache_chunk(&volume, &load_chunk, NULL) == calls[i].failure);
+        check_unloaded(false);
+        *calls[i].status = STATUS_SUCCESS;
+        extent_searches = 0;
+        snprintf(text, sizeof(text), "load after %s failed: ", calls[i].what);
+        CHECK(load_cache_chunk(&volume, &load_chunk, NULL) == STATUS_SUCCESS);
+        CHECK(load_chunk.cache_loaded);
+        check_space(free_ranges, COUNT(free_ranges));
+        check_regenerated(true);
+        free_entries();
+    }
+    step = "";
+    CHECK(failures == 0);
+}
+
 static const struct { const char* name; void (*run)(void); } cases[] = {
     { "load-tree", tree_loaded },
     { "load-tree-extents", tree_extents_loaded },
@@ -537,6 +799,12 @@ static const struct { const char* name; void (*run)(void); } cases[] = {
     { "load-tree-extent-over-bitmap", tree_extent_over_bitmap },
     { "load-cache", cache_loaded },
     { "load-cache-overlapping-entries", cache_overlapping_entries },
+    { "load-tree-allocation-failures", tree_allocation_failures },
+    { "load-tree-mixed-allocation-failures", mixed_tree_allocation_failures },
+    { "load-cache-allocation-failures", cache_allocation_failures },
+    { "load-cache-discard-failures", cache_discard_failures },
+    { "load-regenerated-allocation-failures", regenerated_allocation_failures },
+    { "load-protect-failure-marks", protect_failure_marks },
 };
 
 int main(int argc, char** argv) {

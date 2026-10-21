@@ -15,31 +15,42 @@ Add `--revision` to run the sources before each fix. Each revision also fails
 the cases of the fixes after it.
 
 - `96fe76d4` merges by searching from the head of the list for every freed
-  range: 29/49 cases pass. The four step-count cases that merge many ranges
+  range: 29/55 cases pass. The four step-count cases that merge many ranges
   fail; the large merge takes 400,020,000 address-list steps against a limit
   of 160,000.
 - `23c741d8` runs `update_chunk_cache` before it freed the lists it copies:
-  33/49 cases pass. A written cache leaves 8 allocations behind, the 5 merged
+  33/55 cases pass. A written cache leaves 8 allocations behind, the 5 merged
   entries and the 3 copied freed ranges, and so does a failed flush. Failing an
   allocation while copying either list leaves the entries copied before it, and
   failing one in the merge leaves both copies.
 - `5c9895e7` runs `update_chunk_cache_tree` before it freed its copy of the
-  space list on failure: 36/49 cases pass. Failing the second or third
+  space list on failure: 36/55 cases pass. Failing the second or third
   allocation, in the copy, leaves 1 or 2 entries behind, and failing the fourth
   or fifth, in the merge, leaves 3 or 4.
 - `550f234e` runs `add_space_entry` before it linked an entry at the last
-  entry's address into the address list: 37/49 cases pass. With a size list the
+  entry's address into the address list: 37/55 cases pass. With a size list the
   entry is only on the size list, which still offers its range after an
   allocation took it; without one the entry is on neither list.
 - `03af14bb` runs `load_stored_free_space_tree` before it freed what it had
-  loaded when it rejects a bitmap item: 43/49 cases pass. The entries of the
+  loaded when it rejects a bitmap item: 43/55 cases pass. The entries of the
   first bitmap stay in front of the free space regenerated from the extent tree:
   the address list holds 6 entries instead of 3, each loaded entry overlapping a
   regenerated one, and the bitmap buffer stays allocated.
-- `872b041a` keeps overlapping stored ranges as separate entries: 45/49 cases
+- `872b041a` keeps overlapping stored ranges as separate entries: 45/55 cases
   pass. Two entries cover the same space, and after an allocation inside the
   overlap the second one still offers it. The v1 cache whose entries add up to
   the chunk's free space despite the overlap is kept, not discarded.
+- `469ce25c` returns errors from loading a chunk's free space with the entries
+  it loaded still on the chunk's lists: 49/55 cases pass. Failing an allocation
+  in the free space tree or v1 cache loader, or in taking the superblock stripe
+  out of the loaded entries, leaves the entries loaded before it, and so does
+  failing to delete a discarded v1 cache. The next load adds the same entries
+  again, so a stored tree or v1 cache is rejected as overlapping, the free
+  space is regenerated from the extent tree and the v1 cache deleted. Free
+  space regenerated from the extent tree is appended to the old entries
+  without a check, so the list holds each free range twice; after a failed
+  `protect_superblocks` one copy still covers the superblock stripe, and the
+  chunk keeps the `space_changed` mark the failed load set.
 
 The runner extracts the production `space` type, `order_space_entry`,
 `space_list_add2`, `space_list_merge`, `add_space_entry` and
@@ -126,15 +137,26 @@ entry and two join nothing, so the merged list has five entries.
 `load_test` runs the production `load_free_space_cache`, which loads a chunk's
 free space with `load_stored_free_space_tree` from the free space tree or with
 `load_stored_free_space_cache` from a v1 cache, and otherwise regenerates it
-from the extent tree, with the plain `add_space_entry`. It uses the same list
-primitives and a pool allocator that frees memory at once. The trees are native
-models searched as the production `find_item` and `find_next_item` search them.
-The v1 cache file, its header item and the calls that discard a cache are
-native models too; the checksum and the superblock size are not under test.
-The extent tree holds the 128 MiB chunk's block group item, two data extents
-and a tree block, between items of the chunks before and after it, and leaves
-three ranges of the chunk free. The free space tree describes the chunk in
-extent items or in 16 bitmap items of 2,048 sectors.
+from the extent tree, with the plain `add_space_entry`. Some cases run it
+through the production `load_cache_chunk`, which then takes the superblock
+stripes out of the loaded entries with `protect_superblocks`. It uses the same
+list primitives and a pool allocator that can fail any chosen allocation and
+frees memory at once. The trees are native models searched as the production
+`find_item` and `find_next_item` search them. The v1 cache file, its header
+item and the calls that discard a cache are native models too; deleting the
+header item takes it out of the root tree, and deleting it or excising the
+cache's extents can be made to fail. The checksum is not under test.
+`protect_superblocks` and `get_superblock_size` are native models of a chunk
+with no superblock copy, or with one whose 64 KiB stripe lies in the last free
+range: `protect_superblocks` takes the stripe off the chunk's lists with the
+production `space_list_subtract`, and `get_superblock_size` allocates an entry
+while it counts the stripe, as the production function does. A case can make
+`protect_superblocks` first mark the chunk `changed`, as a nocow write can at
+the same time without the chunk lock. The extent tree
+holds the 128 MiB chunk's block group item, two data extents and a tree block,
+between items of the chunks before and after it, and leaves three ranges of the
+chunk free. The free space tree describes the chunk in extent items or in 16
+bitmap items of 2,048 sectors.
 
 - With valid bitmap items, with extent items, or with a v1 cache, each giving the
   last free range in pieces that touch, the address list must hold the three
@@ -151,6 +173,25 @@ extent items or in 16 bitmap items of 2,048 sectors.
   free space. The lists must hold the regenerated ranges, and the v1 cache must
   be discarded. After an allocation inside the overlap, the size list may offer
   none of it.
+- `load_cache_chunk` loads a chunk with the superblock stripe from the 16 bitmap
+  items; from extent items over the first bitmap's span and bitmap items for
+  the rest, so the bitmap buffer is allocated after entries were loaded; from a
+  v1 cache that leaves out the stripe; and from the extent tree. The last
+  allocation of each load takes the stripe out of the loaded entries, or for the
+  v1 cache counts it. Failing each allocation in turn must return
+  `STATUS_INSUFFICIENT_RESOURCES` and leave the chunk as it found it: no
+  entries, nothing else allocated, and `space_changed` clear. Loading it again
+  must give the free ranges less the stripe, from the same source as a load
+  that failed nothing, keep the v1 cache, and leave `space_changed` set, as
+  `protect_superblocks` sets it.
+- A v1 cache whose entries add up to less than the chunk's free space is
+  discarded after its entries are loaded. If deleting its header item or
+  excising its extents fails, the load must return the failure and leave the
+  chunk as it found it, and the next load must regenerate the free ranges from
+  the extent tree.
+- A load that fails in `protect_superblocks` must keep the `space_changed` mark
+  of a chunk marked before the load, and the `changed` mark of a nocow write
+  while `protect_superblocks` runs.
 
 `--bench` builds the functions without counters or calls into the test, with
 `-O2`, and prints `CLOCK_MONOTONIC` timings of a merge: the best of five for
