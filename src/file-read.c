@@ -512,13 +512,20 @@ nextitem:
 
                         partlen = *(uint32_t*)(buf2 + inoff);
 
-                        if (partlen < inlen) {
+                        if (partlen <= inlen - sizeof(uint32_t)) { // inlen >= 4 here, so this cannot wrap
                             off2 -= LZO_PAGE_SIZE;
                             inoff += partlen + sizeof(uint32_t);
                             inlen -= partlen + sizeof(uint32_t);
 
-                            if (LZO_PAGE_SIZE - (inoff % LZO_PAGE_SIZE) < sizeof(uint32_t))
-                                inoff = ((inoff / LZO_PAGE_SIZE) + 1) * LZO_PAGE_SIZE;
+                            if (LZO_PAGE_SIZE - (inoff % LZO_PAGE_SIZE) < sizeof(uint32_t)) {
+                                ULONG pad = (((inoff / LZO_PAGE_SIZE) + 1) * LZO_PAGE_SIZE) - inoff;
+
+                                if (pad > inlen)
+                                    break;
+
+                                inoff += pad;
+                                inlen -= pad;
+                            }
                         } else
                             break;
                     }

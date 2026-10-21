@@ -6,26 +6,39 @@ static bool diskacc;
 enum { JOB_SYNCHRONOUS, JOB_QUEUED, JOB_RUNNING };
 static unsigned job_execution, read_calls, fail_read;
 static uint64_t last_read_address;
+/* When set, device reads return these bytes instead of a fill pattern. */
+static const uint8_t* disk_image;
+static size_t disk_image_size;
 static unsigned premature_input_frees, missing_job_inputs, blocked_waits, completed_jobs;
 static struct { calc_job* job; uintptr_t input; unsigned length; } pending_jobs[16];
 
-static bool owns_input(uintptr_t input, unsigned length) {
+/* Where the last owned job input started within its allocation, and its length. */
+static size_t last_job_offset;
+static unsigned last_job_length;
+
+static bool owns_input(uintptr_t input, unsigned length, size_t* offset) {
     for (unsigned i = 0; i < 32; i++) {
         uintptr_t begin = (uintptr_t)allocations[i].pointer;
         if (allocations[i].pointer && input >= begin && input - begin <= allocations[i].size &&
-            length <= allocations[i].size - (input - begin))
+            length <= allocations[i].size - (input - begin)) {
+            *offset = input - begin;
             return true;
+        }
     }
     return false;
 }
 
 static void complete_job(calc_job* job) {
     for (unsigned i = 0; i < 16; i++) if (pending_jobs[i].job == job) {
+        size_t offset;
         /* Validate ownership without reading the borrowed input, even on failure. */
-        if (!owns_input(pending_jobs[i].input, pending_jobs[i].length))
+        if (!owns_input(pending_jobs[i].input, pending_jobs[i].length, &offset))
             missing_job_inputs++;
-        else
+        else {
             memset(job->out, 0x7e, job->outlen);
+            last_job_offset = offset;
+            last_job_length = pending_jobs[i].length;
+        }
         job->Status = job_status;
         job->event.completed = true;
         pending_jobs[i].job = NULL;
@@ -62,6 +75,10 @@ static NTSTATUS read_data(device_extension* v,uint64_t address,uint32_t length,v
     (void)v;(void)address;(void)csum;(void)tree;(void)c;(void)addr;(void)irp;(void)flags;(void)mdl;(void)priority;
     last_read_address = address;
     if (++read_calls == fail_read) return STATUS_DATA_ERROR;
+    if (disk_image) {
+        if (length > disk_image_size) abort();
+        memcpy(out,disk_image,length); return STATUS_SUCCESS;
+    }
     memset(out,0x22,length); return STATUS_SUCCESS;
 }
 static NTSTATUS zlib_decompress(void* in,unsigned inlen,void* out,unsigned outlen) { (void)in;(void)inlen;memset(out,0x7e,outlen);return job_status; }

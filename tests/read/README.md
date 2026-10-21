@@ -15,8 +15,8 @@ until modeled completion. Two discontiguous compressed extents cover queued
 and running jobs, a later read failure, allocation failures while submitting
 the second job, and preservation of the original error. The ownership checks
 compare allocation ranges and never read freed input. Use `--revision 5ed6211f`
-to reproduce the cleanup ordering bug: 144/184 scenarios pass. The corrected
-implementation passes 184/184 with patterned and zero initialization and
+to reproduce the cleanup ordering bug: 146/194 scenarios pass. The corrected
+implementation passes 194/194 with patterned and zero initialization and
 ASan/UBSan.
 
 Uncompressed inline extents are read from an item whose `ram_bytes` may claim
@@ -26,8 +26,17 @@ up in the output. A read must return the stored bytes and zeros for the rest
 of `ram_bytes`, wherever it starts. A regular extent after a short inline
 extent must still be read from its own disk address into its own file range.
 An inline extent that an earlier extent has already read past must fail with
-`STATUS_INTERNAL_ERROR` without copying. Use `--revision 96fe76d4` to
-reproduce the over-read: 176/184 scenarios pass.
+`STATUS_INTERNAL_ERROR` without copying.
+
+LZO reads that start in the second 4 KiB of output skip the first segment.
+Fixtures place the second segment header after zero to three bytes of page
+padding and give the first segment lengths that end at, or one to three bytes
+past, the end of the extent. The decompression job must receive exactly the
+bytes left in the extent after the skip. Decompression itself is modeled, so
+these fixtures do not show whether `lzo_decompress` stays inside that input.
+
+`--revision 96fe76d4` has neither the inline-extent nor the LZO correction:
+178/194 scenarios pass.
 
 Cache, disk, hashing, decompression and worker execution are modeled services.
 The compressed fixtures test the production reader's resource ownership, not

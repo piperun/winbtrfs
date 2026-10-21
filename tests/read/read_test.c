@@ -157,8 +157,49 @@ static void inline_reads(void) {
         reclaim_allocations();free(e);
     }
 }
+/* An LZO extent starts with a 4-byte total length, then one length-prefixed segment per 4 KiB of
+ * output. A segment header never straddles a 4 KiB page: the writer pads to the next page instead.
+ * Reading from the second page skips the first segment, and the decompression job must be given
+ * exactly the bytes left in the extent after it. */
+static void lzo_skips(void) {
+    static const struct { const char* name; unsigned disk_bytes, first, second_at, input_offset, input_length; } layouts[]={
+        {"LZO skip without page padding",8192,4084,4092,4092,4100},
+        {"LZO skip over 1 byte of page padding",8192,4087,4096,4096,4096},
+        {"LZO skip over 2 bytes of page padding",8192,4086,4096,4096,4096},
+        {"LZO skip over 3 bytes of page padding",8192,4085,4096,4096,4096},
+        {"LZO segment ending at the extent end",4096,4088,0,4096,0},
+        {"LZO segment 1 byte past the extent end",4096,4089,0,4,4092},
+        {"LZO segment 2 bytes past the extent end",4096,4090,0,4,4092},
+        {"LZO segment 3 bytes past the extent end",4096,4091,0,4,4092},
+        {"LZO page padding ending at the extent end",4096,4086,0,4096,0},
+        {"LZO page padding past the extent end",4095,4086,0,4094,1},
+    };
+    static uint8_t image[8192];
+    for(unsigned i=0;i<sizeof(layouts)/sizeof(layouts[0]);i++) {
+        fcb f;device_extension v;init(&f,&v,8192,8192);
+        extent e={.offset=0,.extent_data={.type=BTRFS_FILE_EXTENT_REG,.compression=BTRFS_COMPRESS_LZO,.num_bytes=8192,.ram_bytes=8192,
+            .disk_bytenr=1048576,.disk_num_bytes=layouts[i].disk_bytes}};
+        InsertTailList(&f.extents,&e.list_entry);
+        uint32_t total=layouts[i].disk_bytes,first=layouts[i].first,second=100;
+        memset(image,0,sizeof(image));memcpy(image,&total,4);memcpy(image+4,&first,4);
+        if(layouts[i].second_at)memcpy(image+layouts[i].second_at,&second,4);
+        disk_image=image;disk_image_size=sizeof(image);
+        unsigned char data[8192];memset(data,0xa5,sizeof(data));ULONG got=0;
+        job_status=STATUS_SUCCESS;allocation_attempt=0;fail_allocation=0;
+        premature_input_frees=missing_job_inputs=0;last_job_offset=last_job_length=~0u;
+        NTSTATUS status=read_file(&f,data,4097,4095,&got,NULL);
+        bool ok=status==STATUS_SUCCESS&&got==4095&&allocation_count==0&&premature_input_frees==0&&missing_job_inputs==0&&
+            last_job_offset==layouts[i].input_offset&&last_job_length==layouts[i].input_length;
+        for(unsigned n=0;n<4095;n++)ok=ok&&data[n]==0x7e;
+        for(unsigned n=4095;n<sizeof(data);n++)ok=ok&&data[n]==0xa5;
+        record(ok,layouts[i].name,4097,4095,got,4095);
+        if(!ok)printf("  status=%08x missing inputs=%u job input at %zu length %u, expected %u length %u\n",(unsigned)status,
+            missing_job_inputs,last_job_offset,last_job_length,layouts[i].input_offset,layouts[i].input_length);
+        reclaim_allocations();disk_image=NULL;
+    }
+}
 int main(void) {
-    eof_reads();compressed_jobs();pending_inputs();inline_reads();
+    eof_reads();compressed_jobs();pending_inputs();inline_reads();lzo_skips();
     printf("%u/%u file read scenarios passed\n",cases-failures,cases);
     return failures!=0;
 }
