@@ -108,11 +108,14 @@ NTSTATUS rationalize_extents(fcb* fcb, PIRP Irp) {
     if (num_exts == 0)
         return STATUS_SUCCESS;
 
+    // trimming and merging are optional and nothing changes before both arrays are allocated, so if either allocation
+    // fails, leave the extents as they are: failing the flush would make the volume read-only
+
     // the second half of the array is the merge sort's buffer
     exts = ExAllocatePoolWithTag(PagedPool, sizeof(extent*) * num_exts * 2, ALLOC_TAG);
     if (!exts) {
-        ERR("out of memory\n");
-        return STATUS_INSUFFICIENT_RESOURCES;
+        ERR("out of memory, not trimming or merging extents\n");
+        return STATUS_SUCCESS;
     }
 
     i = 0;
@@ -135,8 +138,8 @@ NTSTATUS rationalize_extents(fcb* fcb, PIRP Irp) {
 
     ranges = ExAllocatePoolWithTag(PagedPool, sizeof(extent_range) * num_ranges, ALLOC_TAG);
     if (!ranges) {
-        ERR("out of memory\n");
-        Status = STATUS_INSUFFICIENT_RESOURCES;
+        ERR("out of memory, not trimming or merging extents\n");
+        Status = STATUS_SUCCESS;
         goto end;
     }
 

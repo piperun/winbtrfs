@@ -179,12 +179,19 @@ static void run_merge(enum trimming trim, unsigned type, bool checksums, int fai
 }
 
 /* Fail each allocation in turn, until the function makes fewer allocations than
- * the one set to fail and merges the extents. */
-static void run_allocation_failures(void) {
+ * the one set to fail and trims and merges the extents. Each failure must return
+ * success with no call made and the extents and chunk usage unchanged: trimming
+ * and merging are optional, and an error would fail the flush and make the
+ * volume read-only. */
+static void run_allocation_failures(enum trimming trim) {
     for (unsigned n = 1;; n++) {
-        setup(UNTRIMMED, BTRFS_FILE_EXTENT_REG, true);
+        setup(trim, BTRFS_FILE_EXTENT_REG, true);
         expected_count = call_count = allocations = lookups = 0;
-        merge_calls(UNTRIMMED);
+        trim_calls(trim, false);
+        merge_calls(trim);
+        extent before[3];
+        memcpy(before, extents, sizeof(before));
+        uint64_t used = storage.used;
         fail_allocation = n;
         NTSTATUS status = rationalize_extents(&file, &request);
         CHECK(pool_live == 0);
@@ -192,11 +199,14 @@ static void run_allocation_failures(void) {
             CHECK(n > 1 && status == STATUS_SUCCESS && call_count == expected_count);
             return;
         }
-        CHECK(status == STATUS_INSUFFICIENT_RESOURCES && call_count == 0 && lookups == 0);
-        for (unsigned i = 0; i < 3; i++) {
-            CHECK(extents[i].extent_data.disk_bytenr == base + i * page);
-            CHECK(extents[i].extent_data.disk_num_bytes == page);
+        if (status != STATUS_SUCCESS) {
+            fprintf(stderr, "trim%u: returned %08x when allocation %u failed\n",
+                    (unsigned)trim, (unsigned)status, n);
+            CHECK(false);
         }
+        CHECK(call_count == 0 && lookups == 0 && storage.used == used);
+        for (unsigned i = 0; i < 3; i++)
+            CHECK(memcmp(&extents[i].extent_data, &before[i].extent_data, sizeof(before[i].extent_data)) == 0);
     }
 }
 
@@ -236,7 +246,7 @@ static void run_control(unsigned n) {
         case 4: for (unsigned i = 0; i < 3; i++) extents[i].extent_data.disk_num_bytes = 0; break;
         case 5: for (unsigned i = 0; i < 3; i++) extents[i].extent_data.type = BTRFS_FILE_EXTENT_INLINE; break;
         case 6: for (unsigned i = 0; i < 3; i++) extents[i].extent_data.disk_bytenr += i * page; break;
-        case 7: run_allocation_failures(); return;
+        case 7: for (unsigned t = UNTRIMMED; t <= SUFFIX; t++) run_allocation_failures(t); return;
         case 8: missing_chunk = true; wanted = STATUS_INTERNAL_ERROR; break;
         case 9: case 10: case 11: {
             setup(PREFIX, BTRFS_FILE_EXTENT_REG, true);

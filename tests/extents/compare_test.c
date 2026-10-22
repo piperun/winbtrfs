@@ -502,12 +502,21 @@ static bool failable(enum operation op) {
     return op == UPDATE || op == ADD || op == CHECKSUM || op == LOAD || op == SPACE;
 }
 
-/* Check one run against the layout it started from. */
-static void check_run(const run* r, const layout* l, const char* label) {
-    if (r->fail_allocation && r->allocations >= r->fail_allocation) {
-        if (r->status != STATUS_INSUFFICIENT_RESOURCES || r->num_calls != 0)
+/* Check one run against the layout it started from. A failed allocation must
+ * return success without making any call or changing any extent or chunk, so
+ * the flush goes on; a baseline from before that change returns
+ * STATUS_INSUFFICIENT_RESOURCES instead. */
+static void check_run(const run* r, const layout* l, const char* label, bool is_baseline) {
+    bool allocation_failed = r->fail_allocation && r->allocations >= r->fail_allocation;
+    if (allocation_failed) {
+        bool status_ok = r->status == STATUS_SUCCESS ||
+                         (is_baseline && r->status == STATUS_INSUFFICIENT_RESOURCES);
+        if (!status_ok || r->num_calls != 0)
             FAIL("%s: allocation %u failed, returned %08x after %zu calls\n", label,
                  r->fail_allocation, (unsigned)r->status, r->num_calls);
+        /* start() makes every chunk full. */
+        for (unsigned i = 0; i < l->num_chunks; i++)
+            CHECK(r->chunks[i].used == l->chunks[i].length && r->chunks[i].cache_loaded == l->chunks[i].cache_loaded);
     } else if (r->failed) {
         if (r->status != r->failure)
             FAIL("%s: call %u failed with %08x, returned %08x\n", label, r->fail_call,
@@ -532,7 +541,7 @@ static void check_run(const run* r, const layout* l, const char* label) {
         CHECK(le == &ext->list_entry && le->Flink->Blink == le);
         le = le->Flink;
         CHECK(ext->offset == l->extents[i].offset && ext->unique == l->extents[i].unique);
-        if (!qualifies(&l->extents[i])) {
+        if (!qualifies(&l->extents[i]) || allocation_failed) {
             CHECK(memcmp(d, s, sizeof(*d)) == 0);
             continue;
         }
@@ -636,13 +645,13 @@ static void trial(uint64_t seed, implementation baseline, coverage* cov) {
 
     snprintf(label, sizeof(label), "seed %llu", (unsigned long long)seed);
     execute(&b, candidate_rationalize_extents, &l, 0, 0, 0);
-    check_run(&b, &l, label);
+    check_run(&b, &l, label, false);
     note_coverage(cov, &b, &l);
     unsigned failable_calls = b.failable, candidate_allocations = b.allocations;
     unsigned baseline_allocations = 0;
     if (baseline) {
         execute(&a, baseline, &l, 0, 0, 0);
-        check_run(&a, &l, label);
+        check_run(&a, &l, label, true);
         compare_runs(&a, &b, &l, label);
         baseline_allocations = a.allocations;
         finish(&a);
@@ -654,11 +663,11 @@ static void trial(uint64_t seed, implementation baseline, coverage* cov) {
         NTSTATUS failure = rnd(2) ? STATUS_IO_DEVICE_ERROR : STATUS_INSUFFICIENT_RESOURCES;
         snprintf(label, sizeof(label), "seed %llu, call %u failing", (unsigned long long)seed, points[i]);
         execute(&b, candidate_rationalize_extents, &l, points[i], failure, 0);
-        check_run(&b, &l, label);
+        check_run(&b, &l, label, false);
         note_coverage(cov, &b, &l);
         if (baseline) {
             execute(&a, baseline, &l, points[i], failure, 0);
-            check_run(&a, &l, label);
+            check_run(&a, &l, label, true);
             compare_runs(&a, &b, &l, label);
             finish(&a);
         }
@@ -671,14 +680,14 @@ static void trial(uint64_t seed, implementation baseline, coverage* cov) {
     for (unsigned i = 0; i < n; i++) {
         snprintf(label, sizeof(label), "seed %llu, candidate allocation %u failing", (unsigned long long)seed, points[i]);
         execute(&b, candidate_rationalize_extents, &l, 0, 0, points[i]);
-        check_run(&b, &l, label);
+        check_run(&b, &l, label, false);
         finish(&b);
     }
     n = sample(baseline_allocations, 4, points);
     for (unsigned i = 0; i < n; i++) {
         snprintf(label, sizeof(label), "seed %llu, baseline allocation %u failing", (unsigned long long)seed, points[i]);
         execute(&a, baseline, &l, 0, 0, points[i]);
-        check_run(&a, &l, label);
+        check_run(&a, &l, label, true);
         finish(&a);
     }
     free_layout(&l);
@@ -717,7 +726,7 @@ static void steps_case(const char* name, unsigned count, uint64_t chunk_size) {
     layout l;
     make_vm_layout(&l, count, chunk_size, count);
     execute(&r, candidate_rationalize_extents, &l, 0, 0, 0);
-    check_run(&r, &l, name);
+    check_run(&r, &l, name, false);
     /* Ranges were trimmed and merged and every chunk was looked up, so every
      * part of the function ran. */
     CHECK(r.status == STATUS_SUCCESS && r.counts[SPACE] > 0 && r.counts[UPDATE] > r.counts[SPACE]);

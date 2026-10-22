@@ -68,9 +68,9 @@ Each layout runs once without failures, then with a failure at up to 12 of
 the reference, checksum, cache-load and free-space calls, and with each of up
 to four allocations failing. Every run must:
 
-- return the injected status, `STATUS_INSUFFICIENT_RESOURCES` without making
-  any call if an allocation failed, `STATUS_INTERNAL_ERROR` after a lookup that
-  finds no chunk, or success;
+- return the injected status, success without making any call if a temporary
+  allocation failed, `STATUS_INTERNAL_ERROR` after a lookup that finds no
+  chunk, or success;
 - make no call after a failed one other than releasing the chunk lock, free
   every allocation and leave no chunk locked;
 - keep every extent it may change on the same bytes on disk
@@ -84,7 +84,11 @@ models and the same `btrfs.h`. Both must return the same status,
 make the same lookup, reference, checksum, lock, cache-load and free-space
 calls with the same arguments in the same order, and leave the same extents
 and chunk usage. Allocation failures are checked for each revision on its own,
-because the two may allocate differently. Each case must include merged
+because the two may allocate differently. Only historical baselines may
+return `STATUS_INSUFFICIENT_RESOURCES` for those failures; the current code
+must return success with unchanged extents and chunk usage. Trimming and
+merging are optional, so skipping them lets the flush continue; unused space
+stays allocated until the file's extents change again. Each case must include merged
 extents, trimmed starts and ends, a missing chunk, a layout with nothing to
 allocate for, and failures at each kind of call.
 
