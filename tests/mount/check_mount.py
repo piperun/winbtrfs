@@ -34,7 +34,8 @@ def block(source, start):
     return source[start:end]
 
 btrfs = read("src/btrfs.c")
-mount = block(btrfs, btrfs.index("static NTSTATUS mount_vol("))
+mount_source = read("src/mount.c", optional=True) or btrfs
+mount = block(mount_source, mount_source.index("NTSTATUS mount_vol("))
 exit_start = mount.index("\nexit:\n") + len("\nexit:\n")
 failure = mount.index("    if (!NT_SUCCESS(Status)) {", exit_start)
 wrapper = "static NTSTATUS fail_mount(device_extension* Vcb, fcb* root_fcb, bool init_lookaside, NTSTATUS Status, PDEVICE_OBJECT NewDeviceObject) {\n"
