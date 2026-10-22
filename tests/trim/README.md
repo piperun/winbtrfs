@@ -11,12 +11,17 @@ ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
 ```
 
 Add `--revision 4a8bf1a9` to reproduce before the fix. The baseline passes
-21/167 cases. All 146 failures reach an unsignaled wait after every submitted
+21/169 cases. 146 failures reach an unsignaled wait after every submitted
 IRP has completed: devices skipped after DSM-buffer or IRP allocation failure
 still own a pending slot. A single failing device can leave no submitted I/O
-and no possible future completion to wake the flush thread. The fixed source
-passes all 167 cases with pattern/zero locals and sanitizers. This addresses
-the production TRIM hang in [upstream issue #815](https://github.com/maharmstone/btrfs/issues/815).
+and no possible future completion to wake the flush thread. The other two are
+the merge-failure cases below. The fixed source passes all 169 cases with
+pattern/zero locals and sanitizers. This addresses the production TRIM hang in
+[upstream issue #815](https://github.com/maharmstone/btrfs/issues/815).
+
+`--revision 4a99d1c5^` passes 167/169: when a chunk's space merge failed,
+`clean_space_cache` returned with the volume's `chunk_lock` still held shared,
+and both merge-failure cases stop there.
 
 The runner extracts production `clean_space_cache`, TRIM context types,
 `trim_completion`, and the extracted `trim_devices` helper when present.
@@ -31,6 +36,10 @@ with inline completions, deferred FIFO completions, deferred reverse completions
 and mixed inline/deferred completions. Eleven controls cover no work, disabled
 TRIM, the no-TRIM mount option, context-array allocation failure, multiple
 ranges, failed/cancelled device requests and successful space merging before I/O.
+Two merge-failure cases fail the space merge of the first or second of three
+changed chunks. `clean_space_cache` must return the merge's status with the
+volume's and every chunk's lock released, leave the freed ranges of the failed
+chunk and the chunks after it queued, and start no TRIM.
 
 The wait model executes every deferred production completion, then requires
 the event to be signaled with no remaining pending slots. If all possible

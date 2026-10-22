@@ -201,7 +201,7 @@ NTSTATUS add_space_entry(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t offse
     else {
         space* s2 = CONTAINING_RECORD(list->Blink, space, list_entry);
 
-        if (s2->address < offset)
+        if (s2->address <= offset)
             InsertTailList(list, &s->list_entry);
         else {
             LIST_ENTRY* le;
@@ -251,10 +251,11 @@ size:
     return STATUS_SUCCESS;
 }
 
-static void load_free_space_bitmap(device_extension* Vcb, chunk* c, uint64_t offset, void* data, uint64_t* total_space) {
+static NTSTATUS load_free_space_bitmap(device_extension* Vcb, chunk* c, uint64_t offset, void* data, uint64_t* total_space) {
     RTL_BITMAP bmph;
     uint32_t i, len, *dwords = data;
     ULONG runlength, index;
+    NTSTATUS Status;
 
     // flip bits
     for (i = 0; i < Vcb->superblock.sectorsize / sizeof(uint32_t); i++) {
@@ -284,12 +285,19 @@ static void load_free_space_bitmap(device_extension* Vcb, chunk* c, uint64_t off
         addr = offset + (index << Vcb->sector_shift);
         length = runlength << Vcb->sector_shift;
 
-        add_space_entry(&c->space, &c->space_size, addr, length);
+        Status = add_space_entry(&c->space, &c->space_size, addr, length);
+        if (!NT_SUCCESS(Status)) {
+            ERR("add_space_entry returned %08lx\n", Status);
+            return Status;
+        }
+
         index += runlength;
         *total_space += length;
 
         runlength = RtlFindNextForwardRunClear(&bmph, index, &index);
     }
+
+    return STATUS_SUCCESS;
 }
 
 static void order_space_entry(space* s, LIST_ENTRY* list_size) {
@@ -606,7 +614,7 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
             if (!NT_SUCCESS(Status)) {
                 ERR("add_space_entry returned %08lx\n", Status);
                 ExFreePool(data);
-                return Status;
+                goto end;
             }
 
             total_space += fse->bytes;
@@ -629,7 +637,13 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
 
             if (fse->type == BTRFS_FREE_SPACE_BITMAP) {
                 // FIXME - make sure we don't overflow the buffer here
-                load_free_space_bitmap(Vcb, c, fse->offset, &data[bmpnum << Vcb->sector_shift], &total_space);
+                Status = load_free_space_bitmap(Vcb, c, fse->offset, &data[bmpnum << Vcb->sector_shift], &total_space);
+                if (!NT_SUCCESS(Status)) {
+                    ERR("load_free_space_bitmap returned %08lx\n", Status);
+                    ExFreePool(data);
+                    goto end;
+                }
+
                 bmpnum++;
             }
 
@@ -643,7 +657,7 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
     if (!NT_SUCCESS(Status)) {
         ERR("get_superblock_size returned %08lx\n", Status);
         ExFreePool(data);
-        return Status;
+        goto end;
     }
 
     if (c->chunk_item->length - c->used != total_space + superblock_size) {
@@ -658,6 +672,11 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
 
         if (le2 != &c->space) {
             space* s2 = CONTAINING_RECORD(le2, space, list_entry);
+
+            if (s2->address < s->address + s->size) {
+                WARN("invalidating cache for chunk %I64x: entry at %I64x overlaps entry at %I64x\n", c->offset, s2->address, s->address);
+                goto clearcache;
+            }
 
             if (s2->address == s->address + s->size) {
                 s->size += s2->size;
@@ -685,17 +704,23 @@ clearcache:
 
     InitializeListHead(&rollback);
 
-    Status = delete_tree_item(Vcb, &tp);
-    if (!NT_SUCCESS(Status)) {
-        ERR("delete_tree_item returned %08lx\n", Status);
-        return Status;
-    }
+    // Excise the extents before deleting the header item. No load finds a cache file
+    // whose header item is gone, so if excising failed after that, nothing would
+    // delete the file. A failed excise is rolled back instead, and the next load
+    // discards the cache again.
 
     Status = excise_extents(Vcb, c->cache, 0, c->cache->inode_item.size, Irp, &rollback);
     if (!NT_SUCCESS(Status)) {
         ERR("excise_extents returned %08lx\n", Status);
         do_rollback(Vcb, &rollback);
-        return Status;
+        goto end;
+    }
+
+    Status = delete_tree_item(Vcb, &tp);
+    if (!NT_SUCCESS(Status)) {
+        ERR("delete_tree_item returned %08lx\n", Status);
+        do_rollback(Vcb, &rollback);
+        goto end;
     }
 
     clear_rollback(&rollback);
@@ -705,6 +730,19 @@ clearcache:
 
     c->old_cache = c->cache;
     c->cache = NULL;
+
+    Status = STATUS_NOT_FOUND;
+
+end:
+    // Nothing loaded from the cache may stay, and the cache file is released unless
+    // it became the chunk's old cache. After STATUS_NOT_FOUND the caller regenerates
+    // the chunk's free space from the extent tree, and after an error the chunk is
+    // loaded again.
+
+    if (c->cache) {
+        free_fcb(c->cache);
+        c->cache = NULL;
+    }
 
     le = c->space.Flink;
     while (le != &c->space) {
@@ -718,7 +756,7 @@ clearcache:
         le = le2;
     }
 
-    return STATUS_NOT_FOUND;
+    return Status;
 }
 
 static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIRP Irp) {
@@ -770,8 +808,7 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
             Status = add_space_entry(&c->space, &c->space_size, tp.item->key.objectid, tp.item->key.offset);
             if (!NT_SUCCESS(Status)) {
                 ERR("add_space_entry returned %08lx\n", Status);
-                if (bmparr) ExFreePool(bmparr);
-                return Status;
+                goto end;
             }
         } else if (tp.item->key.type == BTRFS_FREE_SPACE_BITMAP_KEY) {
             ULONG explen, index, runlength;
@@ -783,10 +820,10 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
 
             if (tp.item->size < explen) {
                 WARN("(%I64x,%x,%I64x) was %u bytes, expected %lu\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset, tp.item->size, explen);
-                return STATUS_NOT_FOUND;
+                goto clearcache;
             } else if (tp.item->size == 0) {
                 WARN("(%I64x,%x,%I64x) has size of 0\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset);
-                return STATUS_NOT_FOUND;
+                goto clearcache;
             }
 
             if (bmplen < tp.item->size) {
@@ -797,7 +834,8 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
                 bmparr = ExAllocatePoolWithTag(PagedPool, bmplen, ALLOC_TAG);
                 if (!bmparr) {
                     ERR("out of memory\n");
-                    return STATUS_INSUFFICIENT_RESOURCES;
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                    goto end;
                 }
             }
 
@@ -832,8 +870,7 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
                     Status = add_space_entry(&c->space, &c->space_size, lastoff, runstart - lastoff);
                     if (!NT_SUCCESS(Status)) {
                         ERR("add_space_entry returned %08lx\n", Status);
-                        if (bmparr) ExFreePool(bmparr);
-                        return Status;
+                        goto end;
                     }
                 }
 
@@ -846,15 +883,11 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
                 Status = add_space_entry(&c->space, &c->space_size, lastoff, tp.item->key.objectid + tp.item->key.offset - lastoff);
                 if (!NT_SUCCESS(Status)) {
                     ERR("add_space_entry returned %08lx\n", Status);
-                    if (bmparr) ExFreePool(bmparr);
-                    return Status;
+                    goto end;
                 }
             }
         }
     }
-
-    if (bmparr)
-        ExFreePool(bmparr);
 
     le = c->space.Flink;
     while (le != &c->space) {
@@ -863,6 +896,11 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
 
         if (le2 != &c->space) {
             space* s2 = CONTAINING_RECORD(le2, space, list_entry);
+
+            if (s2->address < s->address + s->size) {
+                WARN("free space tree for chunk %I64x: entry at %I64x overlaps entry at %I64x\n", c->offset, s2->address, s->address);
+                goto clearcache;
+            }
 
             if (s2->address == s->address + s->size) {
                 s->size += s2->size;
@@ -881,7 +919,30 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
         le = le2;
     }
 
+    if (bmparr)
+        ExFreePool(bmparr);
+
     return STATUS_SUCCESS;
+
+clearcache:
+    Status = STATUS_NOT_FOUND;
+
+end:
+    // Nothing loaded from the free space tree may stay. After STATUS_NOT_FOUND the
+    // caller regenerates the chunk's free space from the extent tree, and after an
+    // error the chunk is loaded again.
+
+    if (bmparr)
+        ExFreePool(bmparr);
+
+    while (!IsListEmpty(&c->space)) {
+        space* s = CONTAINING_RECORD(RemoveHeadList(&c->space), space, list_entry);
+
+        RemoveEntryList(&s->list_entry_size);
+        ExFreePool(s);
+    }
+
+    return Status;
 }
 
 static NTSTATUS load_free_space_cache(device_extension* Vcb, chunk* c, PIRP Irp) {
@@ -996,9 +1057,13 @@ static NTSTATUS load_free_space_cache(device_extension* Vcb, chunk* c, PIRP Irp)
 
 NTSTATUS load_cache_chunk(device_extension* Vcb, chunk* c, PIRP Irp) {
     NTSTATUS Status;
+    bool space_changed;
+    fcb* cache;
 
     if (c->cache_loaded)
         return STATUS_SUCCESS;
+
+    cache = c->cache;
 
     Status = load_free_space_cache(Vcb, c, Irp);
     if (!NT_SUCCESS(Status)) {
@@ -1006,9 +1071,33 @@ NTSTATUS load_cache_chunk(device_extension* Vcb, chunk* c, PIRP Irp) {
         return Status;
     }
 
+    space_changed = c->space_changed;
+
     Status = protect_superblocks(c);
-    if (!NT_SUCCESS(Status))
+    if (!NT_SUCCESS(Status)) {
+        // The next call loads the chunk again, so free what was loaded, and release
+        // the v1 cache file if this load opened it, as the next call opens it again.
+        // Through space_list_subtract, protect_superblocks has set space_changed,
+        // and the flush would write the empty lists out as the chunk's free space,
+        // so restore it too. changed is left set: nocow writes set it without the
+        // chunk lock, and it only makes the flush write out partial stripes.
+
+        while (!IsListEmpty(&c->space)) {
+            space* s = CONTAINING_RECORD(RemoveHeadList(&c->space), space, list_entry);
+
+            RemoveEntryList(&s->list_entry_size);
+            ExFreePool(s);
+        }
+
+        if (c->cache && c->cache != cache) {
+            free_fcb(c->cache);
+            c->cache = cache;
+        }
+
+        c->space_changed = space_changed;
+
         return Status;
+    }
 
     c->cache_loaded = true;
 
@@ -1479,8 +1568,24 @@ static NTSTATUS add_rollback_space(LIST_ENTRY* rollback, bool add, LIST_ENTRY* l
     return STATUS_SUCCESS;
 }
 
-NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t address,
-                         uint64_t length, chunk* c, LIST_ENTRY* rollback) {
+// Puts s into the size list in order or, if touched is not NULL, onto touched
+// for order_space_entries to place later.
+static void place_space_entry(space* s, LIST_ENTRY* list_size, LIST_ENTRY* touched) {
+    if (touched)
+        InsertTailList(touched, &s->list_entry_size);
+    else
+        order_space_entry(s, list_size);
+}
+
+// Adds the range to the address-sorted list, comparing it with the entries
+// from start onwards. Every entry before start must end strictly below
+// address: an entry ending at address is adjacent and has to be merged, so it
+// must not lie before start. If touched is not NULL, entries that would be
+// ordered into the size list go onto it instead, for order_space_entries to
+// place. On success, *ps is the entry that now holds the range.
+static NTSTATUS space_list_add_from(LIST_ENTRY* list, LIST_ENTRY* list_size, LIST_ENTRY* touched,
+                                    LIST_ENTRY* start, uint64_t address, uint64_t length,
+                                    chunk* c, LIST_ENTRY* rollback, space** ps) {
     NTSTATUS Status;
     LIST_ENTRY* le;
     space *s, *s2;
@@ -1507,16 +1612,19 @@ NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t addre
                 return Status;
         }
 
+        *ps = s;
         return STATUS_SUCCESS;
     }
 
-    le = list->Flink;
+    le = start;
     do {
         s2 = CONTAINING_RECORD(le, space, list_entry);
 
         // old entry envelops new one completely
-        if (s2->address <= address && s2->address + s2->size >= address + length)
+        if (s2->address <= address && s2->address + s2->size >= address + length) {
+            *ps = s2;
             return STATUS_SUCCESS;
+        }
 
         // new entry envelops old one completely
         if (address <= s2->address && address + length >= s2->address + s2->size) {
@@ -1580,9 +1688,10 @@ NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t addre
 
             if (list_size) {
                 RemoveEntryList(&s2->list_entry_size);
-                order_space_entry(s2, list_size);
+                place_space_entry(s2, list_size, touched);
             }
 
+            *ps = s2;
             return STATUS_SUCCESS;
         }
 
@@ -1617,9 +1726,10 @@ NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t addre
 
             if (list_size) {
                 RemoveEntryList(&s2->list_entry_size);
-                order_space_entry(s2, list_size);
+                place_space_entry(s2, list_size, touched);
             }
 
+            *ps = s2;
             return STATUS_SUCCESS;
         }
 
@@ -1652,9 +1762,10 @@ NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t addre
 
             if (list_size) {
                 RemoveEntryList(&s2->list_entry_size);
-                order_space_entry(s2, list_size);
+                place_space_entry(s2, list_size, touched);
             }
 
+            *ps = s2;
             return STATUS_SUCCESS;
         }
 
@@ -1681,8 +1792,9 @@ NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t addre
             InsertHeadList(s2->list_entry.Blink, &s->list_entry);
 
             if (list_size)
-                order_space_entry(s, list_size);
+                place_space_entry(s, list_size, touched);
 
+            *ps = s;
             return STATUS_SUCCESS;
         }
 
@@ -1695,9 +1807,10 @@ NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t addre
 
         if (list_size) {
             RemoveEntryList(&s2->list_entry_size);
-            order_space_entry(s2, list_size);
+            place_space_entry(s2, list_size, touched);
         }
 
+        *ps = s2;
         return STATUS_SUCCESS;
     }
 
@@ -1723,28 +1836,140 @@ NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t addre
     InsertTailList(list, &s->list_entry);
 
     if (list_size)
-        order_space_entry(s, list_size);
+        place_space_entry(s, list_size, touched);
 
+    *ps = s;
     return STATUS_SUCCESS;
+}
+
+NTSTATUS space_list_add2(LIST_ENTRY* list, LIST_ENTRY* list_size, uint64_t address,
+                         uint64_t length, chunk* c, LIST_ENTRY* rollback) {
+    space* s;
+
+    return space_list_add_from(list, list_size, NULL, list->Flink, address, length, c, rollback, &s);
+}
+
+// Moves the entries on touched into the size list, which stays ordered by size,
+// largest first. touched is sorted with a bottom-up merge sort, then spliced in
+// during one pass along the size list, so for m entries on touched and n in the
+// size list this takes O(n + m log m) time, without allocating or recursing.
+static void order_space_entries(LIST_ENTRY* list_size, LIST_ENTRY* touched) {
+    LIST_ENTRY *le, *head, **tail;
+    size_t run = 1, merges;
+
+    if (IsListEmpty(touched))
+        return;
+
+    // treat touched as a chain through Flink that ends in NULL
+    head = touched->Flink;
+    touched->Blink->Flink = NULL;
+    InitializeListHead(touched);
+
+    // merge each pair of neighbouring sorted runs, doubling the run length on each pass
+    do {
+        LIST_ENTRY* p = head;
+
+        head = NULL;
+        tail = &head;
+        merges = 0;
+
+        while (p) {
+            LIST_ENTRY* q = p;
+            size_t psize = 0, qsize = run;
+
+            merges++;
+
+            while (q && psize < run) {
+                psize++;
+                q = q->Flink;
+            }
+
+            while (psize > 0 || (qsize > 0 && q)) {
+                LIST_ENTRY* e;
+
+                if (psize > 0 && (qsize == 0 || !q ||
+                    CONTAINING_RECORD(p, space, list_entry_size)->size >= CONTAINING_RECORD(q, space, list_entry_size)->size)) {
+                    e = p;
+                    p = p->Flink;
+                    psize--;
+                } else {
+                    e = q;
+                    q = q->Flink;
+                    qsize--;
+                }
+
+                *tail = e;
+                tail = &e->Flink;
+            }
+
+            p = q;
+        }
+
+        *tail = NULL;
+        run *= 2;
+    } while (merges > 1);
+
+    // Splice the chain into the size list in one forward pass: each entry goes
+    // before the first entry ahead of the cursor that is no bigger. The order
+    // of entries of equal size is not significant.
+    le = list_size->Flink;
+
+    while (head) {
+        space* s = CONTAINING_RECORD(head, space, list_entry_size);
+
+        head = head->Flink;
+
+        while (le != list_size && CONTAINING_RECORD(le, space, list_entry_size)->size > s->size) {
+            le = le->Flink;
+        }
+
+        InsertHeadList(le->Blink, &s->list_entry_size);
+    }
 }
 
 NTSTATUS space_list_merge(LIST_ENTRY* spacelist, LIST_ENTRY* spacelist_size,
                           LIST_ENTRY* deleting) {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_SUCCESS;
     LIST_ENTRY* le = deleting->Flink;
+    LIST_ENTRY* start = spacelist->Flink;
+    LIST_ENTRY touched;
+
+    if (IsListEmpty(deleting))
+        return STATUS_SUCCESS;
+
+    // Ordering each added or resized entry into the size list straight away
+    // would mean a walk along the size list for every range. Collect them on
+    // touched instead and order them all in at the end, which also happens
+    // after a failed allocation.
+    InitializeListHead(&touched);
 
     while (le != deleting) {
         space* s = CONTAINING_RECORD(le, space, list_entry);
+        space* s2;
 
-        Status = space_list_add2(spacelist, spacelist_size, s->address,
-                                 s->size, NULL, NULL);
+        // Both lists are sorted by address, so each search can carry on from
+        // the entry that took the previous range: the entries before it end
+        // strictly below where it starts. If the range starts before that
+        // entry, deleting is out of order: start again from the head.
+        if (start != spacelist && s->address < CONTAINING_RECORD(start, space, list_entry)->address)
+            start = spacelist->Flink;
+
+        Status = space_list_add_from(spacelist, spacelist_size, &touched, start,
+                                     s->address, s->size, NULL, NULL, &s2);
         if (!NT_SUCCESS(Status))
-            return Status;
+            break;
+
+        // Adding a range can free the entries next to the one that took it,
+        // so carry on from that entry rather than an older one.
+        start = &s2->list_entry;
 
         le = le->Flink;
     }
 
-    return STATUS_SUCCESS;
+    if (spacelist_size)
+        order_space_entries(spacelist_size, &touched);
+
+    return Status;
 }
 
 static NTSTATUS copy_space_list(LIST_ENTRY* old_list, LIST_ENTRY* new_list) {
@@ -1803,11 +2028,6 @@ static NTSTATUS update_chunk_cache(device_extension* Vcb, chunk* c, struct btrfs
     Status = copy_space_list(&c->deleting, &deleting);
     if (!NT_SUCCESS(Status)) {
         ERR("copy_space_list returned %08lx\n", Status);
-
-        while (!IsListEmpty(&space_list)) {
-            ExFreePool(CONTAINING_RECORD(RemoveHeadList(&space_list), space, list_entry));
-        }
-
         goto end;
     }
 
@@ -1835,6 +2055,8 @@ static NTSTATUS update_chunk_cache(device_extension* Vcb, chunk* c, struct btrfs
         num_entries++;
 
         off += sizeof(struct btrfs_free_space_entry);
+
+        ExFreePool(s);
     }
 
     // update INODE_ITEM
@@ -1914,6 +2136,14 @@ static NTSTATUS update_chunk_cache(device_extension* Vcb, chunk* c, struct btrfs
     Status = STATUS_SUCCESS;
 
 end:
+    while (!IsListEmpty(&space_list)) {
+        ExFreePool(CONTAINING_RECORD(RemoveHeadList(&space_list), space, list_entry));
+    }
+
+    while (!IsListEmpty(&deleting)) {
+        ExFreePool(CONTAINING_RECORD(RemoveHeadList(&deleting), space, list_entry));
+    }
+
     ExFreePool(data);
 
     return Status;
@@ -2338,12 +2568,22 @@ static NTSTATUS update_chunk_cache_tree(device_extension* Vcb, chunk* c, PIRP Ir
     Status = copy_space_list(&c->space, &space_list);
     if (!NT_SUCCESS(Status)) {
         ERR("copy_space_list returned %08lx\n", Status);
+
+        while (!IsListEmpty(&space_list)) {
+            ExFreePool(CONTAINING_RECORD(RemoveHeadList(&space_list), space, list_entry));
+        }
+
         return Status;
     }
 
     Status = space_list_merge(&space_list, NULL, &c->deleting);
-    if (!NT_SUCCESS(Status))
+    if (!NT_SUCCESS(Status)) {
+        while (!IsListEmpty(&space_list)) {
+            ExFreePool(CONTAINING_RECORD(RemoveHeadList(&space_list), space, list_entry));
+        }
+
         return Status;
+    }
 
     if (should_write_fst_bitmaps(Vcb, c, &space_list)) {
         Status = update_chunk_cache_tree_bitmaps(Vcb, c, Irp, &space_list);
