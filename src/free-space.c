@@ -285,6 +285,11 @@ static NTSTATUS load_free_space_bitmap(device_extension* Vcb, chunk* c, uint64_t
         addr = offset + (index << Vcb->sector_shift);
         length = runlength << Vcb->sector_shift;
 
+        if (addr >= c->offset + c->chunk_item->length || length > c->offset + c->chunk_item->length - addr) {
+            WARN("invalidating cache for chunk %I64x: free space at %I64x of %I64x bytes in bitmap at %I64x extends past end of chunk\n", c->offset, addr, length, offset);
+            return STATUS_NOT_FOUND;
+        }
+
         Status = add_space_entry(&c->space, &c->space_size, addr, length);
         if (!NT_SUCCESS(Status)) {
             ERR("add_space_entry returned %08lx\n", Status);
@@ -610,6 +615,12 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
         fse = (struct btrfs_free_space_entry*)&data[off];
 
         if (fse->type == BTRFS_FREE_SPACE_EXTENT) {
+            if (fse->bytes == 0 || fse->offset < c->offset || fse->offset >= c->offset + c->chunk_item->length ||
+                fse->bytes > c->offset + c->chunk_item->length - fse->offset) {
+                WARN("invalidating cache for chunk %I64x: entry at %I64x of %I64x bytes is empty or outside chunk\n", c->offset, fse->offset, fse->bytes);
+                goto clearcache;
+            }
+
             Status = add_space_entry(&c->space, &c->space_size, fse->offset, fse->bytes);
             if (!NT_SUCCESS(Status)) {
                 ERR("add_space_entry returned %08lx\n", Status);
@@ -636,9 +647,16 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
             fse = (struct btrfs_free_space_entry*)&data[off];
 
             if (fse->type == BTRFS_FREE_SPACE_BITMAP) {
+                if (fse->offset < c->offset || fse->offset >= c->offset + c->chunk_item->length) {
+                    WARN("invalidating cache for chunk %I64x: bitmap at %I64x is outside chunk\n", c->offset, fse->offset);
+                    goto clearcache;
+                }
+
                 // FIXME - make sure we don't overflow the buffer here
                 Status = load_free_space_bitmap(Vcb, c, fse->offset, &data[bmpnum << Vcb->sector_shift], &total_space);
-                if (!NT_SUCCESS(Status)) {
+                if (Status == STATUS_NOT_FOUND)
+                    goto clearcache;
+                else if (!NT_SUCCESS(Status)) {
                     ERR("load_free_space_bitmap returned %08lx\n", Status);
                     ExFreePool(data);
                     goto end;
@@ -804,6 +822,13 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
         if (tp.item->key.objectid >= c->offset + c->chunk_item->length)
             break;
 
+        // The search started at the chunk's info item, so the item starts inside the chunk.
+        if ((tp.item->key.type == BTRFS_FREE_SPACE_EXTENT_KEY || tp.item->key.type == BTRFS_FREE_SPACE_BITMAP_KEY) &&
+            (tp.item->key.offset == 0 || tp.item->key.offset > c->offset + c->chunk_item->length - tp.item->key.objectid)) {
+            WARN("(%I64x,%x,%I64x) is empty or extends past end of chunk %I64x\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset, c->offset);
+            goto clearcache;
+        }
+
         if (tp.item->key.type == BTRFS_FREE_SPACE_EXTENT_KEY) {
             Status = add_space_entry(&c->space, &c->space_size, tp.item->key.objectid, tp.item->key.offset);
             if (!NT_SUCCESS(Status)) {
@@ -816,7 +841,7 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
             uint64_t lastoff;
             ULONG bmpl;
 
-            explen = (ULONG)(tp.item->key.offset >> Vcb->sector_shift) / 8;
+            explen = (ULONG)sector_align(tp.item->key.offset >> Vcb->sector_shift, 8) / 8;
 
             if (tp.item->size < explen) {
                 WARN("(%I64x,%x,%I64x) was %u bytes, expected %lu\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset, tp.item->size, explen);

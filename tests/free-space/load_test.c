@@ -374,6 +374,25 @@ static NTSTATUS load_cache(const range* r, size_t count) {
     return load_free_space_cache(&volume, &load_chunk, NULL);
 }
 
+/* Adds a bitmap entry at offset after the cache's entries. The bitmap fills the sector
+   after the entries, with a set bit marking each sector of the given ranges free. */
+static void add_cache_bitmap(uint64_t offset, const range* r, size_t count) {
+    struct btrfs_free_space_entry e = { offset, 0, BTRFS_FREE_SPACE_BITMAP };
+    uint8_t* bitmap = cache_data + SECTOR;
+    CHECK(header.num_bitmaps == 0);
+    for (size_t i = 0; i < count; i++) {
+        for (uint64_t a = r[i].start; a < r[i].end; a += SECTOR) {
+            uint64_t bit = (a - offset) / SECTOR;
+            CHECK(a >= offset && bit < SECTOR * 8);
+            bitmap[bit / 8] |= 1 << (bit % 8);
+            e.bytes += SECTOR;
+        }
+    }
+    memcpy(cache_data + 2 * sizeof(uint32_t) + sizeof(uint64_t) + header.num_entries * sizeof(e), &e, sizeof(e));
+    header.num_entries++;
+    header.num_bitmaps = 1;
+}
+
 /* Printed before each failure the checks report, to name the step of a case that
    loads the chunk many times. */
 static const char* step = "";
@@ -537,6 +556,38 @@ static void tear_down(void) {
     CHECK(failures == 0);
 }
 
+/* Loads the free space tree the case built, which the loader must reject: the lists must
+   hold the free space regenerated from the extent tree, and nothing else may stay
+   allocated. */
+static void load_rejected_tree(void) {
+    CHECK(load_tree() == STATUS_SUCCESS);
+    check_space(free_ranges, COUNT(free_ranges));
+    check_regenerated(true);
+    tear_down();
+}
+
+/* The same for a v1 cache holding the given ranges, which the loader must also discard. */
+static void load_rejected_cache(const range* entries, size_t count) {
+    CHECK(load_cache(entries, count) == STATUS_SUCCESS);
+    check_space(free_ranges, COUNT(free_ranges));
+    check_regenerated(true);
+    check_cache_discarded(true);
+    tear_down();
+}
+
+/* The same for a v1 cache holding the given ranges as extent entries and a bitmap entry at
+   offset that marks the ranges in marked free. */
+static void load_rejected_bitmap_cache(const range* entries, size_t count, uint64_t offset,
+                                       const range* marked, size_t marked_count) {
+    set_up_cache(entries, count);
+    add_cache_bitmap(offset, marked, marked_count);
+    CHECK(load_free_space_cache(&volume, &load_chunk, NULL) == STATUS_SUCCESS);
+    check_space(free_ranges, COUNT(free_ranges));
+    check_regenerated(true);
+    check_cache_discarded(true);
+    tear_down();
+}
+
 /* The bitmaps give the free ranges; the last one spans all 16 bitmaps and becomes one
    entry. */
 static void tree_loaded(void) {
@@ -573,16 +624,31 @@ static void tree_short_bitmap(void) {
     tear_down();
 }
 
-/* The same for an empty bitmap item over 4 sectors. The loader expects 4 / 8 bytes,
-   rounded down to 0, so the item reaches its check for an empty item. */
+/* The same for an empty bitmap item over half a sector. It covers no whole sector, so
+   the loader expects no bytes and the item reaches its check for an empty item; over a
+   sector or more it would fail the size check first. */
 static void tree_empty_bitmap(void) {
     set_up_tree(BTRFS_FREE_SPACE_USING_BITMAPS);
     add_bitmap(0, sizeof(bitmaps[0]));
-    add_item(BASE + BITMAP_LENGTH, BTRFS_FREE_SPACE_BITMAP_KEY, 4 * SECTOR, bitmaps[1], 0);
+    add_item(BASE + BITMAP_LENGTH, BTRFS_FREE_SPACE_BITMAP_KEY, SECTOR / 2, bitmaps[1], 0);
     CHECK(load_tree() == STATUS_SUCCESS);
     check_space(free_ranges, COUNT(free_ranges));
     check_regenerated(true);
     tear_down();
+}
+
+/* The same for a bitmap item over the chunk's first 12 sectors, inside an extent, that
+   holds 1 byte where its bits need 2. Loaded, sectors 8 to 11 would take their bits from
+   the rest of the loader's buffer, which the model's allocator fills with 0xa5, marking
+   sectors 8 and 10 free. */
+static void tree_bitmap_missing_bits(void) {
+    static uint8_t bits[1];
+    set_up_tree(BTRFS_FREE_SPACE_USING_BITMAPS);
+    add_item(BASE, BTRFS_FREE_SPACE_BITMAP_KEY, 12 * SECTOR, bits, sizeof(bits));
+    add_extent(BASE + 0x10000, BASE + 0x14000);
+    add_extent(BASE + 0x18000, BASE + 0x20000);
+    add_extent(BASE + 0x40000, BASE + LENGTH);
+    load_rejected_tree();
 }
 
 /* Extent items whose ranges overlap make the loader regenerate the chunk's free space.
@@ -627,6 +693,49 @@ static void tree_extent_over_bitmap(void) {
     tear_down();
 }
 
+/* An extent item that reaches 4 sectors past the end of the chunk, with nothing after it
+   that it could overlap, makes the loader regenerate the chunk's free space. */
+static void tree_extent_past_chunk(void) {
+    set_up_tree(0);
+    add_extent(BASE + 0x10000, BASE + 0x14000);
+    add_extent(BASE + 0x18000, BASE + 0x20000);
+    add_extent(BASE + 0x40000, BASE + LENGTH + 0x4000);
+    load_rejected_tree();
+}
+
+/* The same for an extent item of 2^64 - 0x1000 bytes, whose end wraps to a sector before
+   its start, so the item after it does not seem to overlap it. */
+static void tree_extent_end_wraps(void) {
+    set_up_tree(0);
+    add_extent(BASE + 0x10000, BASE + 0x14000);
+    add_extent(BASE + 0x18000, BASE + 0x20000);
+    add_item(BASE + 0x30000, BTRFS_FREE_SPACE_EXTENT_KEY, UINT64_MAX - 0xfff, NULL, 0);
+    add_extent(BASE + 0x40000, BASE + LENGTH);
+    load_rejected_tree();
+}
+
+/* The same for an extent item of size 0, between two of the chunk's extents. */
+static void tree_empty_extent(void) {
+    set_up_tree(0);
+    add_extent(BASE + 0x10000, BASE + 0x14000);
+    add_extent(BASE + 0x18000, BASE + 0x20000);
+    add_extent(BASE + 0x30000, BASE + 0x30000);
+    add_extent(BASE + 0x40000, BASE + LENGTH);
+    load_rejected_tree();
+}
+
+/* The same for a last bitmap item over twice its range, whose bits mark the space after
+   the chunk free as well. */
+static void tree_bitmap_past_chunk(void) {
+    static uint8_t bits[2 * BITMAP_LENGTH / SECTOR / 8];
+    memset(bits, 0xff, sizeof(bits));
+    set_up_tree(BTRFS_FREE_SPACE_USING_BITMAPS);
+    add_bitmaps(0, BITMAPS - 1);
+    add_item(BASE + LENGTH - BITMAP_LENGTH, BTRFS_FREE_SPACE_BITMAP_KEY, 2 * BITMAP_LENGTH, bits,
+             sizeof(bits));
+    load_rejected_tree();
+}
+
 /* The cache's entries give the free ranges, the two that touch becoming one entry, and
    the cache is kept. */
 static void cache_loaded(void) {
@@ -662,6 +771,139 @@ static void cache_overlapping_entries(void) {
     tear_down();
 }
 
+/* An entry for the 4 sectors before the chunk, where the chunk before it has a tree
+   block, with the last entry short by as much. The loader must discard the cache and
+   regenerate the chunk's free space. */
+static void cache_entry_before_chunk(void) {
+    static const range entries[] = {
+        { BASE - 0x4000, BASE },
+        { BASE + 0x10000, BASE + 0x14000 },
+        { BASE + 0x18000, BASE + 0x20000 },
+        { BASE + 0x40000, BASE + LENGTH - 0x4000 },
+    };
+    load_rejected_cache(entries, COUNT(entries));
+}
+
+/* The same for a last entry moved 4 sectors on, past the end of the chunk. */
+static void cache_entry_past_chunk(void) {
+    static const range entries[] = {
+        { BASE + 0x10000, BASE + 0x14000 },
+        { BASE + 0x18000, BASE + 0x20000 },
+        { BASE + 0x44000, BASE + LENGTH + 0x4000 },
+    };
+    load_rejected_cache(entries, COUNT(entries));
+}
+
+/* The same for an entry that starts 4 sectors after the end of the chunk, with the last
+   entry in the chunk short by as much. */
+static void cache_entry_after_chunk(void) {
+    static const range entries[] = {
+        { BASE + 0x10000, BASE + 0x14000 },
+        { BASE + 0x18000, BASE + 0x20000 },
+        { BASE + 0x40000, BASE + LENGTH - 0x4000 },
+        { BASE + LENGTH + 0x4000, BASE + LENGTH + 0x8000 },
+    };
+    load_rejected_cache(entries, COUNT(entries));
+}
+
+/* The same for an entry of size 0, between two of the chunk's extents. */
+static void cache_empty_entry(void) {
+    static const range entries[] = {
+        { BASE + 0x10000, BASE + 0x14000 },
+        { BASE + 0x18000, BASE + 0x20000 },
+        { BASE + 0x30000, BASE + 0x30000 },
+        { BASE + 0x40000, BASE + LENGTH },
+    };
+    load_rejected_cache(entries, COUNT(entries));
+}
+
+/* The same for an entry of 2^64 - 0x1000 bytes, whose end wraps to a sector before its
+   start, with the last entry a sector longer, so the sizes still add up to the chunk's
+   free space and the entry after it does not seem to overlap it. */
+static void cache_entry_end_wraps(void) {
+    static const range entries[] = {
+        { BASE + 0x10000, BASE + 0x14000 },
+        { BASE + 0x18000, BASE + 0x20000 },
+        { BASE + 0x30000, BASE + 0x2f000 },
+        { BASE + 0x3f000, BASE + LENGTH },
+    };
+    load_rejected_cache(entries, COUNT(entries));
+}
+
+/* The same for a bitmap entry 4 sectors before the chunk that marks those sectors free,
+   where the chunk before it has a tree block, with the last extent entry short by as
+   much. */
+static void cache_bitmap_before_chunk(void) {
+    static const range entries[] = {
+        { BASE + 0x10000, BASE + 0x14000 },
+        { BASE + 0x18000, BASE + 0x20000 },
+        { BASE + 0x40000, BASE + LENGTH - 0x4000 },
+    };
+    static const range marked[] = { { BASE - 0x4000, BASE } };
+    load_rejected_bitmap_cache(entries, COUNT(entries), BASE - 0x4000, marked, COUNT(marked));
+}
+
+/* The same for a bitmap entry at the end of the chunk, where the chunk after it starts,
+   that marks 4 sectors there free. */
+static void cache_bitmap_after_chunk(void) {
+    static const range entries[] = {
+        { BASE + 0x10000, BASE + 0x14000 },
+        { BASE + 0x18000, BASE + 0x20000 },
+        { BASE + 0x40000, BASE + LENGTH - 0x4000 },
+    };
+    static const range marked[] = { { BASE + LENGTH + 0x4000, BASE + LENGTH + 0x8000 } };
+    load_rejected_bitmap_cache(entries, COUNT(entries), BASE + LENGTH, marked, COUNT(marked));
+}
+
+/* The same for a bitmap entry where the last free range starts, which also covers the 64
+   sectors after the chunk, marking that range moved 4 sectors on: its run reaches 4
+   sectors past the end of the chunk. */
+static void cache_bitmap_run_past_chunk(void) {
+    static const range entries[] = {
+        { BASE + 0x10000, BASE + 0x14000 },
+        { BASE + 0x18000, BASE + 0x20000 },
+    };
+    static const range marked[] = { { BASE + 0x44000, BASE + LENGTH + 0x4000 } };
+    load_rejected_bitmap_cache(entries, COUNT(entries), BASE + 0x40000, marked, COUNT(marked));
+}
+
+/* The same for a bitmap entry there whose last run starts 4 sectors after the end of the
+   chunk, with the run before it short by as much. */
+static void cache_bitmap_run_after_chunk(void) {
+    static const range entries[] = {
+        { BASE + 0x10000, BASE + 0x14000 },
+        { BASE + 0x18000, BASE + 0x20000 },
+    };
+    static const range marked[] = {
+        { BASE + 0x40000, BASE + LENGTH - 0x4000 },
+        { BASE + LENGTH + 0x4000, BASE + LENGTH + 0x8000 },
+    };
+    load_rejected_bitmap_cache(entries, COUNT(entries), BASE + 0x40000, marked, COUNT(marked));
+}
+
+/* A chunk 64 KiB shorter than the 128 MiB a bitmap covers, whose bitmap entry at its start,
+   where Linux places it, covers the 16 sectors after its end with their bits clear. The
+   loader must keep the cache. */
+static void cache_bitmap_clear_past_chunk(void) {
+    static const range entries[] = {
+        { BASE + 0x10000, BASE + 0x14000 },
+        { BASE + 0x18000, BASE + 0x20000 },
+    };
+    static const range loaded[] = {
+        { BASE + 0x10000, BASE + 0x14000 },
+        { BASE + 0x18000, BASE + 0x20000 },
+        { BASE + 0x40000, BASE + LENGTH - 0x10000 },
+    };
+    set_up_cache(entries, COUNT(entries));
+    chunk_item.length = LENGTH - 0x10000;
+    add_cache_bitmap(BASE, &loaded[2], 1);
+    CHECK(load_free_space_cache(&volume, &load_chunk, NULL) == STATUS_SUCCESS);
+    check_space(loaded, COUNT(loaded));
+    check_regenerated(false);
+    check_cache_discarded(false);
+    tear_down();
+}
+
 /* The bitmap items of load-tree, with a superblock copy in the chunk. */
 static void set_up_bitmap_tree(void) {
     set_up_tree(BTRFS_FREE_SPACE_USING_BITMAPS);
@@ -690,23 +932,11 @@ static void set_up_protected_cache(void) {
 }
 
 /* The same with the last two ranges in a bitmap entry after the extent entries. The
-   bitmap fills the sector after the entries and covers the chunk, with a set bit for
-   each free sector. */
+   bitmap starts at the chunk's start and covers the chunk. */
 static void set_up_bitmap_cache(void) {
     _Static_assert(LENGTH == SECTOR * 8 * SECTOR, "a sector of bitmap covers the chunk");
     set_up_cache(protected_ranges, 2);
-    struct btrfs_free_space_entry e = { BASE, 0, BTRFS_FREE_SPACE_BITMAP };
-    uint8_t* bitmap = cache_data + SECTOR;
-    for (size_t i = 2; i < COUNT(protected_ranges); i++) {
-        for (uint64_t a = protected_ranges[i].start; a < protected_ranges[i].end; a += SECTOR) {
-            uint64_t bit = (a - BASE) / SECTOR;
-            bitmap[bit / 8] |= 1 << (bit % 8);
-            e.bytes += SECTOR;
-        }
-    }
-    memcpy(cache_data + 2 * sizeof(uint32_t) + sizeof(uint64_t) + 2 * sizeof(e), &e, sizeof(e));
-    header.num_entries = 3;
-    header.num_bitmaps = 1;
+    add_cache_bitmap(BASE, &protected_ranges[2], COUNT(protected_ranges) - 2);
     superblock_stripe = (range){ SUPERBLOCK, SUPERBLOCK + STRIPE };
 }
 
@@ -942,11 +1172,26 @@ static const struct { const char* name; void (*run)(void); } cases[] = {
     { "load-tree-extents", tree_extents_loaded },
     { "load-tree-short-bitmap", tree_short_bitmap },
     { "load-tree-empty-bitmap", tree_empty_bitmap },
+    { "load-tree-bitmap-missing-bits", tree_bitmap_missing_bits },
     { "load-tree-overlapping-extents", tree_overlapping_extents },
     { "load-tree-same-start-extents", tree_same_start_extents },
     { "load-tree-extent-over-bitmap", tree_extent_over_bitmap },
+    { "load-tree-extent-past-chunk", tree_extent_past_chunk },
+    { "load-tree-extent-end-wraps", tree_extent_end_wraps },
+    { "load-tree-empty-extent", tree_empty_extent },
+    { "load-tree-bitmap-past-chunk", tree_bitmap_past_chunk },
     { "load-cache", cache_loaded },
     { "load-cache-overlapping-entries", cache_overlapping_entries },
+    { "load-cache-entry-before-chunk", cache_entry_before_chunk },
+    { "load-cache-entry-past-chunk", cache_entry_past_chunk },
+    { "load-cache-entry-after-chunk", cache_entry_after_chunk },
+    { "load-cache-empty-entry", cache_empty_entry },
+    { "load-cache-entry-end-wraps", cache_entry_end_wraps },
+    { "load-cache-bitmap-before-chunk", cache_bitmap_before_chunk },
+    { "load-cache-bitmap-after-chunk", cache_bitmap_after_chunk },
+    { "load-cache-bitmap-run-past-chunk", cache_bitmap_run_past_chunk },
+    { "load-cache-bitmap-run-after-chunk", cache_bitmap_run_after_chunk },
+    { "load-cache-bitmap-clear-past-chunk", cache_bitmap_clear_past_chunk },
     { "load-tree-allocation-failures", tree_allocation_failures },
     { "load-tree-mixed-allocation-failures", mixed_tree_allocation_failures },
     { "load-cache-allocation-failures", cache_allocation_failures },

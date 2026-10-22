@@ -12,62 +12,76 @@ python3 tests/free-space/check_free_space.py . --bench --build-dir /tmp/winbtrfs
 ```
 
 Add `--revision` to run the sources before each fix. Each revision also fails
-the cases of the fixes after it.
+the cases of the fixes after it. The fixes after `469ce25c` were made on two
+branches, merged in `4eafe9a2`: `29616b43` and `ab7f9451` on one, `b79ed0b3`
+and `13b84607` on the other. A revision on either branch also fails the cases
+of the other branch's fixes.
 
 - `96fe76d4` merges by searching from the head of the list for every freed
-  range: 29/62 cases pass. The four step-count cases that merge many ranges
+  range. The four step-count cases that merge many ranges
   fail; the large merge takes 400,020,000 address-list steps against a limit
   of 160,000.
-- `23c741d8` runs `update_chunk_cache` before it freed the lists it copies:
-  33/62 cases pass. A written cache leaves 8 allocations behind, the 5 merged
+- `23c741d8` runs `update_chunk_cache` before it freed the lists it copies. A written cache leaves 8 allocations behind, the 5 merged
   entries and the 3 copied freed ranges, and so does a failed flush. Failing an
   allocation while copying either list leaves the entries copied before it, and
   failing one in the merge leaves both copies.
 - `5c9895e7` runs `update_chunk_cache_tree` before it freed its copy of the
-  space list on failure: 36/62 cases pass. Failing the second or third
+  space list on failure. Failing the second or third
   allocation, in the copy, leaves 1 or 2 entries behind, and failing the fourth
   or fifth, in the merge, leaves 3 or 4.
 - `550f234e` runs `add_space_entry` before it linked an entry at the last
-  entry's address into the address list: 37/62 cases pass. With a size list the
+  entry's address into the address list. With a size list the
   entry is only on the size list, which still offers its range after an
   allocation took it; without one the entry is on neither list.
 - `03af14bb` runs `load_stored_free_space_tree` before it freed what it had
-  loaded when it rejects a bitmap item: 43/62 cases pass. The entries of the
+  loaded when it rejects a bitmap item. The entries of the
   first bitmap stay in front of the free space regenerated from the extent tree:
   the address list holds 6 entries instead of 3, each loaded entry overlapping a
   regenerated one, and the bitmap buffer stays allocated.
-- `872b041a` keeps overlapping stored ranges as separate entries: 45/62 cases
-  pass. Two entries cover the same space, and after an allocation inside the
+- `872b041a` keeps overlapping stored ranges as separate entries. Two entries cover the same space, and after an allocation inside the
   overlap the second one still offers it. The v1 cache whose entries add up to
   the chunk's free space despite the overlap is kept, not discarded.
-- `469ce25c` returns errors from loading a chunk's free space with the entries
-  it loaded still on the chunk's lists: 49/62 cases pass. Failing an allocation
-  in the free space tree or v1 cache loader, or in taking the superblock stripe
-  out of the loaded entries, leaves the entries loaded before it, and so does
-  failing to delete a discarded v1 cache. The next load adds the same entries
-  again, so a stored tree or v1 cache is rejected as overlapping, the free
-  space is regenerated from the extent tree and the v1 cache deleted. Free
-  space regenerated from the extent tree is appended to the old entries
-  without a check, so the list holds each free range twice; after a failed
-  `protect_superblocks` one copy still covers the superblock stripe, and the
-  chunk keeps the `space_changed` mark the failed load set.
-- `b79ed0b3` ignores a failed allocation for a run of a v1 cache bitmap: 54/62
-  cases pass. The run still counts towards the cache's total free space, so
+- `469ce25c` loads stored ranges without checking them against the chunk, and
+  returns errors from loading a chunk's free space with the entries it loaded
+  still on the chunk's lists. Ranges before the chunk or past
+  its end load as free space outside it, a range of size 0 loads as an empty
+  entry, and a range whose end wraps past 2^64 stays, with the entry after it
+  inside its range. The v1 caches, whose entries add up to the chunk's free
+  space, are kept. Failing an allocation in the free space tree or v1 cache
+  loader, or in taking the superblock stripe out of the loaded entries, leaves
+  the entries loaded before it, and so does failing to delete a discarded v1
+  cache. The next load adds the same entries again, so a stored tree or v1 cache
+  is rejected as overlapping, the free space is regenerated from the extent tree
+  and the v1 cache deleted. Free space regenerated from the extent tree is
+  appended to the old entries without a check, so the list holds each free range
+  twice; after a failed `protect_superblocks` one copy still covers the
+  superblock stripe, and the chunk keeps the `space_changed` mark the failed
+  load set.
+- `29616b43` rounds the size a bitmap item's bits need down to whole bytes. A bitmap item over 12 sectors that holds 1 byte passes the
+  size check, and the bits of its last 4 sectors come from the rest of the
+  loader's buffer: 2 sectors inside an extent load as free.
+- `b79ed0b3` ignores a failed allocation for a run of a v1 cache bitmap. The run still counts towards the cache's total free space, so
   the total matches the chunk's and the load succeeds without the run's range.
+- `4eafe9a2` loads the bitmap entries of a v1 cache without checking them
+  against the chunk. The runs of a bitmap entry before the
+  chunk or at its end load as free space outside it, and so do runs of a bitmap
+  entry inside the chunk that reach past its end or start after it. The caches,
+  whose entries add up to the chunk's free space, are kept.
+
 - `13b84607` keeps the v1 cache file open when loading a chunk fails after the
-  file was read: 54/62 cases pass. The next load opens the file again and
+  file was read. The next load opens the file again and
   takes a second reference: after an allocation fails for an extent entry, a
   bitmap run, counting the superblock stripe or taking the stripe out of the
   loaded entries, or deleting a discarded cache's header item fails, the file
   has 2 references and the chunk holds 1. When excising a discarded cache's
   extents fails, the chunk keeps the file after its header item was deleted.
 - `7b66f486` deletes a discarded v1 cache's header item before excising its
-  extents: 57/62 cases pass. When excising fails, the next load finds no
+  extents. When excising fails, the next load finds no
   header item and regenerates the free space without discarding the cache, so
   the cache file and its extents stay in the root tree and nothing deletes
   them.
 - `1248af47` removes a dirty cache FCB from the dirty list without releasing
-  that list's reference: 58/62 cases pass. A direct cache flush keeps the
+  that list's reference. A direct cache flush keeps the
   reference after its owner releases the file, including when the caller holds
   the dirty-list lock or the flush fails.
 
@@ -184,17 +198,19 @@ holds the 128 MiB chunk's block group item, two data extents and a tree block,
 between items of the chunks before and after it, and leaves three ranges of the
 chunk free. The free space tree describes the chunk in extent items or in 16
 bitmap items of 2,048 sectors. A v1 cache holds extent entries, or extent
-entries and a bitmap entry for the chunk's 32,768 sectors, whose runs the v1
-loader adds through the production `load_free_space_bitmap`.
+entries and a bitmap entry of 32,768 sectors, whose runs the v1 loader adds
+through the production `load_free_space_bitmap`.
 
 - With valid bitmap items, with extent items, or with a v1 cache, each giving the
   last free range in pieces that touch, the address list must hold the three
   free ranges in address order and the size list the same entries in
   non-increasing size order. The extent tree must not be searched, and the
   cache must be kept.
-- A second bitmap item shorter than its range needs, or an empty one, makes the
-  loader reject the free space tree. The lists must then hold the three ranges
-  regenerated from the extent tree, and nothing else may stay allocated.
+- A second bitmap item shorter than its range needs, an empty one over half a
+  sector, or a bitmap item over 12 sectors that holds 1 byte where its bits need
+  2, makes the loader reject the free space tree. The lists must then hold the
+  three ranges regenerated from the extent tree, and nothing else may stay
+  allocated.
 - Overlapping stored ranges make the loaders reject what they loaded: an extent
   item inside another, two extent items with the same start, an extent item
   over free space a bitmap item also gives, and a v1 entry inside another with
@@ -202,6 +218,20 @@ loader adds through the production `load_free_space_bitmap`.
   free space. The lists must hold the regenerated ranges, and the v1 cache must
   be discarded. After an allocation inside the overlap, the size list may offer
   none of it.
+- Stored ranges that are empty or not inside the chunk make the loaders reject
+  what they loaded: in the free space tree, a last extent item reaching past the
+  end of the chunk, an extent item of 2^64 - 4 KiB whose end wraps to just
+  before its start, an extent item of size 0, and a last bitmap item over twice
+  its range, all of it marked free; in a v1 cache, an entry before the chunk, a
+  last entry reaching past its end, an entry after its end, an entry of size 0,
+  an entry whose end wraps, a bitmap entry before the chunk or at its end, and a
+  bitmap entry at the start of the last free range with a run that reaches past
+  the end of the chunk or starts after it, each in a cache whose entries still
+  add up to the chunk's free space. The lists must hold the regenerated ranges,
+  and the v1 cache must be discarded.
+- A v1 cache for a chunk 64 KiB shorter than the 128 MiB a bitmap covers, whose
+  bitmap entry at the chunk's start leaves the 16 sectors past the chunk's end
+  clear, must be kept, and the lists must hold the chunk's free ranges.
 - `load_cache_chunk` loads a chunk with the superblock stripe from the 16 bitmap
   items; from extent items over the first bitmap's span and bitmap items for
   the rest, so the bitmap buffer is allocated after entries were loaded; from a
