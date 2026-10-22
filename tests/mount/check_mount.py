@@ -34,7 +34,13 @@ def block(source, start):
     return source[start:end]
 
 btrfs = read("src/btrfs.c")
-mount = block(btrfs, btrfs.index("static NTSTATUS mount_vol("))
+mount_source = read("src/mount.c", optional=True) or btrfs
+mount = block(mount_source, mount_source.index("NTSTATUS mount_vol("))
+device_start = mount.index("    dev = ExAllocatePoolWithTag(")
+device_end = mount.index("    dev->devobj = readobj;", device_start)
+(out / "device_init.inc").write_text(
+    "static NTSTATUS allocate_first_device(device** result) {\n    device* dev;\n    NTSTATUS Status;\n" +
+    mount[device_start:device_end] + "    *result = dev;\n    return STATUS_SUCCESS;\nexit:\n    return Status;\n}\n")
 exit_start = mount.index("\nexit:\n") + len("\nexit:\n")
 failure = mount.index("    if (!NT_SUCCESS(Status)) {", exit_start)
 wrapper = "static NTSTATUS fail_mount(device_extension* Vcb, fcb* root_fcb, bool init_lookaside, NTSTATUS Status, PDEVICE_OBJECT NewDeviceObject) {\n"
@@ -45,7 +51,17 @@ cleanup = read("src/mount-cleanup.c", optional=True)
 start = btrfs.index("#ifdef DEBUG_FCB_REFCOUNTS\nvoid _free_fcb(")
 (out / "free.inc").write_text(btrfs[start:btrfs.index("\nvoid reap_fcb(", start)])
 (out / "reap.inc").write_text(block(btrfs, btrfs.index("void reap_fcb(")) + "\n")
+(out / "reap_fcbs.inc").write_text(block(btrfs, btrfs.index("void reap_fcbs(")) + "\n")
 (out / "free_fileref.inc").write_text(block(btrfs, btrfs.index("void free_fileref(")) + "\n")
+treefuncs = read("src/treefuncs.c")
+(out / "trees.inc").write_text("".join(block(treefuncs, treefuncs.index(f"void {name}(")) + "\n"
+                                       for name in ("free_tree", "free_trees_root")))
+(out / "clear_batch.inc").write_text(block(treefuncs, treefuncs.index("void clear_batch_list(")) + "\n")
+batch_start = mount.index("    Status = commit_batch_list(Vcb, &batchlist, Irp);")
+batch_end = mount.index("    Vcb->volume_fcb =", batch_start)
+(out / "batch_failure.inc").write_text(
+    "static NTSTATUS fail_batch_commit(device_extension* Vcb, LIST_ENTRY* batchlist) {\n    NTSTATUS Status;\n    void* Irp = NULL;\n" +
+    mount[batch_start:batch_end].replace("&batchlist", "batchlist") + "exit:\n    return Status;\n}\n")
 binary = out / "mount_test"
 flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie"] if args.sanitize else []
 subprocess.run(["gcc", "-std=c11", "-O0", "-g", "-Wall", "-Wextra", "-Werror",

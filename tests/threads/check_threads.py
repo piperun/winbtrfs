@@ -77,7 +77,7 @@ pieces.append("void stop_volume_threads(device_extension* Vcb) {\n" + "\n".join(
 # The actual mount activation statements, including each error branch and goto.
 # Only unrelated disk/tree discovery before this point and registry bookkeeping
 # after it are excluded. This guards startup/publication ordering as well as helpers.
-mount = function(btrfs, "static NTSTATUS mount_vol(")
+mount = function(read("src/mount.c") or btrfs, "NTSTATUS mount_vol(")
 start = mount.index("find_disk_holes(Vcb,")
 start = mount.index("        le = le->Flink;", start)
 start = mount.index("\n    }", start) + len("\n    }")

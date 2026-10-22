@@ -81,6 +81,7 @@ endif()
 # btrfs.sys
 
 set(SRC_FILES src/balance.c
+    src/add-device.c
     src/allocated-ranges.c
     src/blake2b-ref.c
     src/boot.c
@@ -113,6 +114,8 @@ set(SRC_FILES src/balance.c
     src/galois.c
     src/hardlink-info.c
     src/mknod.c
+    src/mount.c
+    src/mount-metadata.c
     src/mount-cleanup.c
     src/notify.c
     src/pnp.c
