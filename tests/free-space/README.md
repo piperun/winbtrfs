@@ -85,6 +85,18 @@ of the other branch's fixes.
   reference after its owner releases the file, including when the caller holds
   the dirty-list lock or the flush fails.
 
+- `13b84607` trusts entry and bitmap counts without checking their padded
+  positions against the buffer. The fixed loader checks
+  each complete entry before reading it, requires the actual bitmap count
+  to match the header, and checks each bitmap sector before using it.
+
+Four layout cases cover sector padding that exhausts the entry area or bitmap
+area, plus more and fewer bitmap entries than the header declares. Observers
+in the extracted code stop invalid entry or bitmap accesses at the boundary,
+before memory is read or modified, including when checking the old loader.
+Every rejected layout must discard the cache and regenerate the chunk's free
+space. Existing valid extent and bitmap caches remain controls.
+
 The runner extracts the production `space` type, `order_space_entry`,
 `space_list_add2`, `space_list_merge`, `add_space_entry` and
 `space_list_subtract2`, plus the `place_space_entry`, `space_list_add_from` and

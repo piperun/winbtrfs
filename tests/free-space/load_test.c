@@ -148,7 +148,9 @@ static uint8_t bitmaps[BITMAPS][BITMAP_LENGTH / SECTOR / 8];
 static struct btrfs_chunk chunk_item;
 static chunk load_chunk;
 static fcb cache_file;
-static uint8_t cache_data[2 * SECTOR];
+static uint8_t cache_data[4 * SECTOR];
+static uint8_t* cache_buffer;
+static uint64_t bitmap_reads;
 static unsigned extent_searches, header_deletes, cache_excises, dirty_marks, failures;
 /* What deleting the header item and excising the cache's extents return. */
 static NTSTATUS delete_status, excise_status;
@@ -203,8 +205,25 @@ static void free_fcb(fcb* f) {
 
 static NTSTATUS read_file(fcb* f, uint8_t* data, uint64_t start, uint64_t length, ULONG* pbr, PIRP Irp) {
     CHECK(f == &cache_file && start == 0 && length == sizeof(cache_data) && !pbr && !Irp);
+    cache_buffer = data;
+    bitmap_reads = 0;
     memcpy(data, cache_data, sizeof(cache_data));
     return STATUS_SUCCESS;
+}
+
+/* Observers run before production code reads an entry or changes a bitmap. They
+   stop an invalid span at the call boundary, so even the unfixed revision is
+   tested without reading or writing outside an allocation. */
+static void observe_cache_entry(uint8_t* data, uint64_t off, uint32_t size) {
+    CHECK(data == cache_buffer && size == sizeof(cache_data));
+    CHECK(off <= size && sizeof(struct btrfs_free_space_entry) <= size - off);
+}
+
+static void observe_cache_bitmap(void* data, uint32_t size) {
+    uintptr_t start = (uintptr_t)cache_buffer, at = (uintptr_t)data;
+    CHECK(size == SECTOR && at >= start);
+    CHECK(at - start <= sizeof(cache_data) - size);
+    CHECK(bitmap_reads++ < header.num_bitmaps);
 }
 
 /* Every buffer checksums to the seed, so the loader expects a stored checksum of 0. */
@@ -326,6 +345,8 @@ static void set_up_chunk(void) {
     extent_tree.t = (tree){ extent_items, COUNT(extent_items) };
     extent_searches = header_deletes = cache_excises = dirty_marks = 0;
     allocations = fail_allocation = 0;
+    cache_buffer = NULL;
+    bitmap_reads = 0;
     delete_status = excise_status = STATUS_SUCCESS;
     superblock_stripe = (range){ 0, 0 };
     write_during_protect = false;
@@ -351,7 +372,7 @@ static NTSTATUS load_tree(void) {
 }
 
 /* A v1 cache written in the last transaction, holding the ranges as extent entries:
-   two sector checksums, the generation, then the entries. */
+   sector checksums, the generation, then the entries. */
 static void set_up_cache(const range* r, size_t count) {
     set_up_chunk();
     volume.superblock.generation = CACHE_GENERATION + 1;
@@ -361,8 +382,9 @@ static void set_up_cache(const range* r, size_t count) {
     cache_file = (fcb){ .inode_item = { .size = sizeof(cache_data) } };
     memset(cache_data, 0, sizeof(cache_data));
     uint64_t generation = CACHE_GENERATION;
-    memcpy(cache_data + 2 * sizeof(uint32_t), &generation, sizeof(generation));
-    uint8_t* at = cache_data + 2 * sizeof(uint32_t) + sizeof(uint64_t);
+    size_t checksums = sizeof(cache_data) / SECTOR * sizeof(uint32_t);
+    memcpy(cache_data + checksums, &generation, sizeof(generation));
+    uint8_t* at = cache_data + checksums + sizeof(uint64_t);
     for (size_t i = 0; i < count; i++, at += sizeof(struct btrfs_free_space_entry)) {
         struct btrfs_free_space_entry e = { r[i].start, r[i].end - r[i].start, BTRFS_FREE_SPACE_EXTENT };
         memcpy(at, &e, sizeof(e));
@@ -388,7 +410,7 @@ static void add_cache_bitmap(uint64_t offset, const range* r, size_t count) {
             e.bytes += SECTOR;
         }
     }
-    memcpy(cache_data + 2 * sizeof(uint32_t) + sizeof(uint64_t) + header.num_entries * sizeof(e), &e, sizeof(e));
+    memcpy(cache_data + sizeof(cache_data) / SECTOR * sizeof(uint32_t) + sizeof(uint64_t) + header.num_entries * sizeof(e), &e, sizeof(e));
     header.num_entries++;
     header.num_bitmaps = 1;
 }
@@ -1167,6 +1189,59 @@ static void protect_failure_held_cache(void) {
     CHECK(failures == 0);
 }
 
+/* Locate an entry using the format's sector padding, independently of the
+   loader's running cursor. Only complete entries are put into the fixture. */
+static void set_cache_entry(unsigned index, struct btrfs_free_space_entry entry) {
+    size_t off = sizeof(cache_data) / SECTOR * sizeof(uint32_t) + sizeof(uint64_t);
+    for (unsigned i = 0; i <= index; i++) {
+        if (SECTOR - off % SECTOR < sizeof(entry)) off += SECTOR - off % SECTOR;
+        CHECK(off + sizeof(entry) <= sizeof(cache_data));
+        if (i == index) memcpy(cache_data + off, &entry, sizeof(entry));
+        off += sizeof(entry);
+    }
+}
+
+/* Entry counts must account for padding; bitmap entries must match the header
+   and each bitmap must have a complete sector in the cache buffer. */
+static void cache_layout_bounds(unsigned trial) {
+    const unsigned sectors = sizeof(cache_data) / SECTOR;
+    const unsigned per_sector = SECTOR / sizeof(struct btrfs_free_space_entry);
+    const unsigned first_sector = (SECTOR - sectors * sizeof(uint32_t) - sizeof(uint64_t)) /
+                                  sizeof(struct btrfs_free_space_entry);
+    set_up_bitmap_cache();
+    switch (trial) {
+        case 0:
+            set_up_protected_cache();
+            header.num_entries = first_sector + (sectors - 1) * per_sector + 1;
+            break;
+        case 1:
+            set_up_protected_cache();
+            header.num_entries = first_sector + (sectors - 2) * per_sector + 1;
+            header.num_bitmaps = 1;
+            set_cache_entry((unsigned)header.num_entries - 1,
+                            (struct btrfs_free_space_entry){ BASE, 0, BTRFS_FREE_SPACE_BITMAP });
+            break;
+        case 2:
+            header.num_entries++;
+            set_cache_entry(3, (struct btrfs_free_space_entry){ BASE, 0, BTRFS_FREE_SPACE_BITMAP });
+            break;
+        case 3:
+            header.num_bitmaps++;
+            break;
+        default: CHECK(false);
+    }
+    CHECK(load_cache_chunk(&volume, &load_chunk, NULL) == STATUS_SUCCESS);
+    check_loaded(true, false);
+    check_cache_discarded(true);
+    free_entries();
+    CHECK(failures == 0);
+}
+
+static void cache_entries_fit_buffer(void) { cache_layout_bounds(0); }
+static void cache_bitmaps_fit_buffer(void) { cache_layout_bounds(1); }
+static void cache_bitmap_count_excess(void) { cache_layout_bounds(2); }
+static void cache_bitmap_count_missing(void) { cache_layout_bounds(3); }
+
 static const struct { const char* name; void (*run)(void); } cases[] = {
     { "load-tree", tree_loaded },
     { "load-tree-extents", tree_extents_loaded },
@@ -1192,6 +1267,10 @@ static const struct { const char* name; void (*run)(void); } cases[] = {
     { "load-cache-bitmap-run-past-chunk", cache_bitmap_run_past_chunk },
     { "load-cache-bitmap-run-after-chunk", cache_bitmap_run_after_chunk },
     { "load-cache-bitmap-clear-past-chunk", cache_bitmap_clear_past_chunk },
+    { "load-cache-entries-fit-buffer", cache_entries_fit_buffer },
+    { "load-cache-bitmaps-fit-buffer", cache_bitmaps_fit_buffer },
+    { "load-cache-bitmap-count-excess", cache_bitmap_count_excess },
+    { "load-cache-bitmap-count-missing", cache_bitmap_count_missing },
     { "load-tree-allocation-failures", tree_allocation_failures },
     { "load-tree-mixed-allocation-failures", mixed_tree_allocation_failures },
     { "load-cache-allocation-failures", cache_allocation_failures },
