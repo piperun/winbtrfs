@@ -37,7 +37,7 @@ NTSTATUS add_delete_inode_extref(device_extension* Vcb, batch_item* bi, LIST_ENT
     ier = ExAllocatePoolWithTag(PagedPool, offsetof(struct btrfs_inode_extref, name) + delir->name_len, ALLOC_TAG);
     if (!ier) {
         ERR("out of memory\n");
-        ExFreePool(bi2);
+        ExFreeToPagedLookasideList(&Vcb->batch_item_lookaside, bi2);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 

@@ -81,7 +81,8 @@ counts, and no other remaining allocations or live resources.
 
 Fixtures construct partial-mount state directly. They do not execute disk
 discovery, full mount initialization, root cache-file close, concurrent
-kernel activity or Windows pools. The root-fileref allocation-failure branch is also exercised.
+kernel activity or Windows pools. The root-fileref allocation-failure branch
+is also exercised.
 No complete mount-failure cleanup or #832 hang fix is claimed.
 
 Each case runs separately with a five-second timeout and core dumps disabled.
@@ -100,8 +101,8 @@ Eight batch-commit failure cases exercise mount's actual commit-error branch
 and the production nested-list destructor. They cover zero through three
 pending roots with multiple index groups and lookaside items, preserving both
 failure statuses. Before the mount cleanup, 127/133 cases pass; the six
-nonempty-list cases fail. The batch commit helper's detached current root
-and flattened local item list require separate ownership cleanup.
+nonempty-list cases fail. The batch helper cases below also cover the
+current detached root and its flattened local item list.
 
 Eight root-fileref cases represent root-CCB allocation failure, after the
 fileref and its FCB have been linked but before a stream-file owner exists.
@@ -129,3 +130,37 @@ for one or three stripes. Missing first, middle and last stripes must free
 the devices array, chunk item and chunk; present-device controls retain all
 three allocations for the caller. Before the fix, 197/201 pass; all four
 missing-device cases leak the array.
+
+Run the batch helper ownership cases with the same native options:
+
+```sh
+python3 tests/mount/check_batch.py . --build-dir build/batch-tests
+python3 tests/mount/check_batch.py . --init zero --sanitize --build-dir build/batch-tests-asan
+```
+
+Three extended-reference allocation cases execute the production helper,
+including success and each allocation failure. Before the wrong-pool fix,
+2/3 pass: payload allocation failure returns a lookaside allocation through
+ExFreePool. The corrected helper returns it to its original lookaside.
+The mock checksum only supplies consistent hash ordering; these cases do
+not validate the checksum algorithm or disk transactions.
+
+The batch runner additionally executes the full production commit and
+collision helpers with three roots, multiple indices, insertion payloads,
+reference deletion, inode-reference collisions and extended-reference
+overflow. It fails tree lookup and pool/lookaside allocations both before
+and after earlier items have transferred to the tree. It requires every
+batch root, index, item and untransferred payload to be consumed on failure,
+preserves the original error, and verifies that partial insertions and their
+payloads remain owned by the tree. Before the common ownership fix, 19/58
+batch cases pass; after it, all 58 pass. The fixture uses one-leaf trees and modeled lookup; real
+transaction flush, rollback and concurrent kernel execution are not covered.
+
+Seven producer cases exercise the actual queue insertion and index split,
+including the real 1,000-item threshold. Before the producer fix, 9/10
+combined helper/producer cases pass: a failed index allocation leaves the
+new item queued even though the caller receives an error and retains its
+payload. On failure, insertion removes only that new item, preserves the
+existing queue and returns its original insufficient-resources status.
+The producer tests release queued payloads explicitly so they also cover
+this ownership boundary independently of the commit destructor.
