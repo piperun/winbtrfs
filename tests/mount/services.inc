@@ -30,6 +30,11 @@ static void release(void* p, LOOKASIDE* owner) {
     }
     CHECK(false);
 }
+/* Pool allocations contain old bytes until production explicitly initializes them. */
+static void* ExAllocatePoolWithTag(int pool, size_t size, unsigned tag) {
+    (void)pool; (void)tag;
+    void* p = allocate(size, NULL); memset(p, 0xa5, size); return p;
+}
 static void ExFreePool(void* p) { release(p, NULL); }
 static void ExFreeToNPagedLookasideList(LOOKASIDE* list, void* p) {
     CHECK(list->nonpaged); release(p, list);

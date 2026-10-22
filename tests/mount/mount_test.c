@@ -8,6 +8,9 @@
 #include "trees.inc"
 #include "cleanup.inc"
 #include "failure.inc"
+#include "device_init.inc"
+
+static unsigned space_mode;
 
 static void exercise(unsigned stage, unsigned devices, NTSTATUS failure, unsigned dummy_stage, unsigned loaded, bool root_file) {
     if (stage == 0) {
@@ -28,6 +31,12 @@ static void exercise(unsigned stage, unsigned devices, NTSTATUS failure, unsigne
         InitializeListHead(&volume.devices);
         for (unsigned i = 0; i < devices; i++) {
             device* dev = allocate(sizeof(*dev), NULL); InsertTailList(&volume.devices, &dev->list_entry);
+            /* A discovery failure can leave later device lists uninitialized. */
+            if (space_mode && (space_mode != 3 || i == 0)) {
+                InitializeListHead(&dev->space);
+                if (space_mode >= 2) for (unsigned j = 0; j <= i; j++)
+                    InsertTailList(&dev->space, &((space*)allocate(sizeof(space), NULL))->list_entry);
+            }
         }
     } else CHECK(!devices);
     InitializeListHead(&subvolume.fcbs);
@@ -70,6 +79,23 @@ static void exercise(unsigned stage, unsigned devices, NTSTATUS failure, unsigne
 
 int main(int argc, char** argv) {
     CHECK(argc == 2);
+    if (strcmp(argv[1], "--list") == 0) puts("first-device-initialization");
+    else if (strcmp(argv[1], "first-device-initialization") == 0) {
+        device* dev = NULL;
+        CHECK(allocate_first_device(&dev) == STATUS_SUCCESS);
+        CHECK(dev && !dev->space.Flink && !dev->space.Blink);
+        ExFreePool(dev); CHECK(!allocations); return 0;
+    }
+    const char* spaces[] = { "device-space-empty", "device-space-populated", "device-space-partial" };
+    for (unsigned mode = 0; mode < 3; mode++) for (unsigned count = 1; count <= 3; count += 2)
+        for (unsigned error = 0; error < 2; error++) {
+            char name[100]; snprintf(name, sizeof(name), "%s-devices%u-error%u", spaces[mode], count, error);
+            if (strcmp(argv[1], "--list") == 0) { puts(name); continue; }
+            if (strcmp(argv[1], name) != 0) continue;
+            space_mode = mode + 1;
+            exercise(3, count, error ? STATUS_INTERNAL_ERROR : STATUS_INSUFFICIENT_RESOURCES, 0, LOADED_NONE, false);
+            return 0;
+        }
     const char* stages[] = { "no-device", "early-device", "device-list", "empty-lookasides", "volume-fcb",
         "root-fcb", "root-subvolume", "root-payload-control" };
     const unsigned counts[] = { 0, 1, 3 };

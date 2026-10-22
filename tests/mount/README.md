@@ -86,11 +86,17 @@ Still leaking on some failure paths: batch entries left when
 `commit_batch_list` fails; FCBs marked dirty and changed-extent records
 created while clearing the free-space cache; the root fileref and root FCB
 on the root-fileref branch; the notify synchronization object set up with
-`FsRtlNotifyInitializeSync`; and device free-space lists after a failure in
-or after `find_disk_holes`. The first device is allocated without zeroing,
-so the cleanup cannot tell whether its free-space list was initialized. No
-complete mount-failure cleanup or #832 hang fix is claimed.
+`FsRtlNotifyInitializeSync`. No complete mount-failure cleanup or #832 hang
+fix is claimed.
 
 Each case runs separately with a five-second timeout and core dumps disabled.
 Windows runtime validation remains outstanding. LeakSanitizer may require
 execution outside a tracing sandbox.
+
+The 13 device-space cases run the first-device allocation statements with
+nonzero pool contents and verify that the device starts zeroed. Failure
+fixtures cover empty, populated and partly initialized device-space lists
+with one or three devices and both errors. Before the device-space fix,
+116/125 cases pass; the initialization check and eight populated-list cases
+fail. Cleanup frees initialized lists and safely skips devices whose hole
+discovery has not started.

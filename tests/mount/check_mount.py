@@ -36,6 +36,11 @@ def block(source, start):
 btrfs = read("src/btrfs.c")
 mount_source = read("src/mount.c", optional=True) or btrfs
 mount = block(mount_source, mount_source.index("NTSTATUS mount_vol("))
+device_start = mount.index("    dev = ExAllocatePoolWithTag(")
+device_end = mount.index("    dev->devobj = readobj;", device_start)
+(out / "device_init.inc").write_text(
+    "static NTSTATUS allocate_first_device(device** result) {\n    device* dev;\n    NTSTATUS Status;\n" +
+    mount[device_start:device_end] + "    *result = dev;\n    return STATUS_SUCCESS;\nexit:\n    return Status;\n}\n")
 exit_start = mount.index("\nexit:\n") + len("\nexit:\n")
 failure = mount.index("    if (!NT_SUCCESS(Status)) {", exit_start)
 wrapper = "static NTSTATUS fail_mount(device_extension* Vcb, fcb* root_fcb, bool init_lookaside, NTSTATUS Status, PDEVICE_OBJECT NewDeviceObject) {\n"

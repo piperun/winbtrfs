@@ -143,6 +143,14 @@ void cleanup_failed_mount(device_extension* Vcb, fcb* root_fcb, bool init_lookas
         while (!IsListEmpty(&Vcb->devices)) {
             device* dev2 = CONTAINING_RECORD(RemoveHeadList(&Vcb->devices), device, list_entry);
 
+            if (dev2->space.Flink) {
+                while (!IsListEmpty(&dev2->space)) {
+                    space* s = CONTAINING_RECORD(RemoveHeadList(&dev2->space), space, list_entry);
+
+                    ExFreePool(s);
+                }
+            }
+
             ExFreePool(dev2);
         }
     }

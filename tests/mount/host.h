@@ -46,7 +46,7 @@ typedef struct { LIST_ENTRY list_entry; void* csum; } extent;
 typedef struct { LIST_ENTRY list_entry; STRING name, utf8; } hardlink;
 typedef struct { LIST_ENTRY list_entry; } xattr;
 typedef struct { LIST_ENTRY list_entry_index; STRING utf8, name, name_uc; } dir_child;
-typedef struct { LIST_ENTRY list_entry; } device;
+typedef struct { LIST_ENTRY list_entry, space; } device;
 typedef struct { LIST_ENTRY list_entry; } space;
 typedef struct { LIST_ENTRY list_entry; void* data; } sys_chunk;
 typedef struct {
@@ -74,6 +74,8 @@ typedef struct { bool deleted; device_extension* DeviceExtension; } DEVICE_OBJEC
 #define NT_SUCCESS(s) ((s) >= 0)
 #define PagedPool 1
 #define NonPagedPool 0
+#define ALLOC_TAG 0
+#define RtlZeroMemory(p,n) memset(p, 0, n)
 #define _In_
 #define _Inout_
 #define _In_opt_

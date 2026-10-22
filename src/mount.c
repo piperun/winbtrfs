@@ -504,6 +504,8 @@ NTSTATUS mount_vol(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
         goto exit;
     }
 
+    RtlZeroMemory(dev, sizeof(device));
+
     dev->devobj = readobj;
     dev->fileobj = fileobj;
     RtlCopyMemory(&dev->devitem, &Vcb->superblock.dev_item, sizeof(struct btrfs_dev_item));
