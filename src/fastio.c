@@ -402,16 +402,56 @@ static BOOLEAN __stdcall fast_io_write(PFILE_OBJECT FileObject, PLARGE_INTEGER F
         return false;
     }
 
-    ret = FsRtlCopyWrite(FileObject, FileOffset, Length, Wait, LockKey, Buffer, IoStatus, DeviceObject);
+    // FsRtlCopyWrite can extend Header.FileSize but not inode_item.size, and write_file2
+    // clips paging writes to inode_item.size, so writes that end past ValidDataLength go
+    // through write_file2 instead. Holding the FCB shared keeps ValidDataLength fixed until
+    // FsRtlCopyWrite has finished; acquire_for_lazy_write needs the FCB exclusively, so
+    // this too relies on FsRtlCopyWrite not waiting.
 
-    if (ret)
-        fcb->inode_item.size = fcb->Header.FileSize.QuadPart;
+    if (!ExAcquireResourceSharedLite(fcb->Header.Resource, false)) {
+        ExReleaseResourceLite(&fcb->Vcb->tree_lock);
+        FsRtlExitFileSystem();
+        return false;
+    }
 
+    // FsRtlCopyWrite mustn't wait while we hold tree_lock. Its first step, CcCanIWrite,
+    // can sleep until the lazy writer has written out dirty pages, and the lazy writer
+    // takes tree_lock in acquire_for_lazy_write. If the flush thread is waiting for
+    // tree_lock exclusively, that acquire blocks too, and the three threads deadlock.
+    // When FsRtlCopyWrite returns false, the I/O manager sends an IRP instead, and
+    // write_file2 calls CcCanIWrite before acquiring any locks.
+
+    if ((FileOffset->LowPart == FILE_WRITE_TO_END_OF_FILE && FileOffset->HighPart == -1) ||
+        (uint64_t)FileOffset->QuadPart + Length > (uint64_t)fcb->Header.ValidDataLength.QuadPart)
+        ret = false;
+    else
+        ret = FsRtlCopyWrite(FileObject, FileOffset, Length, false, LockKey, Buffer, IoStatus, DeviceObject);
+
+    ExReleaseResourceLite(fcb->Header.Resource);
     ExReleaseResourceLite(&fcb->Vcb->tree_lock);
 
     FsRtlExitFileSystem();
 
     return ret;
+}
+
+_Function_class_(FAST_IO_PREPARE_MDL_WRITE)
+static BOOLEAN __stdcall fast_io_prepare_mdl_write(PFILE_OBJECT FileObject, PLARGE_INTEGER FileOffset, ULONG Length, ULONG LockKey,
+                                                   PMDL* MdlChain, PIO_STATUS_BLOCK IoStatus, PDEVICE_OBJECT DeviceObject) {
+    UNUSED(FileObject);
+    UNUSED(FileOffset);
+    UNUSED(Length);
+    UNUSED(LockKey);
+    UNUSED(MdlChain);
+    UNUSED(IoStatus);
+    UNUSED(DeviceObject);
+
+    // FsRtlPrepareMdlWriteDev can extend Header.FileSize but not inode_item.size, and it always
+    // waits, so it cannot run with the FCB held. Declining sends MDL writes to write_file2 as
+    // IRPs. A NULL PrepareMdlWrite would not help: FsRtlPrepareMdlWrite then calls
+    // FsRtlPrepareMdlWriteDev itself.
+
+    return false;
 }
 
 _Function_class_(FAST_IO_LOCK)
@@ -594,7 +634,7 @@ void init_fast_io_dispatch(FAST_IO_DISPATCH** fiod) {
     FastIoDispatch.AcquireForModWrite = fast_io_acquire_for_mod_write;
     FastIoDispatch.MdlRead = FsRtlMdlReadDev;
     FastIoDispatch.MdlReadComplete = FsRtlMdlReadCompleteDev;
-    FastIoDispatch.PrepareMdlWrite = FsRtlPrepareMdlWriteDev;
+    FastIoDispatch.PrepareMdlWrite = fast_io_prepare_mdl_write;
     FastIoDispatch.MdlWriteComplete = FsRtlMdlWriteCompleteDev;
     FastIoDispatch.ReleaseForModWrite = fast_io_release_for_mod_write;
     FastIoDispatch.AcquireForCcFlush = fast_io_acquire_for_ccflush;
