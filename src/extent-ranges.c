@@ -25,143 +25,205 @@ typedef struct {
     chunk* chunk;
     uint64_t skip_start;
     uint64_t skip_end;
-    LIST_ENTRY list_entry;
+    extent** exts; // the extents using this range, in list order; not updated when ranges merge
+    size_t num_exts;
 } extent_range;
+
+static bool can_trim_or_merge(extent* ext) {
+    return (ext->extent_data.type == BTRFS_FILE_EXTENT_REG || ext->extent_data.type == BTRFS_FILE_EXTENT_PREALLOC) &&
+           ext->extent_data.compression == BTRFS_COMPRESS_NONE && ext->unique && ext->extent_data.disk_num_bytes != 0;
+}
+
+// bottom-up merge sort by disk address, which keeps extents at the same address in list order;
+// returns whichever of the two arrays holds the result
+static extent** sort_extents(extent** exts, extent** tmp, size_t num) {
+    size_t width;
+
+    for (width = 1; width < num; width *= 2) {
+        size_t start;
+        extent** swap;
+
+        for (start = 0; start < num; start += 2 * width) {
+            size_t mid = min(start + width, num), end = min(start + 2 * width, num);
+            size_t i = start, j = mid, k = start;
+
+            while (i < mid && j < end) {
+                if (exts[j]->extent_data.disk_bytenr < exts[i]->extent_data.disk_bytenr)
+                    tmp[k++] = exts[j++];
+                else
+                    tmp[k++] = exts[i++];
+            }
+
+            while (i < mid)
+                tmp[k++] = exts[i++];
+
+            while (j < end)
+                tmp[k++] = exts[j++];
+        }
+
+        swap = exts;
+        exts = tmp;
+        tmp = swap;
+    }
+
+    return exts;
+}
+
+// the last range that starts at or before address, or NULL if there is none
+static extent_range* find_extent_range(extent_range* ranges, size_t num_ranges, uint64_t address) {
+    size_t lo = 0, hi = num_ranges;
+
+    while (lo < hi) {
+        size_t mid = lo + ((hi - lo) / 2);
+
+        if (ranges[mid].address <= address)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+
+    return lo > 0 ? &ranges[lo - 1] : NULL;
+}
 
 NTSTATUS rationalize_extents(fcb* fcb, PIRP Irp) {
     LIST_ENTRY* le;
-    LIST_ENTRY extent_ranges;
+    extent** exts;
+    extent** sorted;
+    extent_range* ranges = NULL;
     extent_range* er;
     bool changed = false, truncating = false;
-    uint32_t num_extents = 0;
+    size_t num_exts = 0, num_ranges = 0, i, j;
     NTSTATUS Status;
-
-    InitializeListHead(&extent_ranges);
 
     le = fcb->extents.Flink;
     while (le != &fcb->extents) {
         extent* ext = CONTAINING_RECORD(le, extent, list_entry);
 
-        if ((ext->extent_data.type == BTRFS_FILE_EXTENT_REG || ext->extent_data.type == BTRFS_FILE_EXTENT_PREALLOC) && ext->extent_data.compression == BTRFS_COMPRESS_NONE && ext->unique) {
-            if (ext->extent_data.disk_num_bytes != 0) {
-                LIST_ENTRY* le2;
+        if (can_trim_or_merge(ext))
+            num_exts++;
 
-                le2 = extent_ranges.Flink;
-                while (le2 != &extent_ranges) {
-                    extent_range* er2 = CONTAINING_RECORD(le2, extent_range, list_entry);
-
-                    if (er2->address == ext->extent_data.disk_bytenr) {
-                        er2->skip_start = min(er2->skip_start, ext->extent_data.offset);
-                        er2->skip_end = min(er2->skip_end, ext->extent_data.disk_num_bytes - ext->extent_data.offset - ext->extent_data.num_bytes);
-                        goto cont;
-                    } else if (er2->address > ext->extent_data.disk_bytenr)
-                        break;
-
-                    le2 = le2->Flink;
-                }
-
-                er = ExAllocatePoolWithTag(PagedPool, sizeof(extent_range), ALLOC_TAG); // FIXME - should be from lookaside?
-                if (!er) {
-                    ERR("out of memory\n");
-                    Status = STATUS_INSUFFICIENT_RESOURCES;
-                    goto end;
-                }
-
-                er->address = ext->extent_data.disk_bytenr;
-                er->length = ext->extent_data.disk_num_bytes;
-                er->offset = ext->offset - ext->extent_data.offset;
-                er->changed = false;
-                er->chunk = NULL;
-                er->skip_start = ext->extent_data.offset;
-                er->skip_end = ext->extent_data.disk_num_bytes - ext->extent_data.offset - ext->extent_data.num_bytes;
-
-                if (er->skip_start != 0 || er->skip_end != 0)
-                    truncating = true;
-
-                InsertHeadList(le2->Blink, &er->list_entry);
-                num_extents++;
-            }
-        }
-
-cont:
         le = le->Flink;
     }
 
-    if (num_extents == 0 || (num_extents == 1 && !truncating)) {
+    if (num_exts == 0)
+        return STATUS_SUCCESS;
+
+    // the second half of the array is the merge sort's buffer
+    exts = ExAllocatePoolWithTag(PagedPool, sizeof(extent*) * num_exts * 2, ALLOC_TAG);
+    if (!exts) {
+        ERR("out of memory\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    i = 0;
+    le = fcb->extents.Flink;
+    while (le != &fcb->extents) {
+        extent* ext = CONTAINING_RECORD(le, extent, list_entry);
+
+        if (can_trim_or_merge(ext))
+            exts[i++] = ext;
+
+        le = le->Flink;
+    }
+
+    sorted = sort_extents(exts, &exts[num_exts], num_exts);
+
+    for (i = 0; i < num_exts; i++) {
+        if (i == 0 || sorted[i]->extent_data.disk_bytenr != sorted[i - 1]->extent_data.disk_bytenr)
+            num_ranges++;
+    }
+
+    ranges = ExAllocatePoolWithTag(PagedPool, sizeof(extent_range) * num_ranges, ALLOC_TAG);
+    if (!ranges) {
+        ERR("out of memory\n");
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto end;
+    }
+
+    // one range per disk extent, with its length and file offset taken from the first extent in the list that uses it
+    er = ranges;
+    for (i = 0; i < num_exts; i++) {
+        extent* ext = sorted[i];
+
+        if (i > 0 && ext->extent_data.disk_bytenr == sorted[i - 1]->extent_data.disk_bytenr) {
+            er->skip_start = min(er->skip_start, ext->extent_data.offset);
+            er->skip_end = min(er->skip_end, ext->extent_data.disk_num_bytes - ext->extent_data.offset - ext->extent_data.num_bytes);
+            er->num_exts++;
+            continue;
+        }
+
+        if (i > 0)
+            er++;
+
+        er->address = ext->extent_data.disk_bytenr;
+        er->length = ext->extent_data.disk_num_bytes;
+        er->offset = ext->offset - ext->extent_data.offset;
+        er->changed = false;
+        er->skip_start = ext->extent_data.offset;
+        er->skip_end = ext->extent_data.disk_num_bytes - ext->extent_data.offset - ext->extent_data.num_bytes;
+        er->exts = &sorted[i];
+        er->num_exts = 1;
+
+        if (er->skip_start != 0 || er->skip_end != 0)
+            truncating = true;
+    }
+
+    if (num_ranges == 1 && !truncating) {
         Status = STATUS_SUCCESS;
         goto end;
     }
 
-    le = extent_ranges.Flink;
-    while (le != &extent_ranges) {
-        er = CONTAINING_RECORD(le, extent_range, list_entry);
+    for (i = 0; i < num_ranges; i++) {
+        er = &ranges[i];
 
-        if (!er->chunk) {
-            LIST_ENTRY* le2;
-
-            er->chunk = get_chunk_from_address(fcb->Vcb, er->address);
-
-            if (!er->chunk) {
-                ERR("get_chunk_from_address(%I64x) failed\n", er->address);
-                Status = STATUS_INTERNAL_ERROR;
-                goto end;
-            }
-
-            le2 = le->Flink;
-            while (le2 != &extent_ranges) {
-                extent_range* er2 = CONTAINING_RECORD(le2, extent_range, list_entry);
-
-                if (!er2->chunk && er2->address >= er->chunk->offset && er2->address < er->chunk->offset + er->chunk->chunk_item->length)
-                    er2->chunk = er->chunk;
-
-                le2 = le2->Flink;
-            }
+        // the ranges are sorted by address, so a chunk's ranges are consecutive
+        if (i > 0 && er->address < ranges[i - 1].chunk->offset + ranges[i - 1].chunk->chunk_item->length) {
+            er->chunk = ranges[i - 1].chunk;
+            continue;
         }
 
-        le = le->Flink;
+        er->chunk = get_chunk_from_address(fcb->Vcb, er->address);
+
+        if (!er->chunk) {
+            ERR("get_chunk_from_address(%I64x) failed\n", er->address);
+            Status = STATUS_INTERNAL_ERROR;
+            goto end;
+        }
     }
 
     if (truncating) {
         // truncate beginning or end of extent if unused
 
-        le = extent_ranges.Flink;
-        while (le != &extent_ranges) {
-            er = CONTAINING_RECORD(le, extent_range, list_entry);
+        for (i = 0; i < num_ranges; i++) {
+            er = &ranges[i];
 
             if (er->skip_start > 0) {
-                LIST_ENTRY* le2 = fcb->extents.Flink;
-                while (le2 != &fcb->extents) {
-                    extent* ext = CONTAINING_RECORD(le2, extent, list_entry);
+                for (j = 0; j < er->num_exts; j++) {
+                    extent* ext = er->exts[j];
 
-                    if ((ext->extent_data.type == BTRFS_FILE_EXTENT_REG || ext->extent_data.type == BTRFS_FILE_EXTENT_PREALLOC) && ext->extent_data.compression == BTRFS_COMPRESS_NONE && ext->unique) {
-                        if (ext->extent_data.disk_num_bytes != 0 && ext->extent_data.disk_bytenr == er->address) {
-                            Status = update_changed_extent_ref(fcb->Vcb, er->chunk, ext->extent_data.disk_bytenr,
-                                                               ext->extent_data.disk_num_bytes, fcb->subvol->id,
-                                                               fcb->inode, ext->offset - ext->extent_data.offset,
-                                                               -1, fcb->inode_item.flags & BTRFS_INODE_NODATASUM,
-                                                               true, Irp, NULL);
-                            if (!NT_SUCCESS(Status)) {
-                                ERR("update_changed_extent_ref returned %08lx\n", Status);
-                                goto end;
-                            }
-
-                            ext->extent_data.ram_bytes -= er->skip_start;
-                            ext->extent_data.disk_num_bytes -= er->skip_start;
-                            ext->extent_data.disk_bytenr += er->skip_start;
-                            ext->extent_data.offset -= er->skip_start;
-
-                            Status = add_changed_extent_ref(er->chunk, ext->extent_data.disk_bytenr,
-                                                            ext->extent_data.disk_num_bytes,
-                                                            fcb->subvol->id, fcb->inode,
-                                                            ext->offset - ext->extent_data.offset,
-                                                            1, fcb->inode_item.flags & BTRFS_INODE_NODATASUM,
-                                                            NULL);
-                            if (!NT_SUCCESS(Status))
-                                goto end;
-                        }
+                    Status = update_changed_extent_ref(fcb->Vcb, er->chunk, ext->extent_data.disk_bytenr,
+                                                       ext->extent_data.disk_num_bytes, fcb->subvol->id,
+                                                       fcb->inode, ext->offset - ext->extent_data.offset,
+                                                       -1, fcb->inode_item.flags & BTRFS_INODE_NODATASUM,
+                                                       true, Irp, NULL);
+                    if (!NT_SUCCESS(Status)) {
+                        ERR("update_changed_extent_ref returned %08lx\n", Status);
+                        goto end;
                     }
 
-                    le2 = le2->Flink;
+                    ext->extent_data.ram_bytes -= er->skip_start;
+                    ext->extent_data.disk_num_bytes -= er->skip_start;
+                    ext->extent_data.disk_bytenr += er->skip_start;
+                    ext->extent_data.offset -= er->skip_start;
+
+                    Status = add_changed_extent_ref(er->chunk, ext->extent_data.disk_bytenr,
+                                                    ext->extent_data.disk_num_bytes,
+                                                    fcb->subvol->id, fcb->inode,
+                                                    ext->offset - ext->extent_data.offset,
+                                                    1, fcb->inode_item.flags & BTRFS_INODE_NODATASUM,
+                                                    NULL);
+                    if (!NT_SUCCESS(Status))
+                        goto end;
                 }
 
                 if (!(fcb->inode_item.flags & BTRFS_INODE_NODATASUM)) {
@@ -200,37 +262,30 @@ cont:
             }
 
             if (er->skip_end > 0) {
-                LIST_ENTRY* le2 = fcb->extents.Flink;
-                while (le2 != &fcb->extents) {
-                    extent* ext = CONTAINING_RECORD(le2, extent, list_entry);
+                for (j = 0; j < er->num_exts; j++) {
+                    extent* ext = er->exts[j];
 
-                    if ((ext->extent_data.type == BTRFS_FILE_EXTENT_REG || ext->extent_data.type == BTRFS_FILE_EXTENT_PREALLOC) && ext->extent_data.compression == BTRFS_COMPRESS_NONE && ext->unique) {
-                        if (ext->extent_data.disk_num_bytes != 0 && ext->extent_data.disk_bytenr == er->address) {
-                            Status = update_changed_extent_ref(fcb->Vcb, er->chunk, ext->extent_data.disk_bytenr,
-                                                               ext->extent_data.disk_num_bytes, fcb->subvol->id,
-                                                               fcb->inode, ext->offset - ext->extent_data.offset,
-                                                               -1, fcb->inode_item.flags & BTRFS_INODE_NODATASUM,
-                                                               true, Irp, NULL);
-                            if (!NT_SUCCESS(Status)) {
-                                ERR("update_changed_extent_ref returned %08lx\n", Status);
-                                goto end;
-                            }
-
-                            ext->extent_data.ram_bytes -= er->skip_end;
-                            ext->extent_data.disk_num_bytes -= er->skip_end;
-
-                            Status = add_changed_extent_ref(er->chunk, ext->extent_data.disk_bytenr,
-                                                            ext->extent_data.disk_num_bytes,
-                                                            fcb->subvol->id, fcb->inode,
-                                                            ext->offset - ext->extent_data.offset,
-                                                            1, fcb->inode_item.flags & BTRFS_INODE_NODATASUM,
-                                                            NULL);
-                            if (!NT_SUCCESS(Status))
-                                goto end;
-                        }
+                    Status = update_changed_extent_ref(fcb->Vcb, er->chunk, ext->extent_data.disk_bytenr,
+                                                       ext->extent_data.disk_num_bytes, fcb->subvol->id,
+                                                       fcb->inode, ext->offset - ext->extent_data.offset,
+                                                       -1, fcb->inode_item.flags & BTRFS_INODE_NODATASUM,
+                                                       true, Irp, NULL);
+                    if (!NT_SUCCESS(Status)) {
+                        ERR("update_changed_extent_ref returned %08lx\n", Status);
+                        goto end;
                     }
 
-                    le2 = le2->Flink;
+                    ext->extent_data.ram_bytes -= er->skip_end;
+                    ext->extent_data.disk_num_bytes -= er->skip_end;
+
+                    Status = add_changed_extent_ref(er->chunk, ext->extent_data.disk_bytenr,
+                                                    ext->extent_data.disk_num_bytes,
+                                                    fcb->subvol->id, fcb->inode,
+                                                    ext->offset - ext->extent_data.offset,
+                                                    1, fcb->inode_item.flags & BTRFS_INODE_NODATASUM,
+                                                    NULL);
+                    if (!NT_SUCCESS(Status))
+                        goto end;
                 }
 
                 if (!(fcb->inode_item.flags & BTRFS_INODE_NODATASUM)) {
@@ -266,42 +321,38 @@ cont:
 
                 er->length -= er->skip_end;
             }
-
-            le = le->Flink;
         }
     }
 
-    if (num_extents < 2) {
+    if (num_ranges < 2) {
         Status = STATUS_SUCCESS;
         goto end;
     }
 
-    // merge together adjacent extents
-    le = extent_ranges.Flink;
-    while (le != &extent_ranges) {
-        er = CONTAINING_RECORD(le, extent_range, list_entry);
+    // merge together adjacent extents, moving the remaining ranges down over the merged ones
+    er = ranges;
+    for (i = 1; i < num_ranges; i++) {
+        extent_range* er2 = &ranges[i];
 
-        if (le->Flink != &extent_ranges && er->length < MAX_EXTENT_SIZE) {
-            extent_range* er2 = CONTAINING_RECORD(le->Flink, extent_range, list_entry);
+        if (er->length < MAX_EXTENT_SIZE && er->chunk == er2->chunk) {
+            if (er2->address == er->address + er->length && er2->offset >= er->offset + er->length) {
+                if (er->length + er2->length <= MAX_EXTENT_SIZE) {
+                    er->length += er2->length;
+                    er->changed = true;
 
-            if (er->chunk == er2->chunk) {
-                if (er2->address == er->address + er->length && er2->offset >= er->offset + er->length) {
-                    if (er->length + er2->length <= MAX_EXTENT_SIZE) {
-                        er->length += er2->length;
-                        er->changed = true;
-
-                        RemoveEntryList(&er2->list_entry);
-                        ExFreePool(er2);
-
-                        changed = true;
-                        continue;
-                    }
+                    changed = true;
+                    continue;
                 }
             }
         }
 
-        le = le->Flink;
+        er++;
+
+        if (er != er2)
+            *er = *er2;
     }
+
+    num_ranges = (size_t)(er - ranges) + 1;
 
     if (!changed) {
         Status = STATUS_SUCCESS;
@@ -312,44 +363,33 @@ cont:
     while (le != &fcb->extents) {
         extent* ext = CONTAINING_RECORD(le, extent, list_entry);
 
-        if ((ext->extent_data.type == BTRFS_FILE_EXTENT_REG || ext->extent_data.type == BTRFS_FILE_EXTENT_PREALLOC) && ext->extent_data.compression == BTRFS_COMPRESS_NONE && ext->unique) {
-            if (ext->extent_data.disk_num_bytes != 0) {
-                LIST_ENTRY* le2;
+        if (can_trim_or_merge(ext)) {
+            extent_range* er2 = find_extent_range(ranges, num_ranges, ext->extent_data.disk_bytenr);
 
-                le2 = extent_ranges.Flink;
-                while (le2 != &extent_ranges) {
-                    extent_range* er2 = CONTAINING_RECORD(le2, extent_range, list_entry);
-
-                    if (ext->extent_data.disk_bytenr >= er2->address && ext->extent_data.disk_bytenr + ext->extent_data.disk_num_bytes <= er2->address + er2->length && er2->changed) {
-                        Status = update_changed_extent_ref(fcb->Vcb, er2->chunk, ext->extent_data.disk_bytenr,
-                                                           ext->extent_data.disk_num_bytes, fcb->subvol->id, fcb->inode,
-                                                           ext->offset - ext->extent_data.offset, -1,
-                                                           fcb->inode_item.flags & BTRFS_INODE_NODATASUM,
-                                                           true, Irp, NULL);
-                        if (!NT_SUCCESS(Status)) {
-                            ERR("update_changed_extent_ref returned %08lx\n", Status);
-                            goto end;
-                        }
-
-                        ext->extent_data.offset += ext->extent_data.disk_bytenr - er2->address;
-                        ext->extent_data.disk_bytenr = er2->address;
-                        ext->extent_data.disk_num_bytes = er2->length;
-                        ext->extent_data.ram_bytes = ext->extent_data.disk_num_bytes;
-
-                        Status = add_changed_extent_ref(er2->chunk, ext->extent_data.disk_bytenr,
-                                                        ext->extent_data.disk_num_bytes,
-                                                        fcb->subvol->id, fcb->inode,
-                                                        ext->offset - ext->extent_data.offset,
-                                                        1, fcb->inode_item.flags & BTRFS_INODE_NODATASUM,
-                                                        NULL);
-                        if (!NT_SUCCESS(Status))
-                            goto end;
-
-                        break;
-                    }
-
-                    le2 = le2->Flink;
+            if (er2 && er2->changed && ext->extent_data.disk_bytenr + ext->extent_data.disk_num_bytes <= er2->address + er2->length) {
+                Status = update_changed_extent_ref(fcb->Vcb, er2->chunk, ext->extent_data.disk_bytenr,
+                                                   ext->extent_data.disk_num_bytes, fcb->subvol->id, fcb->inode,
+                                                   ext->offset - ext->extent_data.offset, -1,
+                                                   fcb->inode_item.flags & BTRFS_INODE_NODATASUM,
+                                                   true, Irp, NULL);
+                if (!NT_SUCCESS(Status)) {
+                    ERR("update_changed_extent_ref returned %08lx\n", Status);
+                    goto end;
                 }
+
+                ext->extent_data.offset += ext->extent_data.disk_bytenr - er2->address;
+                ext->extent_data.disk_bytenr = er2->address;
+                ext->extent_data.disk_num_bytes = er2->length;
+                ext->extent_data.ram_bytes = ext->extent_data.disk_num_bytes;
+
+                Status = add_changed_extent_ref(er2->chunk, ext->extent_data.disk_bytenr,
+                                                ext->extent_data.disk_num_bytes,
+                                                fcb->subvol->id, fcb->inode,
+                                                ext->offset - ext->extent_data.offset,
+                                                1, fcb->inode_item.flags & BTRFS_INODE_NODATASUM,
+                                                NULL);
+                if (!NT_SUCCESS(Status))
+                    goto end;
             }
         }
 
@@ -359,12 +399,10 @@ cont:
     Status = STATUS_SUCCESS;
 
 end:
-    while (!IsListEmpty(&extent_ranges)) {
-        le = RemoveHeadList(&extent_ranges);
-        er = CONTAINING_RECORD(le, extent_range, list_entry);
+    if (ranges)
+        ExFreePool(ranges);
 
-        ExFreePool(er);
-    }
+    ExFreePool(exts);
 
     return Status;
 }
