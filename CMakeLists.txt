@@ -138,6 +138,7 @@ set(SRC_FILES src/balance.c
     src/sha256.c
     src/threads.c
     src/treefuncs.c
+    src/rollback.c
     src/trim.c
     src/volume.c
     src/volume-ioctl.c
