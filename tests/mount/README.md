@@ -123,3 +123,9 @@ Fixtures include a released cache held only by its dirty reference, a cache
 shared by chunks, and changed extents with current and old reference lists.
 Before the fix, 159/195 pass; all 36 mutation cases leak. Cleanup drops dirty
 references before reaping FCBs and frees both nested changed-extent lists.
+
+Six chunk-device cases execute load_chunk_root's exact missing-device branch
+for one or three stripes. Missing first, middle and last stripes must free
+the devices array, chunk item and chunk; present-device controls retain all
+three allocations for the caller. Before the fix, 197/201 pass; all four
+missing-device cases leak the array.

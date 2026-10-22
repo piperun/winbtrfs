@@ -13,6 +13,7 @@
 #include "device_init.inc"
 #include "clear_batch.inc"
 #include "batch_failure.inc"
+#include "missing_device.inc"
 
 static unsigned space_mode;
 static bool root_fileref_only, notify_sync;
@@ -93,6 +94,20 @@ int main(int argc, char** argv) {
         CHECK(allocate_first_device(&dev) == STATUS_SUCCESS);
         CHECK(dev && !dev->space.Flink && !dev->space.Blink);
         ExFreePool(dev); CHECK(!allocations); return 0;
+    }
+    for (unsigned stripes = 1; stripes <= 3; stripes += 2) for (unsigned missing = 0; missing <= stripes; missing++) {
+        char name[100]; snprintf(name, sizeof(name), "chunk-devices%u-missing%u", stripes, missing);
+        if (strcmp(argv[1], "--list") == 0) { puts(name); continue; }
+        if (strcmp(argv[1], name) != 0) continue;
+        chunk* c = allocate(sizeof(*c), NULL); device present = {0};
+        c->chunk_item = allocate(80, NULL); c->devices = allocate(stripes * sizeof(device*), NULL);
+        for (unsigned i = 0; i < stripes; i++) c->devices[i] = i == missing ? NULL : &present;
+        NTSTATUS status = fail_chunk_device(c, missing < stripes ? missing : 0);
+        CHECK(status == (missing < stripes ? STATUS_INTERNAL_ERROR : STATUS_SUCCESS));
+        if (status == STATUS_SUCCESS) {
+            CHECK(allocations == 3); ExFreePool(c->devices); ExFreePool(c->chunk_item); ExFreePool(c);
+        }
+        CHECK(!allocations); return 0;
     }
     for (unsigned mutations = 1; mutations <= 3; mutations++) for (unsigned stream = 0; stream < 2; stream++)
         for (unsigned d = 0; d < 3; d++) for (unsigned error = 0; error < 2; error++) {
