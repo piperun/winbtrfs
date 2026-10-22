@@ -55,7 +55,7 @@ typedef struct { LIST_ENTRY list_entry, space; } device;
 typedef struct { LIST_ENTRY list_entry; } space;
 typedef struct { LIST_ENTRY list_entry, refs, old_refs; } changed_extent;
 typedef struct { LIST_ENTRY list_entry; } changed_extent_ref;
-typedef struct { LIST_ENTRY list_entry; } batch_item;
+typedef struct { LIST_ENTRY list_entry; void* data; } batch_item;
 typedef struct { LIST_ENTRY list_entry, items; } batch_item_ind;
 typedef struct { LIST_ENTRY list_entry, items_ind; } batch_root;
 typedef struct { LIST_ENTRY list_entry; void* data; } sys_chunk;

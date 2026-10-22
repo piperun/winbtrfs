@@ -15,7 +15,8 @@
  * You should have received a copy of the GNU Lesser General Public Licence
  * along with WinBtrfs.  If not, see <http://www.gnu.org/licenses/>. */
 
-/* Apply and release batched tree updates. */
+/* Apply batched tree updates and consume their queue on every exit.
+ * Linked tree items keep their payloads; queued items own any nonnull data. */
 #include "batch.h"
 
 __attribute__((nonnull(1,2,3)))
@@ -62,6 +63,9 @@ void clear_batch_list(device_extension* Vcb, LIST_ENTRY* batchlist) {
             while (!IsListEmpty(&bii->items)) {
                 batch_item* bi = CONTAINING_RECORD(RemoveHeadList(&bii->items), batch_item, list_entry);
 
+                if (bi->data)
+                    ExFreePool(bi->data);
+
                 ExFreeToPagedLookasideList(&Vcb->batch_item_lookaside, bi);
             }
 
@@ -76,7 +80,7 @@ __attribute__((nonnull(1,2)))
 static NTSTATUS commit_batch_list_root(_Requires_exclusive_lock_held_(_Curr_->tree_lock) device_extension* Vcb, batch_root* br, PIRP Irp) {
     LIST_ENTRY items;
     LIST_ENTRY* le;
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_SUCCESS;
 
     TRACE("root: %I64x\n", br->r->id);
 
@@ -112,13 +116,13 @@ static NTSTATUS commit_batch_list_root(_Requires_exclusive_lock_held_(_Curr_->tr
         Status = find_item(Vcb, br->r, &tp, &bi->key, true, Irp);
         if (!NT_SUCCESS(Status)) { // FIXME - handle STATUS_NOT_FOUND
             ERR("find_item returned %08lx\n", Status);
-            return Status;
+            goto exit;
         }
 
         Status = find_tree_end(tp.tree, &tree_end, &no_end);
         if (!NT_SUCCESS(Status)) {
             ERR("find_tree_end returned %08lx\n", Status);
-            return Status;
+            goto exit;
         }
 
         if (bi->operation == Batch_DeleteInode) {
@@ -193,7 +197,7 @@ static NTSTATUS commit_batch_list_root(_Requires_exclusive_lock_held_(_Curr_->tr
                         Status = find_tree_end(tp.tree, &tree_end, &no_end);
                         if (!NT_SUCCESS(Status)) {
                             ERR("find_tree_end returned %08lx\n", Status);
-                            return Status;
+                            goto exit;
                         }
                     }
                 }
@@ -330,7 +334,8 @@ static NTSTATUS commit_batch_list_root(_Requires_exclusive_lock_held_(_Curr_->tr
                 td = ExAllocateFromPagedLookasideList(&Vcb->tree_data_lookaside);
                 if (!td) {
                     ERR("out of memory\n");
-                    return STATUS_INSUFFICIENT_RESOURCES;
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                    goto exit;
                 }
 
                 td->key = bi->key;
@@ -373,18 +378,26 @@ static NTSTATUS commit_batch_list_root(_Requires_exclusive_lock_held_(_Curr_->tr
                         if (td)
                             ExFreeToPagedLookasideList(&Vcb->tree_data_lookaside, td);
 
-                        return Status;
+                        goto exit;
                     }
                 }
             } else if (td) {
                 InsertHeadList(&tp.item->list_entry, &td->list_entry);
             }
 
+            if (td) {
+                if (ignore) {
+                    ExFreeToPagedLookasideList(&Vcb->tree_data_lookaside, td);
+                    td = NULL;
+                } else
+                    bi->data = NULL; // The linked tree item owns this payload now.
+            }
+
             if (bi->operation == Batch_DeleteInodeRef && cmp != 0 && Vcb->superblock.incompat_flags & BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF) {
                 Status = add_delete_inode_extref(Vcb, bi, &items);
                 if (!NT_SUCCESS(Status)) {
                     ERR("add_delete_inode_extref returned %08lx\n", Status);
-                    return Status;
+                    goto exit;
                 }
             }
 
@@ -426,7 +439,8 @@ static NTSTATUS commit_batch_list_root(_Requires_exclusive_lock_held_(_Curr_->tr
                         td = ExAllocateFromPagedLookasideList(&Vcb->tree_data_lookaside);
                         if (!td) {
                             ERR("out of memory\n");
-                            return STATUS_INSUFFICIENT_RESOURCES;
+                            Status = STATUS_INSUFFICIENT_RESOURCES;
+                            goto exit;
                         }
 
                         td->key = bi2->key;
@@ -451,7 +465,7 @@ static NTSTATUS commit_batch_list_root(_Requires_exclusive_lock_held_(_Curr_->tr
                                     Status = add_delete_inode_extref(Vcb, bi2, &items);
                                     if (!NT_SUCCESS(Status)) {
                                         ERR("add_delete_inode_extref returned %08lx\n", Status);
-                                        return Status;
+                                        goto exit;
                                     }
                                 }
                             } else {
@@ -461,7 +475,10 @@ static NTSTATUS commit_batch_list_root(_Requires_exclusive_lock_held_(_Curr_->tr
 #ifdef _DEBUG
                                     int3;
 #endif
-                                    return Status;
+                                    if (td)
+                                        ExFreeToPagedLookasideList(&Vcb->tree_data_lookaside, td);
+
+                                    goto exit;
                                 }
                             }
 
@@ -475,7 +492,7 @@ static NTSTATUS commit_batch_list_root(_Requires_exclusive_lock_held_(_Curr_->tr
                                 Status = add_delete_inode_extref(Vcb, bi2, &items);
                                 if (!NT_SUCCESS(Status)) {
                                     ERR("add_delete_inode_extref returned %08lx\n", Status);
-                                    return Status;
+                                    goto exit;
                                 }
                             }
                             break;
@@ -484,9 +501,16 @@ static NTSTATUS commit_batch_list_root(_Requires_exclusive_lock_held_(_Curr_->tr
                         le3 = le3->Flink;
                     }
 
+                    if (td && ignore) {
+                        ExFreeToPagedLookasideList(&Vcb->tree_data_lookaside, td);
+                        td = NULL;
+                    }
+
                     if (td) {
                         if (!inserted)
                             InsertTailList(&tp.tree->itemlist, &td->list_entry);
+
+                        bi2->data = NULL; // The linked tree item owns this payload now.
 
                         if (!ignore) {
                             tp.tree->header.nritems++;
@@ -498,7 +522,7 @@ static NTSTATUS commit_batch_list_root(_Requires_exclusive_lock_held_(_Curr_->tr
                         Status = add_delete_inode_extref(Vcb, bi2, &items);
                         if (!NT_SUCCESS(Status)) {
                             ERR("add_delete_inode_extref returned %08lx\n", Status);
-                            return Status;
+                            goto exit;
                         }
                     }
 
@@ -534,18 +558,17 @@ static NTSTATUS commit_batch_list_root(_Requires_exclusive_lock_held_(_Curr_->tr
         le = le->Flink;
     }
 
-    // FIXME - remove as we are going along
+exit:
     while (!IsListEmpty(&items)) {
         batch_item* bi = CONTAINING_RECORD(RemoveHeadList(&items), batch_item, list_entry);
 
-        if ((bi->operation == Batch_DeleteDirItem || bi->operation == Batch_DeleteInodeRef ||
-            bi->operation == Batch_DeleteInodeExtRef || bi->operation == Batch_DeleteXattr) && bi->data)
+        if (bi->data)
             ExFreePool(bi->data);
 
         ExFreeToPagedLookasideList(&Vcb->batch_item_lookaside, bi);
     }
 
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 __attribute__((nonnull(1,2)))
@@ -557,12 +580,13 @@ NTSTATUS commit_batch_list(_Requires_exclusive_lock_held_(_Curr_->tree_lock) dev
         batch_root* br2 = CONTAINING_RECORD(le, batch_root, list_entry);
 
         Status = commit_batch_list_root(Vcb, br2, Irp);
+        ExFreePool(br2);
+
         if (!NT_SUCCESS(Status)) {
             ERR("commit_batch_list_root returned %08lx\n", Status);
+            clear_batch_list(Vcb, batchlist);
             return Status;
         }
-
-        ExFreePool(br2);
     }
 
     return STATUS_SUCCESS;

@@ -79,6 +79,55 @@ static bool find_next_item(device_extension* v,traverse_ptr* tp,traverse_ptr* ne
 #include "batch_commit.inc"
 #include "batch_producer.inc"
 
+static device_extension volume;
+static root roots[3];
+static LIST_ENTRY batches;
+static void make_root(unsigned i) {
+    roots[i].id=i+1;InitializeListHead(&roots[i].leaf.itemlist);
+    tree_data* td=allocate(sizeof(*td),&volume.tree_data_lookaside);
+    td->key.objectid=10;td->key.type=BTRFS_INODE_REF_KEY;td->key.offset=1;
+    td->inserted=true;td->size=sizeof(struct btrfs_inode_ref);td->data=allocate(td->size,NULL);
+    ((struct btrfs_inode_ref*)td->data)->name_len=0;
+    InsertTailList(&roots[i].leaf.itemlist,&td->list_entry);roots[i].leaf.header.nritems=1;
+}
+static batch_item* add_item(batch_root* br,unsigned item,enum batch_operation op,bool collision) {
+    batch_item_ind* bii=allocate(sizeof(*bii),NULL);InitializeListHead(&bii->items);InsertTailList(&br->items_ind,&bii->list_entry);
+    batch_item* bi=allocate(sizeof(*bi),&volume.batch_item_lookaside);
+    bi->operation=op;bi->key.objectid=collision?10:20+item;bi->key.type=BTRFS_INODE_REF_KEY;bi->key.offset=1;
+    if(op==Batch_Insert || op==Batch_InodeRef || op==Batch_DeleteInodeRef || op==Batch_DirItem){
+        bi->datalen=sizeof(struct btrfs_inode_ref);bi->data=allocate(bi->datalen,NULL);
+        ((struct btrfs_inode_ref*)bi->data)->name_len=0;
+    }
+    InsertTailList(&bii->items,&bi->list_entry);return bi;
+}
+static void exercise(unsigned root_count,unsigned items,enum batch_operation operation,bool collision,bool overflow,bool clear_only) {
+    volume.batch_item_lookaside.size=sizeof(batch_item);volume.tree_data_lookaside.size=sizeof(tree_data);
+    volume.superblock.nodesize=overflow?sizeof(struct btrfs_header)+sizeof(struct btrfs_item)+sizeof(struct btrfs_inode_ref):4096;
+    volume.superblock.incompat_flags=BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF;volume.superblock.generation=9;
+    InitializeListHead(&batches);
+    for(unsigned r=0;r<root_count;r++){
+        make_root(r);batch_root* br=allocate(sizeof(*br),NULL);br->r=&roots[r];InitializeListHead(&br->items_ind);InsertTailList(&batches,&br->list_entry);
+        for(unsigned i=0;i<items;i++)add_item(br,i,operation,collision);
+    }
+    NTSTATUS status=STATUS_SUCCESS;committing=true;
+    if(clear_only)clear_batch_list(&volume,&batches);else status=commit_batch_list(&volume,&batches,NULL);
+    committing=false;
+    CHECK(status==(failure_hit?(fail_find?STATUS_INTERNAL_ERROR:STATUS_INSUFFICIENT_RESOURCES):STATUS_SUCCESS));
+    CHECK(IsListEmpty(&batches) && !volume.batch_item_lookaside.outstanding);
+    if(operation==Batch_Insert && !collision && !clear_only) {
+        unsigned applied=root_count*items;
+        if(fail_find && fail_find<=root_count)applied=(fail_find-1)*items;
+        else if(fail_allocation && fail_allocation<=applied)applied=fail_allocation-1;
+        CHECK(volume.tree_data_lookaside.outstanding==root_count+applied);
+    }
+    /* Applied tree items and their payload remain valid until their tree is destroyed. */
+    for(unsigned r=0;r<root_count;r++)while(!IsListEmpty(&roots[r].leaf.itemlist)){
+        tree_data* td=CONTAINING_RECORD(RemoveHeadList(&roots[r].leaf.itemlist),tree_data,list_entry);
+        if(td->data){volatile uint8_t byte=td->data[0];(void)byte;ExFreePool(td->data);}
+        ExFreeToPagedLookasideList(&volume.tree_data_lookaside,td);
+    }
+    CHECK(!live && !volume.tree_data_lookaside.outstanding);
+}
 int main(int argc,char** argv){
     CHECK(argc==2);
     for(unsigned failure=0;failure<3;failure++) {
@@ -136,6 +185,16 @@ int main(int argc,char** argv){
             }
         }
         clear_batch_list(&volume,&list);CHECK(!live && !volume.batch_item_lookaside.outstanding);return 0;
+    }
+    static const struct {const char* name;enum batch_operation op;bool collision,overflow,clear;} modes[]={
+        {"delete",Batch_DeleteInode,false,false,false}, {"insert",Batch_Insert,false,false,false},
+        {"collision",Batch_InodeRef,true,false,false}, {"overflow",Batch_InodeRef,true,true,false},
+        {"clear-payload",Batch_Insert,false,false,true}, {"delete-ref",Batch_DeleteInodeRef,true,false,false}};
+    for(unsigned mode=0;mode<sizeof(modes)/sizeof(modes[0]);mode++)for(unsigned failure=0;failure<8;failure++){
+        char name[100];snprintf(name,sizeof(name),"%s-failure%u",modes[mode].name,failure);
+        if(!strcmp(argv[1],"--list")){puts(name);continue;}if(strcmp(argv[1],name))continue;
+        if(failure==1)fail_find=1;else if(failure==2)fail_find=2;else if(failure>=3)fail_allocation=failure-2;
+        exercise(3,modes[mode].overflow?1:2,modes[mode].op,modes[mode].collision,modes[mode].overflow,modes[mode].clear);return 0;
     }
     return strcmp(argv[1],"--list")?2:0;
 }
