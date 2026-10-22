@@ -94,6 +94,7 @@ set(SRC_FILES src/balance.c
     src/calcthread.c
     src/checksum-info.c
     src/compress.c
+    src/compress-write.c
     src/crc32c.c
     src/create.c
     src/fcb-load.c

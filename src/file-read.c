@@ -192,6 +192,12 @@ NTSTATUS read_file(fcb* fcb, uint8_t* data, uint64_t start, uint64_t length, ULO
                             goto exit;
                         }
 
+                        if (off >= ed->ram_bytes) {
+                            ERR("inline extent at %I64x ends before offset %I64x\n", ext->offset, start + bytes_read);
+                            Status = STATUS_INTERNAL_ERROR;
+                            goto exit;
+                        }
+
                         read = (uint32_t)min(ed->ram_bytes - off, length);
 
                         if (off > 0) {
@@ -500,6 +506,12 @@ nextitem:
 
                 if (rp->compression == BTRFS_COMPRESS_LZO) {
                     ULONG inoff = sizeof(uint32_t);
+
+                    if (inlen < sizeof(uint32_t)) {
+                        ERR("extent data was truncated\n");
+                        Status = STATUS_INTERNAL_ERROR;
+                        goto exit;
+                    }
 
                     inlen -= sizeof(uint32_t);
 

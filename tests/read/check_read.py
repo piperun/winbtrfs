@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 import resource
+import re
 import subprocess
 
 parser = argparse.ArgumentParser()
@@ -25,7 +26,10 @@ def read(path):
     return p.read_text() if p.exists() else ''
 
 def function(source, name):
-    start = source.index(f'NTSTATUS {name}(')
+    match = re.search(rf'^(?:static )?(?:NTSTATUS|uint8_t|int|void) {name}\(', source, re.MULTILINE)
+    if match is None:
+        raise ValueError(f'function {name} missing')
+    start = match.start()
     brace = source.index('{', start)
     depth, end = 1, brace + 1
     while depth:
@@ -48,6 +52,22 @@ flags = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-no-pie'] i
 subprocess.run(['gcc', '-std=c11', '-O0', '-g', '-Wall', '-Wextra', '-Werror',
                 f'-ftrivial-auto-var-init={args.init}', *flags, '-I', str(out),
                 str(Path(__file__).with_name('read_test.c')), '-o', str(binary)], check=True, timeout=30)
+binaries = [binary]
+if not args.revision:
+    # Historical comparisons cover the modeled reader, not the real decoder.
+    lzo_source = read('src/compress.c')
+    begin = lzo_source.index('typedef struct {')
+    end = lzo_source.index('} lzo_stream;', begin) + len('} lzo_stream;')
+    (out / 'lzo_functions.inc').write_text(lzo_source[begin:end] + '\n' + '\n'.join(
+        function(lzo_source, name) for name in ['lzo_nextbyte', 'lzo_len', 'lzo_copy',
+                                              'lzo_copyback', 'do_lzo_decompress', 'lzo_decompress']))
+    lzo_binary = out / 'lzo_test'
+    subprocess.run(['gcc', '-std=c11', '-O0', '-g', '-Wall', '-Wextra', '-Werror',
+                    '-Wno-unused-function', f'-ftrivial-auto-var-init={args.init}', *flags,
+                    '-I', str(out), str(Path(__file__).with_name('lzo_test.c')),
+                    '-o', str(lzo_binary)], check=True, timeout=30)
+    binaries.append(lzo_binary)
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', UBSAN_OPTIONS='halt_on_error=1')
-raise SystemExit(subprocess.run([str(binary)], env=env, timeout=10).returncode)
+results = [subprocess.run([str(executable)], env=env, timeout=10) for executable in binaries]
+raise SystemExit(any(result.returncode for result in results))
