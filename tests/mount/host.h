@@ -48,6 +48,9 @@ typedef struct { LIST_ENTRY list_entry; } xattr;
 typedef struct { LIST_ENTRY list_entry_index; STRING utf8, name, name_uc; } dir_child;
 typedef struct { LIST_ENTRY list_entry, space; } device;
 typedef struct { LIST_ENTRY list_entry; } space;
+typedef struct { LIST_ENTRY list_entry; } batch_item;
+typedef struct { LIST_ENTRY list_entry, items; } batch_item_ind;
+typedef struct { LIST_ENTRY list_entry, items_ind; } batch_root;
 typedef struct { LIST_ENTRY list_entry; void* data; } sys_chunk;
 typedef struct {
     LIST_ENTRY list_entry, space, deleting; fcb* cache; device** devices; void* chunk_item;

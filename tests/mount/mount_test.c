@@ -9,6 +9,8 @@
 #include "cleanup.inc"
 #include "failure.inc"
 #include "device_init.inc"
+#include "clear_batch.inc"
+#include "batch_failure.inc"
 
 static unsigned space_mode;
 
@@ -85,6 +87,27 @@ int main(int argc, char** argv) {
         CHECK(allocate_first_device(&dev) == STATUS_SUCCESS);
         CHECK(dev && !dev->space.Flink && !dev->space.Blink);
         ExFreePool(dev); CHECK(!allocations); return 0;
+    }
+    for (unsigned roots = 0; roots <= 3; roots++) for (unsigned error = 0; error < 2; error++) {
+        char name[100]; snprintf(name, sizeof(name), "batch-commit-roots%u-error%u", roots, error);
+        if (strcmp(argv[1], "--list") == 0) { puts(name); continue; }
+        if (strcmp(argv[1], name) != 0) continue;
+        LIST_ENTRY batchlist; InitializeListHead(&batchlist);
+        volume.batch_item_lookaside.live = true;
+        for (unsigned i = 0; i < roots; i++) {
+            batch_root* br = allocate(sizeof(*br), NULL); InitializeListHead(&br->items_ind);
+            InsertTailList(&batchlist, &br->list_entry);
+            for (unsigned j = 0; j <= i; j++) {
+                batch_item_ind* bii = allocate(sizeof(*bii), NULL); InitializeListHead(&bii->items);
+                InsertTailList(&br->items_ind, &bii->list_entry);
+                for (unsigned k = 0; k <= j; k++)
+                    InsertTailList(&bii->items, &((batch_item*)allocate(sizeof(batch_item), &volume.batch_item_lookaside))->list_entry);
+            }
+        }
+        batch_failure = error ? STATUS_INTERNAL_ERROR : STATUS_INSUFFICIENT_RESOURCES;
+        CHECK(fail_batch_commit(&volume, &batchlist) == batch_failure);
+        CHECK(IsListEmpty(&batchlist) && !allocations && !volume.batch_item_lookaside.outstanding);
+        return 0;
     }
     const char* spaces[] = { "device-space-empty", "device-space-populated", "device-space-partial" };
     for (unsigned mode = 0; mode < 3; mode++) for (unsigned count = 1; count <= 3; count += 2)

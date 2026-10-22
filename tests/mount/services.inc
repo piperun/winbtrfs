@@ -4,6 +4,10 @@ static DEVICE_OBJECT new_device;
 static root subvolume;
 static unsigned allocations, resource_live, lookaside_deletions, device_deletions, freed_fcbs;
 static bool initialized_lists;
+static NTSTATUS batch_failure;
+static NTSTATUS commit_batch_list(device_extension* Vcb, LIST_ENTRY* list, void* Irp) {
+    (void)Vcb; (void)list; (void)Irp; return batch_failure;
+}
 static struct { void* p; LOOKASIDE* owner; } owned[256];
 
 static void* allocate(size_t size, LOOKASIDE* owner) {

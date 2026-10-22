@@ -82,8 +82,7 @@ counts, and no other remaining allocations or live resources.
 Fixtures construct partial-mount state directly. They do not execute disk
 discovery, full mount initialization, root cache-file close, concurrent
 kernel activity or Windows pools. The root-fileref branch is not exercised.
-Still leaking on some failure paths: batch entries left when
-`commit_batch_list` fails; FCBs marked dirty and changed-extent records
+Still leaking on some failure paths: FCBs marked dirty and changed-extent records
 created while clearing the free-space cache; the root fileref and root FCB
 on the root-fileref branch; the notify synchronization object set up with
 `FsRtlNotifyInitializeSync`. No complete mount-failure cleanup or #832 hang
@@ -100,3 +99,10 @@ with one or three devices and both errors. Before the device-space fix,
 116/125 cases pass; the initialization check and eight populated-list cases
 fail. Cleanup frees initialized lists and safely skips devices whose hole
 discovery has not started.
+
+Eight batch-commit failure cases exercise mount's actual commit-error branch
+and the production nested-list destructor. They cover zero through three
+pending roots with multiple index groups and lookaside items, preserving both
+failure statuses. Before the mount cleanup, 127/133 cases pass; the six
+nonempty-list cases fail. The batch commit helper's detached current root
+and flattened local item list require separate ownership cleanup.

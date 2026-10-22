@@ -674,6 +674,7 @@ NTSTATUS mount_vol(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
     Status = commit_batch_list(Vcb, &batchlist, Irp);
     if (!NT_SUCCESS(Status)) {
         ERR("commit_batch_list returned %08lx\n", Status);
+        clear_batch_list(Vcb, &batchlist);
         goto exit;
     }
 
