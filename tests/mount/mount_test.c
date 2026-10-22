@@ -5,6 +5,7 @@
 #include "free_fileref.inc"
 #include "reap.inc"
 #include "reap_fcbs.inc"
+#include "reap_fileref.inc"
 #include "trees.inc"
 #include "cleanup.inc"
 #include "failure.inc"
@@ -13,6 +14,7 @@
 #include "batch_failure.inc"
 
 static unsigned space_mode;
+static bool root_fileref_only;
 
 static void exercise(unsigned stage, unsigned devices, NTSTATUS failure, unsigned dummy_stage, unsigned loaded, bool root_file) {
     if (stage == 0) {
@@ -54,15 +56,17 @@ static void exercise(unsigned stage, unsigned devices, NTSTATUS failure, unsigne
     }
     fcb* root_fcb = stage >= 5 ? make_fcb(stage >= 6 ? root_subvol : NULL, stage == 7) : NULL;
     file_ref* root_fileref = NULL;
-    if (root_file) {
+    if (root_file || root_fileref_only) {
         /* Mount links the root FCB in once its fileref exists, then opens the root stream file on it. */
         CHECK(stage == 6 && loaded >= LOADED_CACHES);
         InsertTailList(&root_subvol->fcbs, &root_fcb->list_entry);
         InsertTailList(&volume.all_fcbs, &root_fcb->list_entry_all);
         root_fileref = allocate(sizeof(*root_fileref), &volume.fileref_lookaside); root_fileref->refcount = 1;
-        volume.root_fileref = root_fileref; volume.root_file = &root_stream_file;
+        root_fileref->fcb = root_fcb; root_fcb->fileref = root_fileref;
+        volume.root_fileref = root_fileref;
+        if (root_file) volume.root_file = &root_stream_file;
         /* The FCB, its nonpaged part with three resources, and the fileref stay with the stream file. */
-        kept_allocations = 3; kept_resources = 3;
+        if (root_file) { kept_allocations = 3; kept_resources = 3; }
     }
     new_device.DeviceExtension = &volume;
     NTSTATUS status = fail_mount(&volume, root_fcb, initialized_lists, failure, &new_device);
@@ -87,6 +91,14 @@ int main(int argc, char** argv) {
         CHECK(allocate_first_device(&dev) == STATUS_SUCCESS);
         CHECK(dev && !dev->space.Flink && !dev->space.Blink);
         ExFreePool(dev); CHECK(!allocations); return 0;
+    }
+    for (unsigned count = 0; count <= 3; count++) for (unsigned error = 0; error < 2; error++) {
+        char name[100]; snprintf(name, sizeof(name), "root-fileref-devices%u-error%u", count, error);
+        if (strcmp(argv[1], "--list") == 0) { puts(name); continue; }
+        if (strcmp(argv[1], name) != 0) continue;
+        root_fileref_only = true;
+        exercise(6, count, error ? STATUS_INTERNAL_ERROR : STATUS_INSUFFICIENT_RESOURCES, 3, LOADED_CACHES, false);
+        CHECK(volume.fileref_lookaside.returned == 1 && !volume.root_fileref); return 0;
     }
     for (unsigned roots = 0; roots <= 3; roots++) for (unsigned error = 0; error < 2; error++) {
         char name[100]; snprintf(name, sizeof(name), "batch-commit-roots%u-error%u", roots, error);

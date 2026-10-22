@@ -12,7 +12,7 @@ typedef uint32_t ULONG;
 typedef struct LIST_ENTRY { struct LIST_ENTRY *Flink, *Blink; } LIST_ENTRY;
 typedef struct { bool live; unsigned held; } ERESOURCE;
 typedef struct { bool live, nonpaged; unsigned outstanding, returned; } LOOKASIDE;
-typedef struct { void* Buffer; } STRING;
+typedef struct { void* Buffer; size_t Length; } STRING;
 typedef struct { ERESOURCE load_tree_lock; } root_nonpaged;
 typedef struct _tree tree;
 typedef struct { uint64_t address, generation; tree* tree; } tree_holder;
@@ -32,6 +32,7 @@ typedef struct { ERESOURCE resource, paging_resource, dir_children_lock; } fcb_n
 typedef struct _fcb {
     uint32_t hash;
     root* subvol;
+    struct _file_ref* fileref; bool ads;
     device_extension* Vcb;
     LONG refcount;
     fcb_nonpaged* nonpaged;
@@ -41,7 +42,11 @@ typedef struct _fcb {
     LIST_ENTRY **hash_ptrs, **hash_ptrs_uc;
     int Header, lock, oplock, pool_type;
 } fcb;
-typedef struct { LONG refcount; } file_ref;
+typedef struct _file_ref {
+    LONG refcount; fcb* fcb; struct _file_ref* parent; LIST_ENTRY list_entry;
+    struct { uint64_t size; struct _file_ref* fileref; }* dc;
+    STRING oldutf8;
+} file_ref;
 typedef struct { LIST_ENTRY list_entry; void* csum; } extent;
 typedef struct { LIST_ENTRY list_entry; STRING name, utf8; } hardlink;
 typedef struct { LIST_ENTRY list_entry; } xattr;

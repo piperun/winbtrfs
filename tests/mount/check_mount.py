@@ -53,6 +53,7 @@ start = btrfs.index("#ifdef DEBUG_FCB_REFCOUNTS\nvoid _free_fcb(")
 (out / "reap.inc").write_text(block(btrfs, btrfs.index("void reap_fcb(")) + "\n")
 (out / "reap_fcbs.inc").write_text(block(btrfs, btrfs.index("void reap_fcbs(")) + "\n")
 (out / "free_fileref.inc").write_text(block(btrfs, btrfs.index("void free_fileref(")) + "\n")
+(out / "reap_fileref.inc").write_text(block(btrfs, btrfs.index("void reap_fileref(")) + "\n")
 treefuncs = read("src/treefuncs.c")
 (out / "trees.inc").write_text("".join(block(treefuncs, treefuncs.index(f"void {name}(")) + "\n"
                                        for name in ("free_tree", "free_trees_root")))

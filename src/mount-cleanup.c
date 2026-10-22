@@ -23,9 +23,14 @@ void cleanup_failed_mount(device_extension* Vcb, fcb* root_fcb, bool init_lookas
 
     if (Vcb->root_file)
         ObDereferenceObject(Vcb->root_file);
-    else if (Vcb->root_fileref)
+    else if (Vcb->root_fileref) {
         free_fileref(Vcb->root_fileref);
-    else if (root_fcb)
+
+        if (Vcb->root_fileref->refcount == 0) {
+            reap_fileref(Vcb, Vcb->root_fileref);
+            Vcb->root_fileref = NULL;
+        }
+    } else if (root_fcb)
         free_fcb(root_fcb);
 
     if (root_fcb && root_fcb->refcount == 0)

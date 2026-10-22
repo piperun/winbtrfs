@@ -81,10 +81,10 @@ counts, and no other remaining allocations or live resources.
 
 Fixtures construct partial-mount state directly. They do not execute disk
 discovery, full mount initialization, root cache-file close, concurrent
-kernel activity or Windows pools. The root-fileref branch is not exercised.
+kernel activity or Windows pools. The root-fileref allocation-failure branch is also exercised.
 Still leaking on some failure paths: FCBs marked dirty and changed-extent records
-created while clearing the free-space cache; the root fileref and root FCB
-on the root-fileref branch; the notify synchronization object set up with
+created while clearing the free-space cache; the notify synchronization
+object set up with
 `FsRtlNotifyInitializeSync`. No complete mount-failure cleanup or #832 hang
 fix is claimed.
 
@@ -106,3 +106,10 @@ pending roots with multiple index groups and lookaside items, preserving both
 failure statuses. Before the mount cleanup, 127/133 cases pass; the six
 nonempty-list cases fail. The batch commit helper's detached current root
 and flattened local item list require separate ownership cleanup.
+
+Eight root-fileref cases represent root-CCB allocation failure, after the
+fileref and its FCB have been linked but before a stream-file owner exists.
+They execute production free/reap functions and require the fileref and
+FCB allocations and references to be released. Before the fix, 133/141 pass;
+all eight new cases leak. The existing stream-file cases still require the
+root FCB, nonpaged part and fileref to survive while the stream file owns them.
