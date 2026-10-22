@@ -15,33 +15,33 @@ Add `--revision` to run the sources before each fix. Each revision also fails
 the cases of the fixes after it.
 
 - `96fe76d4` merges by searching from the head of the list for every freed
-  range: 29/58 cases pass. The four step-count cases that merge many ranges
+  range: 29/59 cases pass. The four step-count cases that merge many ranges
   fail; the large merge takes 400,020,000 address-list steps against a limit
   of 160,000.
 - `23c741d8` runs `update_chunk_cache` before it freed the lists it copies:
-  33/58 cases pass. A written cache leaves 8 allocations behind, the 5 merged
+  33/59 cases pass. A written cache leaves 8 allocations behind, the 5 merged
   entries and the 3 copied freed ranges, and so does a failed flush. Failing an
   allocation while copying either list leaves the entries copied before it, and
   failing one in the merge leaves both copies.
 - `5c9895e7` runs `update_chunk_cache_tree` before it freed its copy of the
-  space list on failure: 36/58 cases pass. Failing the second or third
+  space list on failure: 36/59 cases pass. Failing the second or third
   allocation, in the copy, leaves 1 or 2 entries behind, and failing the fourth
   or fifth, in the merge, leaves 3 or 4.
 - `550f234e` runs `add_space_entry` before it linked an entry at the last
-  entry's address into the address list: 37/58 cases pass. With a size list the
+  entry's address into the address list: 37/59 cases pass. With a size list the
   entry is only on the size list, which still offers its range after an
   allocation took it; without one the entry is on neither list.
 - `03af14bb` runs `load_stored_free_space_tree` before it freed what it had
-  loaded when it rejects a bitmap item: 43/58 cases pass. The entries of the
+  loaded when it rejects a bitmap item: 43/59 cases pass. The entries of the
   first bitmap stay in front of the free space regenerated from the extent tree:
   the address list holds 6 entries instead of 3, each loaded entry overlapping a
   regenerated one, and the bitmap buffer stays allocated.
-- `872b041a` keeps overlapping stored ranges as separate entries: 45/58 cases
+- `872b041a` keeps overlapping stored ranges as separate entries: 45/59 cases
   pass. Two entries cover the same space, and after an allocation inside the
   overlap the second one still offers it. The v1 cache whose entries add up to
   the chunk's free space despite the overlap is kept, not discarded.
 - `469ce25c` returns errors from loading a chunk's free space with the entries
-  it loaded still on the chunk's lists: 49/58 cases pass. Failing an allocation
+  it loaded still on the chunk's lists: 49/59 cases pass. Failing an allocation
   in the free space tree or v1 cache loader, or in taking the superblock stripe
   out of the loaded entries, leaves the entries loaded before it, and so does
   failing to delete a discarded v1 cache. The next load adds the same entries
@@ -51,21 +51,27 @@ the cases of the fixes after it.
   without a check, so the list holds each free range twice; after a failed
   `protect_superblocks` one copy still covers the superblock stripe, and the
   chunk keeps the `space_changed` mark the failed load set.
-- `b79ed0b3` ignores a failed allocation for a run of a v1 cache bitmap: 54/58
+- `b79ed0b3` ignores a failed allocation for a run of a v1 cache bitmap: 54/59
   cases pass. The run still counts towards the cache's total free space, so
   the total matches the chunk's and the load succeeds without the run's range.
 - `13b84607` keeps the v1 cache file open when loading a chunk fails after the
-  file was read: 54/58 cases pass. The next load opens the file again and
+  file was read: 54/59 cases pass. The next load opens the file again and
   takes a second reference: after an allocation fails for an extent entry, a
   bitmap run, counting the superblock stripe or taking the stripe out of the
   loaded entries, or deleting a discarded cache's header item fails, the file
   has 2 references and the chunk holds 1. When excising a discarded cache's
   extents fails, the chunk keeps the file after its header item was deleted.
 - `7b66f486` deletes a discarded v1 cache's header item before excising its
-  extents: 57/58 cases pass. When excising fails, the next load finds no
+  extents: 57/59 cases pass. When excising fails, the next load finds no
   header item and regenerates the free space without discarding the cache, so
   the cache file and its extents stay in the root tree and nothing deletes
   them.
+- `1248af47` marks an unreadable cache file deleted without excising its
+  extents or deleting its header: 58/59 cases pass. The extent references
+  remain allocated, and the header points at the deleted inode. The fixed
+  loader discards it through the same rollback-protected path as invalid
+  cached content. The regression also fails each discard operation in turn
+  and checks that a retry completes the discard and regenerates free space.
 
 The runner extracts the production `space` type, `order_space_entry`,
 `space_list_add2`, `space_list_merge`, `add_space_entry` and

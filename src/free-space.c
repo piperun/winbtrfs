@@ -553,14 +553,7 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
     Status = read_file(c->cache, data, 0, c->cache->inode_item.size, NULL, NULL);
     if (!NT_SUCCESS(Status)) {
         ERR("read_file returned %08lx\n", Status);
-        ExFreePool(data);
-
-        c->cache->deleted = true;
-        mark_fcb_dirty(c->cache);
-
-        free_fcb(c->cache);
-        c->cache = NULL;
-        return STATUS_NOT_FOUND;
+        goto clearcache;
     }
 
     if (size > c->cache->inode_item.size)
