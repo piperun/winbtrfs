@@ -102,8 +102,16 @@ if args.bench:
 # loaders, and the test's protect_superblocks takes the superblock stripes off the
 # loaded entries with space_list_subtract.
 bitmap = re.search(r"static \w+ load_free_space_bitmap\(", source)[0]
-(out / "load.inc").write_text("".join(function(source, marker) for marker in (
-    bitmap, "NTSTATUS load_stored_free_space_cache(", "static NTSTATUS load_stored_free_space_tree(",
+bitmap_code = function(source, bitmap).replace(
+    "{\n", "{\n    observe_cache_bitmap(data, Vcb->superblock.sectorsize);\n", 1)
+cache_code = function(source, "NTSTATUS load_stored_free_space_cache(")
+cache_code, observed = re.subn(
+    r"(?m)^( +)fse = \(struct btrfs_free_space_entry\*\)&data\[off\];$",
+    r"\1observe_cache_entry(data, off, size);\n\g<0>", cache_code)
+if observed != 2:
+    raise SystemExit(f"expected two cache-entry reads, found {observed}")
+(out / "load.inc").write_text(bitmap_code + cache_code + "".join(function(source, marker) for marker in (
+    "static NTSTATUS load_stored_free_space_tree(",
     "static NTSTATUS load_free_space_cache(", "NTSTATUS load_cache_chunk(",
     "NTSTATUS space_list_subtract(")))
 (out / "btrfs.h").write_text(read("src/btrfs.h"))

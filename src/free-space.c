@@ -476,6 +476,7 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
     uint32_t *checksums, crc32, num_sectors, num_valid_sectors, size;
     struct btrfs_free_space_entry* fse;
     uint64_t num_entries, num_bitmaps, extent_length, bmpnum, off, total_space = 0, superblock_size;
+    uint64_t bitmap_entries = 0;
     LIST_ENTRY *le, rollback;
 
     // FIXME - does this break if Vcb->superblock.sectorsize is not 4096?
@@ -607,6 +608,11 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
         if ((off + sizeof(struct btrfs_free_space_entry)) >> Vcb->sector_shift != off >> Vcb->sector_shift)
             off = sector_align(off, Vcb->superblock.sectorsize);
 
+        if (off > size || sizeof(*fse) > size - off) {
+            WARN("free space cache entry was outside the buffer\n");
+            goto clearcache;
+        }
+
         fse = (struct btrfs_free_space_entry*)&data[off];
 
         if (fse->type == BTRFS_FREE_SPACE_EXTENT) {
@@ -618,11 +624,21 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
             }
 
             total_space += fse->bytes;
-        } else if (fse->type != BTRFS_FREE_SPACE_BITMAP) {
+        } else if (fse->type == BTRFS_FREE_SPACE_BITMAP) {
+            if (++bitmap_entries > num_bitmaps) {
+                WARN("free space cache had more bitmap entries than its header\n");
+                goto clearcache;
+            }
+        } else {
             ERR("unknown free-space type %x\n", fse->type);
         }
 
         off += sizeof(struct btrfs_free_space_entry);
+    }
+
+    if (bitmap_entries != num_bitmaps) {
+        WARN("free space cache had fewer bitmap entries than its header\n");
+        goto clearcache;
     }
 
     if (num_bitmaps > 0) {
@@ -633,10 +649,19 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
             if ((off + sizeof(struct btrfs_free_space_entry)) >> Vcb->sector_shift != off >> Vcb->sector_shift)
                 off = sector_align(off, Vcb->superblock.sectorsize);
 
+            if (off > size || sizeof(*fse) > size - off) {
+                WARN("free space cache entry was outside the buffer\n");
+                goto clearcache;
+            }
+
             fse = (struct btrfs_free_space_entry*)&data[off];
 
             if (fse->type == BTRFS_FREE_SPACE_BITMAP) {
-                // FIXME - make sure we don't overflow the buffer here
+                if (bmpnum >= num_sectors) {
+                    WARN("free space cache bitmap was outside the buffer\n");
+                    goto clearcache;
+                }
+
                 Status = load_free_space_bitmap(Vcb, c, fse->offset, &data[bmpnum << Vcb->sector_shift], &total_space);
                 if (!NT_SUCCESS(Status)) {
                     ERR("load_free_space_bitmap returned %08lx\n", Status);
