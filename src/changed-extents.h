@@ -28,3 +28,6 @@ NTSTATUS update_changed_extent_ref(device_extension* Vcb, chunk* c, uint64_t add
 NTSTATUS add_changed_extent_ref(chunk* c, uint64_t address, uint64_t size,
                                 uint64_t root, uint64_t objid, uint64_t offset,
                                 uint32_t count, bool no_csum, LIST_ENTRY* rollback);
+
+NTSTATUS flush_changed_extent(device_extension* Vcb, chunk* c, changed_extent* ce,
+                                     PIRP Irp);
