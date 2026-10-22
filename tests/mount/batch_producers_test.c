@@ -35,6 +35,7 @@ struct fcb {
     struct btrfs_inode_item inode_item;
     bool ads, dirty, inode_item_changed;
     uint8_t type;
+    unsigned refcount;
     LIST_ENTRY extents, list_entry_dirty;
 };
 typedef struct { ANSI_STRING utf8; uint64_t index; struct btrfs_key key; } dir_child;
@@ -103,6 +104,7 @@ static void release(void* p,LOOKASIDE* owner) {
     if(owner){CHECK(owner->outstanding);owner->outstanding--;}
     a->p=NULL;live--;free(p);
 }
+static void free_fcb(fcb* f) { CHECK(!f->dirty&&f->refcount==2); f->refcount--; }
 static void ExFreePool(void* p) { release(p,NULL); }
 static void ExFreeToPagedLookasideList(LOOKASIDE* l,void* p) { release(p,l); }
 #define insert_tree_item_batch real_insert_tree_item_batch
@@ -182,7 +184,7 @@ static void exercise(unsigned scenario,unsigned pool_failure,unsigned queue_fail
     device_extension v={0};v.batch_item_lookaside.size=sizeof(batch_item);v.dirty_fcbs_lock=1;
     v.superblock.generation=9;v.superblock.incompat_flags=BTRFS_FEATURE_INCOMPAT_NO_HOLES;
     root subvol={.id=7};LIST_ENTRY batches,dirty;InitializeListHead(&batches);InitializeListHead(&dirty);
-    fcb child={.Vcb=&v,.subvol=&subvol,.inode=2000,.dirty=true,.inode_item_changed=true,.type=BTRFS_FT_REG_FILE};
+    fcb child={.Vcb=&v,.subvol=&subvol,.inode=2000,.refcount=2,.dirty=true,.inode_item_changed=true,.type=BTRFS_FT_REG_FILE};
     fcb parent={.Vcb=&v,.subvol=&subvol,.inode=1000,.type=BTRFS_FT_DIR};
     InitializeListHead(&child.extents);InsertTailList(&dirty,&child.list_entry_dirty);
     dir_child dc={.utf8={3,3,"abc"},.index=8};
@@ -224,8 +226,8 @@ static void exercise(unsigned scenario,unsigned pool_failure,unsigned queue_fail
     CHECK(status==(queue_failure?error:pool_failure?STATUS_INSUFFICIENT_RESOURCES:STATUS_SUCCESS));
     CHECK(failure_hit==!!(pool_failure||queue_failure));
     if(NT_SUCCESS(status))CHECK(allocation_attempts==max_allocations[scenario]);
-    if(kind<=1)CHECK(!child.dirty&&IsListEmpty(&dirty));
-    else CHECK(ref.dirty==!NT_SUCCESS(status));
+    if(kind<=1)CHECK(!child.dirty&&IsListEmpty(&dirty)&&child.refcount==1);
+    else CHECK(child.refcount==2&&ref.dirty==!NT_SUCCESS(status));
     if(kind==2)CHECK(ref.created==!NT_SUCCESS(status));
     if(kind==1)CHECK(child.inode_item_changed==!NT_SUCCESS(status));
     if(!pool_failure)CHECK(queue_attempts==(queue_failure?queue_failure:expected_count));
