@@ -11,6 +11,7 @@ enum fault_kind { NONE, POOL, FCB_ALLOC, NP_ALLOC, FILEREF_ALLOC, SECURITY, EA_E
 typedef struct {
     const char* name;
     bool stream, missing_base, directory, paging, insensitive, preallocate, existing_entry, full, readonly;
+    bool parent_case_sensitive;
     enum fault_kind fault;
     const char* allocator;
     unsigned index;
@@ -310,6 +311,7 @@ static void setup(void) {
     InitializeListHead(&volume.all_fcbs); InitializeListHead(&volume.dirty_fcbs); InitializeListHead(&volume.dirty_filerefs);
     InitializeListHead(&subvol.fcbs); subvol.id=5; subvol.lastinode=1000;
     setup_fcb(&directory_fcb,&directory_np,BTRFS_FT_DIR,256,directory_hash,directory_hash_uc);
+    directory_fcb.case_sensitive=current->parent_case_sensitive;
     directory_ref.fcb=&directory_fcb; directory_ref.refcount=1; InitializeListHead(&directory_ref.children);
     volume.root_fileref=&directory_ref;
     have_base=(current->stream && !current->missing_base) || current->existing_entry;
@@ -632,6 +634,8 @@ int main(int argc, char** argv) {
         {.name="dispatch-stream-missing-base",.dispatch=true,.stream=true,.missing_base=true},
         {.name="dispatch-stream-missing-base-borrowed",.dispatch=true,.loaded_related=true,.stream=true,.missing_base=true},
         {.name="dispatch-file-collision",.dispatch=true,.existing_entry=true,.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="dispatch-case-sensitive-parent-distinct",.dispatch=true,.insensitive=true,.parent_case_sensitive=true,.existing_entry=true,.requested_name=L"ALPHA"},
+        {.name="dispatch-case-sensitive-parent-exact",.dispatch=true,.insensitive=true,.parent_case_sensitive=true,.existing_entry=true,.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="dispatch-file-new",.dispatch=true},
         {.name="file-success"}, {.name="directory-success",.directory=true},
         {.name="file-casefold",.insensitive=true}, {.name="file-paging",.paging=true},
@@ -657,6 +661,8 @@ int main(int argc, char** argv) {
         {.name="file-collision",.existing_entry=true,.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="insensitive-lower-lower",.existing_entry=true,.insensitive=true,.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="insensitive-lower-upper",.existing_entry=true,.insensitive=true,.requested_name=L"ALPHA",.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="case-sensitive-parent-distinct",.existing_entry=true,.insensitive=true,.parent_case_sensitive=true,.requested_name=L"ALPHA"},
+        {.name="case-sensitive-parent-exact",.existing_entry=true,.insensitive=true,.parent_case_sensitive=true,.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="insensitive-lower-mixed",.existing_entry=true,.insensitive=true,.requested_name=L"AlPhA",.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="insensitive-mixed-lower",.existing_entry=true,.insensitive=true,.existing_name=L"aLpHa",.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="insensitive-upper-lower",.existing_entry=true,.insensitive=true,.existing_name=L"ALPHA",.expected=STATUS_OBJECT_NAME_COLLISION},
@@ -669,6 +675,8 @@ int main(int argc, char** argv) {
         {.name="insensitive-hash-collision-length",.existing_entry=true,.insensitive=true,.existing_name=L"6KKS16",.requested_name=L"IM921VL31U",.hash_collision=true},
         {.name="cached-sensitive",.existing_entry=true,.reaped_entry=true,.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="cached-insensitive",.existing_entry=true,.reaped_entry=true,.insensitive=true,.requested_name=L"AlPhA",.expected=STATUS_OBJECT_NAME_COLLISION},
+        {.name="cached-case-sensitive-parent-distinct",.existing_entry=true,.reaped_entry=true,.insensitive=true,.parent_case_sensitive=true,.requested_name=L"ALPHA"},
+        {.name="cached-case-sensitive-parent-exact",.existing_entry=true,.reaped_entry=true,.insensitive=true,.parent_case_sensitive=true,.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="cached-directory",.existing_entry=true,.reaped_entry=true,.existing_directory=true,.directory=true,.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="cached-directory-as-file",.existing_entry=true,.reaped_entry=true,.existing_directory=true,.expected=STATUS_OBJECT_NAME_COLLISION},
         {.name="cached-file-as-directory",.existing_entry=true,.reaped_entry=true,.directory=true,.expected=STATUS_OBJECT_NAME_COLLISION},

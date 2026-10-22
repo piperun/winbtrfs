@@ -267,6 +267,8 @@ NTSTATUS file_create2(_In_ PIRP Irp, _Requires_exclusive_lock_held_(_Curr_->fcb_
     if (parfileref->fcb == Vcb->dummy_fcb)
         return STATUS_ACCESS_DENIED;
 
+    case_sensitive = case_sensitive || parfileref->fcb->case_sensitive;
+
     if (options & FILE_DIRECTORY_FILE && IrpSp->Parameters.Create.FileAttributes & FILE_ATTRIBUTE_TEMPORARY)
         return STATUS_INVALID_PARAMETER;
 
