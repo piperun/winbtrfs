@@ -501,6 +501,12 @@ nextitem:
                 if (rp->compression == BTRFS_COMPRESS_LZO) {
                     ULONG inoff = sizeof(uint32_t);
 
+                    if (inlen < sizeof(uint32_t)) {
+                        ERR("extent data was truncated\n");
+                        Status = STATUS_INTERNAL_ERROR;
+                        goto exit;
+                    }
+
                     inlen -= sizeof(uint32_t);
 
                     // If reading a few sectors in, skip to the interesting bit

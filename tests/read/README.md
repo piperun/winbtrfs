@@ -46,6 +46,12 @@ checked the payload before accounting for the header and used wrapping addition.
 The parser now checks the remaining header, copies it without an alignment
 assumption, and checks the payload against the remaining input after the header.
 
+Five additional reader cases check the outer LZO header boundary: zero to three
+stored bytes must fail before submitting a job, and a complete four-byte header
+is passed to the modeled decompressor with no payload bytes. The reader checks
+the size before subtracting the header, preventing unsigned length underflow.
+The reader suite now passes 199/199 cases; the decoder suite remains 15/15.
+
 `--revision 96fe76d4` has neither the inline-extent nor the LZO correction:
 178/194 scenarios pass.
 

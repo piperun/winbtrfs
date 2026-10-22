@@ -198,8 +198,28 @@ static void lzo_skips(void) {
         reclaim_allocations();disk_image=NULL;
     }
 }
+static void lzo_outer_headers(void) {
+    for (unsigned stored = 0; stored <= 4; stored++) {
+        fcb f; device_extension v; init(&f, &v, 4, 4);
+        extent e = {.offset=0, .extent_data={.type=BTRFS_FILE_EXTENT_REG,
+            .compression=BTRFS_COMPRESS_LZO, .num_bytes=4, .ram_bytes=4,
+            .disk_bytenr=1048576, .disk_num_bytes=stored}};
+        InsertTailList(&f.extents, &e.list_entry);
+        uint8_t data[8]; memset(data, 0xa5, sizeof(data)); ULONG got=123;
+        completed_jobs=missing_job_inputs=0; job_status=STATUS_SUCCESS;
+        NTSTATUS status=read_file(&f, data, 0, 4, &got, NULL);
+        bool valid=stored==4;
+        bool ok=status==(valid?STATUS_SUCCESS:STATUS_INTERNAL_ERROR) &&
+            got==(valid?4u:0u) && allocation_count==0 &&
+            completed_jobs==(valid?1u:0u) && missing_job_inputs==0;
+        for(unsigned n=0;n<sizeof(data);n++)
+            ok=ok&&data[n]==(valid&&n<4?0x7e:0xa5);
+        record(ok,"LZO outer header boundary",0,stored,got,valid?4:0);
+        reclaim_allocations();
+    }
+}
 int main(void) {
-    eof_reads();compressed_jobs();pending_inputs();inline_reads();lzo_skips();
+    eof_reads();compressed_jobs();pending_inputs();inline_reads();lzo_skips();lzo_outer_headers();
     printf("%u/%u file read scenarios passed\n",cases-failures,cases);
     return failures!=0;
 }
