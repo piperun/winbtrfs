@@ -41,8 +41,7 @@ subprocess.run(["gcc", "-std=c11", "-O0", "-g", "-Wall", "-Wextra", "-Werror",
                 f"-ftrivial-auto-var-init={args.init}", *flags, "-I", str(out),
                 str(Path(__file__).with_name("add_device_test.c")), "-o", str(binary)], check=True, timeout=30)
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-# Device and volume-child structures are not freed on add_device's failure paths; leaks are not checked here.
-env = dict(os.environ, ASAN_OPTIONS="detect_leaks=0", UBSAN_OPTIONS="halt_on_error=1")
+env = dict(os.environ, ASAN_OPTIONS="detect_leaks=1:abort_on_error=1", UBSAN_OPTIONS="halt_on_error=1")
 cases = subprocess.check_output([str(binary), "--list"], text=True, timeout=5).splitlines()
 failed = 0
 for case in cases:
