@@ -81,6 +81,8 @@ endif()
 # btrfs.sys
 
 set(SRC_FILES src/balance.c
+    src/balance-data.c
+    src/balance-data-refs.c
     src/add-device.c
     src/batch.c
     src/batch-collision.c
