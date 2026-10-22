@@ -270,14 +270,18 @@ NTSTATUS lzo_decompress(uint8_t* inbuf, uint32_t inlen, uint8_t* outbuf, uint32_
     outoff = 0;
 
     do {
-        partlen = *(uint32_t*)&inbuf[inoff];
-
-        if (partlen + inoff > inlen) {
-            ERR("overflow: %x + %x > %x\n", partlen, inoff, inlen);
+        if (inoff > inlen || inlen - inoff < sizeof(uint32_t)) {
+            ERR("truncated LZO segment header\n");
             return STATUS_INTERNAL_ERROR;
         }
 
+        RtlCopyMemory(&partlen, &inbuf[inoff], sizeof(partlen));
         inoff += sizeof(uint32_t);
+
+        if (partlen > inlen - inoff) {
+            ERR("LZO segment exceeds input buffer\n");
+            return STATUS_INTERNAL_ERROR;
+        }
 
         stream.in = &inbuf[inoff];
         stream.inlen = partlen;

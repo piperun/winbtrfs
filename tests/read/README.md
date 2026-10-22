@@ -32,8 +32,19 @@ LZO reads that start in the second 4 KiB of output skip the first segment.
 Fixtures place the second segment header after zero to three bytes of page
 padding and give the first segment lengths that end at, or one to three bytes
 past, the end of the extent. The decompression job must receive exactly the
-bytes left in the extent after the skip. Decompression itself is modeled, so
-these fixtures do not show whether `lzo_decompress` stays inside that input.
+bytes left in the extent after the skip. Decompression in these reader fixtures
+is modeled.
+
+The runner also extracts the actual LZO segment parser for 15 boundary cases:
+valid literal output, partial reads, unaligned headers, multiple segments with
+page padding, and incomplete headers or payloads. It checks the returned status,
+output bytes, and untouched bytes beyond the requested output. These cases run
+against the guarded working-tree decoder only; `--revision` compares modeled
+reader behavior and does not run a historical decoder. Source inspection showed
+that the previous parser read a segment header before checking its span, then
+checked the payload before accounting for the header and used wrapping addition.
+The parser now checks the remaining header, copies it without an alignment
+assumption, and checks the payload against the remaining input after the header.
 
 `--revision 96fe76d4` has neither the inline-extent nor the LZO correction:
 178/194 scenarios pass.
