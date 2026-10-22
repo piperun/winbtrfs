@@ -58,7 +58,8 @@ start = btrfs.index("#ifdef DEBUG_FCB_REFCOUNTS\nvoid _free_fcb(")
 treefuncs = read("src/treefuncs.c")
 (out / "trees.inc").write_text("".join(block(treefuncs, treefuncs.index(f"void {name}(")) + "\n"
                                        for name in ("free_tree", "free_trees_root")))
-(out / "clear_batch.inc").write_text(block(treefuncs, treefuncs.index("void clear_batch_list(")) + "\n")
+batch_source = read("src/batch.c", optional=True) or treefuncs
+(out / "clear_batch.inc").write_text(block(batch_source, batch_source.index("void clear_batch_list(")) + "\n")
 batch_start = mount.index("    Status = commit_batch_list(Vcb, &batchlist, Irp);")
 batch_end = mount.index("    Vcb->volume_fcb =", batch_start)
 (out / "batch_failure.inc").write_text(

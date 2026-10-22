@@ -82,6 +82,8 @@ endif()
 
 set(SRC_FILES src/balance.c
     src/add-device.c
+    src/batch.c
+    src/batch-collision.c
     src/allocated-ranges.c
     src/blake2b-ref.c
     src/boot.c
