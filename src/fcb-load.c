@@ -20,6 +20,24 @@
 #include "btrfs_drv.h"
 #include "crc32c.h"
 
+static bool valid_file_extent(const struct btrfs_file_extent_item* ed, uint64_t logical_offset,
+                              uint64_t last_extent_end, bool have_last_extent) {
+    uint64_t backing_length;
+
+    if (ed->num_bytes == 0 || logical_offset > UINT64_MAX - ed->num_bytes ||
+        (have_last_extent && logical_offset < last_extent_end))
+        return false;
+
+    if (ed->disk_bytenr == 0 || ed->disk_num_bytes == 0)
+        return ed->disk_bytenr == 0 && ed->disk_num_bytes == 0;
+
+    if (ed->disk_bytenr > UINT64_MAX - ed->disk_num_bytes)
+        return false;
+
+    backing_length = ed->compression == BTRFS_COMPRESS_NONE ? ed->disk_num_bytes : ed->ram_bytes;
+    return ed->offset <= backing_length && ed->num_bytes <= backing_length - ed->offset;
+}
+
 NTSTATUS open_fcb(_Requires_lock_held_(_Curr_->tree_lock) _Requires_exclusive_lock_held_(_Curr_->fcb_lock) device_extension* Vcb,
                   root* subvol, uint64_t inode, uint8_t type, PANSI_STRING utf8, bool always_add_hl, fcb* parent, fcb** pfcb, POOL_TYPE pooltype, PIRP Irp) {
     struct btrfs_key searchkey;
@@ -30,6 +48,8 @@ NTSTATUS open_fcb(_Requires_lock_held_(_Curr_->tree_lock) _Requires_exclusive_lo
     LIST_ENTRY* lastle = NULL;
     struct btrfs_file_extent_item* ed = NULL;
     uint64_t fcbs_version = 0;
+    uint64_t last_extent_end = 0;
+    bool have_last_extent = false;
     uint32_t hash;
 
     hash = calc_crc32c(0xffffffff, (uint8_t*)&inode, sizeof(uint64_t));
@@ -515,6 +535,15 @@ NTSTATUS open_fcb(_Requires_lock_held_(_Curr_->tree_lock) _Requires_exclusive_lo
                     reap_fcb(fcb);
                     return STATUS_INTERNAL_ERROR;
                 }
+
+                if (!valid_file_extent(ed, tp.item->key.offset, last_extent_end, have_last_extent)) {
+                    ERR("invalid file extent at %I64x\n", tp.item->key.offset);
+                    reap_fcb(fcb);
+                    return STATUS_INTERNAL_ERROR;
+                }
+
+                last_extent_end = tp.item->key.offset + ed->num_bytes;
+                have_last_extent = true;
 
                 if (ed->disk_bytenr == 0 || ed->disk_num_bytes == 0) // sparse
                     continue;
