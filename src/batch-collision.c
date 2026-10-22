@@ -239,6 +239,7 @@ NTSTATUS handle_batch_collision(device_extension* Vcb, batch_item* bi, tree* t, 
                             if (keycmp(bi3->key, bi2->key) != -1) {
                                 InsertHeadList(le->Blink, &bi2->list_entry);
                                 inserted = true;
+                                break;
                             }
 
                             le = le->Flink;

@@ -164,3 +164,11 @@ payload. On failure, insertion removes only that new item, preserves the
 existing queue and returns its original insufficient-resources status.
 The producer tests release queued payloads explicitly so they also cover
 this ownership boundary independently of the commit destructor.
+
+Nineteen additional collision cases check generated extended inode-reference
+ordering at the head, middle and tail of the remaining queue, including equal
+keys, either allocation failure and the feature-disabled path. They require one
+generated item, stable existing item identities, sorted bidirectional links,
+preserved reference data, and balanced pool/lookaside ownership. An insertion
+observer stops a repeated link before any pointers are changed. Before the
+single-insertion correction, 74/77 cases pass; all 77 pass after it.
