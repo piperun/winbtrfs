@@ -704,15 +704,21 @@ clearcache:
 
     InitializeListHead(&rollback);
 
-    Status = delete_tree_item(Vcb, &tp);
-    if (!NT_SUCCESS(Status)) {
-        ERR("delete_tree_item returned %08lx\n", Status);
-        goto end;
-    }
+    // Excise the extents before deleting the header item. No load finds a cache file
+    // whose header item is gone, so if excising failed after that, nothing would
+    // delete the file. A failed excise is rolled back instead, and the next load
+    // discards the cache again.
 
     Status = excise_extents(Vcb, c->cache, 0, c->cache->inode_item.size, Irp, &rollback);
     if (!NT_SUCCESS(Status)) {
         ERR("excise_extents returned %08lx\n", Status);
+        do_rollback(Vcb, &rollback);
+        goto end;
+    }
+
+    Status = delete_tree_item(Vcb, &tp);
+    if (!NT_SUCCESS(Status)) {
+        ERR("delete_tree_item returned %08lx\n", Status);
         do_rollback(Vcb, &rollback);
         goto end;
     }

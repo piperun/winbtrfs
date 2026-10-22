@@ -61,6 +61,11 @@ the cases of the fixes after it.
   loaded entries, or deleting a discarded cache's header item fails, the file
   has 2 references and the chunk holds 1. When excising a discarded cache's
   extents fails, the chunk keeps the file after its header item was deleted.
+- `7b66f486` deletes a discarded v1 cache's header item before excising its
+  extents: 57/58 cases pass. When excising fails, the next load finds no
+  header item and regenerates the free space without discarding the cache, so
+  the cache file and its extents stay in the root tree and nothing deletes
+  them.
 
 The runner extracts the production `space` type, `order_space_entry`,
 `space_list_add2`, `space_list_merge`, `add_space_entry` and
@@ -155,8 +160,9 @@ frees memory at once. The trees are native models searched as the production
 `find_item` and `find_next_item` search them. The v1 cache file, its header
 item and the calls that discard a cache are native models too; deleting the
 header item takes it out of the root tree, and deleting it or excising the
-cache's extents can be made to fail. Opening the cache file takes a reference
-to it, and releasing it drops one. The checksum is not under test.
+cache's extents can be made to fail. Excising the extents adds a rollback
+entry, which `do_rollback` undoes. Opening the cache file takes a reference to
+it, and releasing it drops one. The checksum is not under test.
 `protect_superblocks` and `get_superblock_size` are native models of a chunk
 with no superblock copy, or with one whose 64 KiB stripe lies in the last free
 range: `protect_superblocks` takes the stripe off the chunk's lists with the
@@ -202,10 +208,11 @@ loader adds through the production `load_free_space_bitmap`.
 - A v1 cache whose entries add up to less than the chunk's free space is
   discarded after its entries are loaded. If deleting its header item or
   excising its extents fails, the load must return the failure and leave the
-  chunk as it found it, and the next load must regenerate the free ranges from
-  the extent tree. After each load the chunk must hold every reference to the
-  cache file, as its cache or old cache, and may not keep the file as its
-  cache once the header item is deleted.
+  chunk as it found it, with the extents not excised, and the next load must
+  discard the cache and regenerate the free ranges from the extent tree. After
+  each load the chunk must hold every reference to the cache file, as its
+  cache or old cache, and may not keep the file as its cache once the header
+  item is deleted.
 - A v1 cache whose last entry covers the superblock stripe and stops short of
   the chunk's end by as much still adds up. Failing the allocation
   `protect_superblocks` makes to split that entry around the stripe fails the

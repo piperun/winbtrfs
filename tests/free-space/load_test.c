@@ -248,20 +248,31 @@ static NTSTATUS delete_tree_item(device_extension* Vcb, traverse_ptr* tp) {
     return STATUS_SUCCESS;
 }
 
+/* The rollback entry a successful excise_extents adds: do_rollback undoes the excise,
+   and clear_rollback keeps it. */
+static LIST_ENTRY excise_rollback;
+
 static NTSTATUS excise_extents(device_extension* Vcb, fcb* f, uint64_t start, uint64_t end, PIRP Irp,
                                LIST_ENTRY* rollback) {
     (void)Irp;
     CHECK(Vcb == &volume && f == &cache_file && start == 0 && end == sizeof(cache_data) && rollback);
     if (excise_status != STATUS_SUCCESS) return excise_status;
     cache_excises++;
+    InsertTailList(rollback, &excise_rollback);
     return STATUS_SUCCESS;
 }
 
 static void do_rollback(device_extension* Vcb, LIST_ENTRY* rollback) {
-    CHECK(Vcb == &volume && IsListEmpty(rollback)); /* excise_extents adds nothing to roll back */
+    CHECK(Vcb == &volume);
+    if (IsListEmpty(rollback)) return;
+    CHECK(RemoveHeadList(rollback) == &excise_rollback && IsListEmpty(rollback));
+    cache_excises--;
 }
 
-static void clear_rollback(LIST_ENTRY* rollback) { CHECK(IsListEmpty(rollback)); }
+static void clear_rollback(LIST_ENTRY* rollback) {
+    if (!IsListEmpty(rollback))
+        CHECK(RemoveHeadList(rollback) == &excise_rollback && IsListEmpty(rollback));
+}
 
 static void mark_fcb_dirty(fcb* f) {
     CHECK(f == &cache_file && f->deleted);
@@ -420,14 +431,21 @@ static void check_regenerated(bool regenerated) {
     }
 }
 
-/* Reports a v1 cache kept when it should have been discarded, or the reverse. A
-   discarded cache loses its header item and its extents, and the chunk keeps the
-   file only as its old cache. */
+/* Reports a v1 cache kept when it should have been discarded, or the reverse, and a
+   cache file left behind without its header item. A discarded cache loses its header
+   item and its extents, and the chunk keeps the file only as its old cache, marked
+   deleted. No load finds a file whose header item is gone, so one that is not deleted
+   stays in the root tree with its extents. */
 static void check_cache_discarded(bool discarded) {
     bool gone = header_deletes == 1 && cache_excises == 1 && cache_file.deleted && dirty_marks == 1 &&
                 !load_chunk.cache && load_chunk.old_cache == &cache_file;
     bool kept = !header_deletes && !cache_excises && !cache_file.deleted && !dirty_marks &&
                 load_chunk.cache == &cache_file && !load_chunk.old_cache;
+    if (header_deletes && !cache_file.deleted) {
+        fprintf(stderr, "%sthe header item is gone but the cache file was not deleted\n", step);
+        failures++;
+        return;
+    }
     CHECK(gone || kept);
     if (gone != discarded) {
         fprintf(stderr, "%scache %s, expected it %s\n", step, gone ? "discarded" : "kept",
@@ -453,13 +471,18 @@ static void check_cache_references(void) {
     }
 }
 
-/* Reports a failed load that left entries or other allocations behind, or changed the
-   chunk's space_changed from what it was before the load, and checks the references
-   to the cache file. The next load must start from an empty list, and the flush
-   writes the lists of a chunk with space_changed set out as its free space. */
+/* Reports a failed load that left entries or other allocations behind, left the v1
+   cache's extents excised, or changed the chunk's space_changed from what it was
+   before the load, and checks the references to the cache file. The next load must
+   start from an empty list and reads the cache file again, and the flush writes the
+   lists of a chunk with space_changed set out as its free space. */
 static void check_unloaded(bool space_changed) {
     CHECK(!load_chunk.cache_loaded);
     check_cache_references();
+    if (cache_excises) {
+        fprintf(stderr, "%sthe cache's extents were left excised\n", step);
+        failures++;
+    }
     if (!IsListEmpty(&load_chunk.space)) {
         range got[32];
         size_t n = list_ranges(got, COUNT(got));
@@ -813,9 +836,8 @@ static void protect_failure_marks(void) {
 /* The cache's entries add up to less than the chunk's free space, so the loader
    discards the cache after loading them. Deleting its header item or excising its
    extents fails in turn: the load must return the failure and leave the chunk as it
-   found it. The next load regenerates the free space from the extent tree, discarding
-   the cache again or finding its header item gone, and the chunk must hold every
-   reference to the cache file. */
+   found it. The next load must discard the cache and regenerate the free space from
+   the extent tree, and the chunk must hold every reference to the cache file. */
 static void cache_discard_failures(void) {
     static const range entries[] = {
         { BASE + 0x10000, BASE + 0x14000 },
@@ -840,6 +862,7 @@ static void cache_discard_failures(void) {
         CHECK(load_chunk.cache_loaded);
         check_space(free_ranges, COUNT(free_ranges));
         check_regenerated(true);
+        check_cache_discarded(true);
         check_cache_references();
         free_entries();
     }
