@@ -97,6 +97,13 @@ before memory is read or modified, including when checking the old loader.
 Every rejected layout must discard the cache and regenerate the chunk's free
 space. Existing valid extent and bitmap caches remain controls.
 
+- `1248af47` marks an unreadable cache file deleted without excising its
+  extents or deleting its header. The extent references
+  remain allocated, and the header points at the deleted inode. The fixed
+  loader discards it through the same rollback-protected path as invalid
+  cached content. The regression also fails each discard operation in turn
+  and checks that a retry completes the discard and regenerates free space.
+
 The runner extracts the production `space` type, `order_space_entry`,
 `space_list_add2`, `space_list_merge`, `add_space_entry` and
 `space_list_subtract2`, plus the `place_space_entry`, `space_list_add_from` and

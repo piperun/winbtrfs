@@ -35,6 +35,7 @@ typedef struct {
 
 #define STATUS_NOT_FOUND ((NTSTATUS)0xc0000225)
 #define STATUS_INTERNAL_ERROR ((NTSTATUS)0xc00000e5)
+#define STATUS_CRC_ERROR ((NTSTATUS)0xc000003f)
 #define TRACE(...) ((void)0)
 #define WARN(...) ((void)0)
 #define RtlCopyMemory(d, s, n) memcpy(d, s, n)
@@ -152,8 +153,9 @@ static uint8_t cache_data[4 * SECTOR];
 static uint8_t* cache_buffer;
 static uint64_t bitmap_reads;
 static unsigned extent_searches, header_deletes, cache_excises, dirty_marks, failures;
-/* What deleting the header item and excising the cache's extents return. */
-static NTSTATUS delete_status, excise_status;
+/* What reading the cache file, deleting its header item and excising its extents
+   return. */
+static NTSTATUS read_status, delete_status, excise_status;
 /* The stripe around a superblock copy in the chunk, or an empty range. */
 static range superblock_stripe;
 /* Whether a nocow write marks the chunk changed, without its chunk lock, while
@@ -203,12 +205,14 @@ static void free_fcb(fcb* f) {
     f->refcount--;
 }
 
+/* It fills the buffer even when the read fails, so a loader that used the buffer after
+   a failed read would load the cache. */
 static NTSTATUS read_file(fcb* f, uint8_t* data, uint64_t start, uint64_t length, ULONG* pbr, PIRP Irp) {
     CHECK(f == &cache_file && start == 0 && length == sizeof(cache_data) && !pbr && !Irp);
     cache_buffer = data;
     bitmap_reads = 0;
     memcpy(data, cache_data, sizeof(cache_data));
-    return STATUS_SUCCESS;
+    return read_status;
 }
 
 /* Observers run before production code reads an entry or changes a bitmap. They
@@ -347,7 +351,7 @@ static void set_up_chunk(void) {
     allocations = fail_allocation = 0;
     cache_buffer = NULL;
     bitmap_reads = 0;
-    delete_status = excise_status = STATUS_SUCCESS;
+    read_status = delete_status = excise_status = STATUS_SUCCESS;
     superblock_stripe = (range){ 0, 0 };
     write_during_protect = false;
 }
@@ -472,11 +476,15 @@ static void check_regenerated(bool regenerated) {
     }
 }
 
-/* Reports a v1 cache kept when it should have been discarded, or the reverse, and a
-   cache file left behind without its header item. A discarded cache loses its header
-   item and its extents, and the chunk keeps the file only as its old cache, marked
-   deleted. No load finds a file whose header item is gone, so one that is not deleted
-   stays in the root tree with its extents. */
+/* Reports a v1 cache kept when it should have been discarded, or the reverse, a cache
+   file left behind without its header item, and one deleted without the rest of the
+   discard. A discarded cache loses its header item and its extents, and the chunk
+   keeps the file only as its old cache, marked deleted. No load finds a file whose
+   header item is gone, so one that is not deleted stays in the root tree with its
+   extents. Flushing a deleted file deletes the inode's items in the root tree and
+   nothing else: the extent tree keeps its references to extents that were not
+   excised, so their space is never freed, and a header item that is kept points at
+   the deleted inode. */
 static void check_cache_discarded(bool discarded) {
     bool gone = header_deletes == 1 && cache_excises == 1 && cache_file.deleted && dirty_marks == 1 &&
                 !load_chunk.cache && load_chunk.old_cache == &cache_file;
@@ -484,6 +492,13 @@ static void check_cache_discarded(bool discarded) {
                 load_chunk.cache == &cache_file && !load_chunk.old_cache;
     if (header_deletes && !cache_file.deleted) {
         fprintf(stderr, "%sthe header item is gone but the cache file was not deleted\n", step);
+        failures++;
+        return;
+    }
+    if (cache_file.deleted && !(header_deletes && cache_excises)) {
+        fprintf(stderr, "%sthe cache file was deleted with %s\n", step,
+                header_deletes ? "its extents not excised" :
+                cache_excises ? "its header item kept" : "its extents not excised and its header item kept");
         failures++;
         return;
     }
@@ -1086,22 +1101,45 @@ static void protect_failure_marks(void) {
 }
 
 /* The cache's entries add up to less than the chunk's free space, so the loader
-   discards the cache after loading them. Deleting its header item or excising its
-   extents fails in turn: the load must return the failure and leave the chunk as it
-   found it. The next load must discard the cache and regenerate the free space from
-   the extent tree, and the chunk must hold every reference to the cache file. */
-static void cache_discard_failures(void) {
+   discards the cache after loading them. */
+static void set_up_short_cache(void) {
     static const range entries[] = {
         { BASE + 0x10000, BASE + 0x14000 },
         { BASE + 0x18000, BASE + 0x20000 },
     };
+    set_up_cache(entries, COUNT(entries));
+}
+
+/* The cache's entries give the free ranges, but reading the cache file fails, so the
+   loader discards the cache without loading them. */
+static void set_up_unreadable_cache(void) {
+    set_up_cache(free_ranges, COUNT(free_ranges));
+    read_status = STATUS_CRC_ERROR;
+}
+
+/* Loads the chunk, which must discard the cache and regenerate the free ranges from
+   the extent tree, and hold every reference to the cache file. */
+static void load_discarding_cache(void) {
+    CHECK(load_cache_chunk(&volume, &load_chunk, NULL) == STATUS_SUCCESS);
+    CHECK(load_chunk.cache_loaded);
+    check_space(free_ranges, COUNT(free_ranges));
+    check_regenerated(true);
+    check_cache_discarded(true);
+    check_cache_references();
+    free_entries();
+}
+
+/* The loader discards the cache set_up gives, and deleting its header item or
+   excising its extents fails in turn: the load must return the failure and leave the
+   chunk as it found it. The next load must discard the cache. */
+static void fail_each_discard_call(void (*set_up)(void)) {
     struct { const char* what; NTSTATUS* status; NTSTATUS failure; } calls[] = {
         { "deleting the header item", &delete_status, STATUS_INTERNAL_ERROR },
         { "excising the cache's extents", &excise_status, STATUS_INSUFFICIENT_RESOURCES },
     };
     char text[64];
     for (size_t i = 0; i < COUNT(calls); i++) {
-        set_up_cache(entries, COUNT(entries));
+        set_up();
         *calls[i].status = calls[i].failure;
         snprintf(text, sizeof(text), "%s failed: ", calls[i].what);
         step = text;
@@ -1110,16 +1148,24 @@ static void cache_discard_failures(void) {
         *calls[i].status = STATUS_SUCCESS;
         extent_searches = 0;
         snprintf(text, sizeof(text), "load after %s failed: ", calls[i].what);
-        CHECK(load_cache_chunk(&volume, &load_chunk, NULL) == STATUS_SUCCESS);
-        CHECK(load_chunk.cache_loaded);
-        check_space(free_ranges, COUNT(free_ranges));
-        check_regenerated(true);
-        check_cache_discarded(true);
-        check_cache_references();
-        free_entries();
+        load_discarding_cache();
     }
     step = "";
     CHECK(failures == 0);
+}
+
+static void cache_discard_failures(void) {
+    fail_each_discard_call(set_up_short_cache);
+}
+
+/* Reading the cache file fails, so the loader must discard the cache, as it does a
+   cache it cannot use, and regenerate the free ranges from the extent tree. Then each
+   call of the discard fails in turn, while the read keeps failing. */
+static void cache_read_failure(void) {
+    set_up_unreadable_cache();
+    step = "reading the cache file failed: ";
+    load_discarding_cache();
+    fail_each_discard_call(set_up_unreadable_cache);
 }
 
 /* A v1 cache whose last entry covers the superblock stripe and stops short of the
@@ -1276,6 +1322,7 @@ static const struct { const char* name; void (*run)(void); } cases[] = {
     { "load-cache-allocation-failures", cache_allocation_failures },
     { "load-cache-bitmap-allocation-failures", bitmap_cache_allocation_failures },
     { "load-cache-discard-failures", cache_discard_failures },
+    { "load-cache-read-failure", cache_read_failure },
     { "load-cache-protect-failure", cache_protect_failure },
     { "load-regenerated-allocation-failures", regenerated_allocation_failures },
     { "load-protect-failure-marks", protect_failure_marks },
