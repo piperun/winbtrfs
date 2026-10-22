@@ -40,6 +40,11 @@ static void* ExAllocatePoolWithTag(int pool, size_t size, unsigned tag) {
     void* p = allocate(size, NULL); memset(p, 0xa5, size); return p;
 }
 static void ExFreePool(void* p) { release(p, NULL); }
+static unsigned notify_uninitializations;
+static void FsRtlNotifyInitializeSync(void** sync) { CHECK(!*sync); *sync = allocate(32, NULL); }
+void FsRtlNotifyUninitializeSync(void** sync) {
+    CHECK(*sync); ExFreePool(*sync); *sync = NULL; notify_uninitializations++;
+}
 static void ExFreeToNPagedLookasideList(LOOKASIDE* list, void* p) {
     CHECK(list->nonpaged); release(p, list);
 }

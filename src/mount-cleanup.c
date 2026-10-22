@@ -134,6 +134,9 @@ void cleanup_failed_mount(device_extension* Vcb, fcb* root_fcb, bool init_lookas
         ExDeleteNPagedLookasideList(&Vcb->fcb_np_lookaside);
     }
 
+    if (Vcb->NotifySync)
+        FsRtlNotifyUninitializeSync(&Vcb->NotifySync);
+
     ExDeleteResourceLite(&Vcb->tree_lock);
     ExDeleteResourceLite(&Vcb->load_lock);
     ExDeleteResourceLite(&Vcb->fcb_lock);

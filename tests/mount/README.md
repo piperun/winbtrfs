@@ -83,10 +83,8 @@ Fixtures construct partial-mount state directly. They do not execute disk
 discovery, full mount initialization, root cache-file close, concurrent
 kernel activity or Windows pools. The root-fileref allocation-failure branch is also exercised.
 Still leaking on some failure paths: FCBs marked dirty and changed-extent records
-created while clearing the free-space cache; the notify synchronization
-object set up with
-`FsRtlNotifyInitializeSync`. No complete mount-failure cleanup or #832 hang
-fix is claimed.
+created while clearing the free-space cache. No complete mount-failure
+cleanup or #832 hang fix is claimed.
 
 Each case runs separately with a five-second timeout and core dumps disabled.
 Windows runtime validation remains outstanding. LeakSanitizer may require
@@ -113,3 +111,9 @@ They execute production free/reap functions and require the fileref and
 FCB allocations and references to be released. Before the fix, 133/141 pass;
 all eight new cases leak. The existing stream-file cases still require the
 root FCB, nonpaged part and fileref to survive while the stream file owns them.
+
+Eighteen notify-sync cases cover failure before initialization, after
+initialization, and with a live root stream file, across both errors and
+zero/one/three devices. Before the fix, 147/159 pass; the twelve initialized
+objects leak. Cleanup uninitializes a nonnull notify-sync pointer once and
+skips the never-initialized pointer.

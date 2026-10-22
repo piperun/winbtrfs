@@ -14,7 +14,7 @@
 #include "batch_failure.inc"
 
 static unsigned space_mode;
-static bool root_fileref_only;
+static bool root_fileref_only, notify_sync;
 
 static void exercise(unsigned stage, unsigned devices, NTSTATUS failure, unsigned dummy_stage, unsigned loaded, bool root_file) {
     if (stage == 0) {
@@ -43,6 +43,7 @@ static void exercise(unsigned stage, unsigned devices, NTSTATUS failure, unsigne
             }
         }
     } else CHECK(!devices);
+    if (notify_sync) FsRtlNotifyInitializeSync(&volume.NotifySync);
     InitializeListHead(&subvolume.fcbs);
     make_metadata(loaded);
     if (stage >= 4) volume.volume_fcb = make_fcb(NULL, false);
@@ -92,6 +93,18 @@ int main(int argc, char** argv) {
         CHECK(dev && !dev->space.Flink && !dev->space.Blink);
         ExFreePool(dev); CHECK(!allocations); return 0;
     }
+    for (unsigned stage = 0; stage < 3; stage++) for (unsigned d = 0; d < 3; d++)
+        for (unsigned error = 0; error < 2; error++) {
+            const unsigned counts[] = { 0, 1, 3 };
+            char name[100]; snprintf(name, sizeof(name), "notify-stage%u-devices%u-error%u", stage, counts[d], error);
+            if (strcmp(argv[1], "--list") == 0) { puts(name); continue; }
+            if (strcmp(argv[1], name) != 0) continue;
+            notify_sync = stage != 0;
+            exercise(stage == 2 ? 6 : stage == 1 ? 3 : 2, counts[d],
+                error ? STATUS_INTERNAL_ERROR : STATUS_INSUFFICIENT_RESOURCES,
+                stage == 2 ? 3 : 0, stage == 2 ? LOADED_CACHES : LOADED_NONE, stage == 2);
+            CHECK(notify_uninitializations == notify_sync && !volume.NotifySync); return 0;
+        }
     for (unsigned count = 0; count <= 3; count++) for (unsigned error = 0; error < 2; error++) {
         char name[100]; snprintf(name, sizeof(name), "root-fileref-devices%u-error%u", count, error);
         if (strcmp(argv[1], "--list") == 0) { puts(name); continue; }

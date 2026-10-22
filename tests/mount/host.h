@@ -68,6 +68,7 @@ struct device_extension {
               dirty_fcbs_lock, dirty_filerefs_lock, dirty_subvols_lock;
     struct { ERESOURCE stats_lock; } scrub;
     void* root_file;
+    void* NotifySync;
     file_ref* root_fileref;
     fcb* volume_fcb;
     fcb* dummy_fcb;
