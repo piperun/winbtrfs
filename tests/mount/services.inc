@@ -4,6 +4,7 @@ static DEVICE_OBJECT new_device;
 static root subvolume;
 static unsigned allocations, resource_live, lookaside_deletions, device_deletions, freed_fcbs;
 static bool initialized_lists;
+static unsigned cache_mutations;
 static NTSTATUS batch_failure;
 static NTSTATUS commit_batch_list(device_extension* Vcb, LIST_ENTRY* list, void* Irp) {
     (void)Vcb; (void)list; (void)Irp; return batch_failure;
@@ -40,6 +41,11 @@ static void* ExAllocatePoolWithTag(int pool, size_t size, unsigned tag) {
     void* p = allocate(size, NULL); memset(p, 0xa5, size); return p;
 }
 static void ExFreePool(void* p) { release(p, NULL); }
+static unsigned notify_uninitializations;
+static void FsRtlNotifyInitializeSync(void** sync) { CHECK(!*sync); *sync = allocate(32, NULL); }
+void FsRtlNotifyUninitializeSync(void** sync) {
+    CHECK(*sync); ExFreePool(*sync); *sync = NULL; notify_uninitializations++;
+}
 static void ExFreeToNPagedLookasideList(LOOKASIDE* list, void* p) {
     CHECK(list->nonpaged); release(p, list);
 }
@@ -53,6 +59,10 @@ static void delete_lookaside(LOOKASIDE* list, bool nonpaged) {
 static void ExDeletePagedLookasideList(LOOKASIDE* list) { delete_lookaside(list, false); }
 static void ExDeleteNPagedLookasideList(LOOKASIDE* list) { delete_lookaside(list, true); }
 static void init_resource(ERESOURCE* r) { CHECK(!r->live); r->live = true; resource_live++; }
+static void ExAcquireResourceExclusiveLite(ERESOURCE* r, bool wait) {
+    CHECK(wait && r->live && !r->held); r->held++;
+}
+static LONG InterlockedIncrement(LONG* count) { CHECK(*count >= 0); return ++*count; }
 static void ExReleaseResourceLite(ERESOURCE* r) { CHECK(r->live && r->held); r->held--; }
 static void ExDeleteResourceLite(ERESOURCE* r) { CHECK(r->live && !r->held); r->live = false; resource_live--; }
 static LONG InterlockedDecrement(LONG* count) { CHECK(*count > 0); return --*count; }
@@ -139,6 +149,16 @@ static chunk* make_chunk(void) {
     chunk* c = allocate(sizeof(*c), NULL);
     c->chunk_item = allocate(80, NULL); c->devices = allocate(2 * sizeof(device*), NULL);
     InitializeListHead(&c->space); InitializeListHead(&c->deleting);
+    InitializeListHead(&c->changed_extents);
+    if (cache_mutations & 2) for (unsigned i = 0; i < 2; i++) {
+        changed_extent* ce = allocate(sizeof(*ce), NULL);
+        InitializeListHead(&ce->refs); InitializeListHead(&ce->old_refs);
+        InsertTailList(&c->changed_extents, &ce->list_entry);
+        for (unsigned j = 0; j <= i; j++)
+            InsertTailList(&ce->refs, &((changed_extent_ref*)allocate(sizeof(changed_extent_ref), NULL))->list_entry);
+        for (unsigned j = 0; j < i; j++)
+            InsertTailList(&ce->old_refs, &((changed_extent_ref*)allocate(sizeof(changed_extent_ref), NULL))->list_entry);
+    }
     for (unsigned i = 0; i < 2; i++) InsertTailList(&c->space, &((space*)allocate(sizeof(space), NULL))->list_entry);
     InsertTailList(&c->deleting, &((space*)allocate(sizeof(space), NULL))->list_entry);
     init_resource(&c->lock); init_resource(&c->changed_extents_lock);
@@ -167,6 +187,7 @@ static void make_metadata(unsigned loaded) {
     CHECK(initialized_lists);
     InitializeListHead(&volume.chunks); InitializeListHead(&volume.trees);
     InitializeListHead(&volume.trees_hash); InitializeListHead(&volume.all_fcbs);
+    InitializeListHead(&volume.dirty_fcbs);
     make_tree(chunk_root, 0, NULL, 3);
     chunk* first = make_chunk(); chunk* second = make_chunk();
     if (loaded < LOADED_ROOTS) return;
@@ -180,4 +201,8 @@ static void make_metadata(unsigned loaded) {
     /* Two free-space headers naming one inode: open_fcb returns the same FCB with a second reference. */
     chunk* third = make_chunk();
     second->cache = third->cache = make_cache_fcb(root_root, 0x03000000, 2);
+    if (cache_mutations & 1) for (LIST_ENTRY* le = volume.all_fcbs.Flink; le != &volume.all_fcbs; le = le->Flink) {
+        fcb* f = CONTAINING_RECORD(le, fcb, list_entry_all);
+        mark_fcb_dirty(f); LONG marked = f->refcount; mark_fcb_dirty(f); CHECK(f->refcount == marked);
+    }
 }

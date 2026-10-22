@@ -53,15 +53,24 @@ start = btrfs.index("#ifdef DEBUG_FCB_REFCOUNTS\nvoid _free_fcb(")
 (out / "reap.inc").write_text(block(btrfs, btrfs.index("void reap_fcb(")) + "\n")
 (out / "reap_fcbs.inc").write_text(block(btrfs, btrfs.index("void reap_fcbs(")) + "\n")
 (out / "free_fileref.inc").write_text(block(btrfs, btrfs.index("void free_fileref(")) + "\n")
+(out / "reap_fileref.inc").write_text(block(btrfs, btrfs.index("void reap_fileref(")) + "\n")
+(out / "mark_dirty.inc").write_text(block(btrfs, btrfs.index("void mark_fcb_dirty(")) + "\n")
 treefuncs = read("src/treefuncs.c")
 (out / "trees.inc").write_text("".join(block(treefuncs, treefuncs.index(f"void {name}(")) + "\n"
                                        for name in ("free_tree", "free_trees_root")))
-(out / "clear_batch.inc").write_text(block(treefuncs, treefuncs.index("void clear_batch_list(")) + "\n")
+batch_source = read("src/batch.c", optional=True) or treefuncs
+(out / "clear_batch.inc").write_text(block(batch_source, batch_source.index("void clear_batch_list(")) + "\n")
 batch_start = mount.index("    Status = commit_batch_list(Vcb, &batchlist, Irp);")
 batch_end = mount.index("    Vcb->volume_fcb =", batch_start)
 (out / "batch_failure.inc").write_text(
     "static NTSTATUS fail_batch_commit(device_extension* Vcb, LIST_ENTRY* batchlist) {\n    NTSTATUS Status;\n    void* Irp = NULL;\n" +
     mount[batch_start:batch_end].replace("&batchlist", "batchlist") + "exit:\n    return Status;\n}\n")
+metadata_source = read("src/mount-metadata.c", optional=True) or btrfs
+chunk_load = block(metadata_source, metadata_source.index("NTSTATUS load_chunk_root("))
+missing = chunk_load.index("if (!c->devices[i])")
+(out / "missing_device.inc").write_text(
+    "static NTSTATUS fail_chunk_device(chunk* c, unsigned i) {\n    " + block(chunk_load, missing) +
+    "\n    return STATUS_SUCCESS;\n}\n")
 binary = out / "mount_test"
 flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie"] if args.sanitize else []
 subprocess.run(["gcc", "-std=c11", "-O0", "-g", "-Wall", "-Wextra", "-Werror",

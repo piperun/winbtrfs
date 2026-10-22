@@ -81,12 +81,8 @@ counts, and no other remaining allocations or live resources.
 
 Fixtures construct partial-mount state directly. They do not execute disk
 discovery, full mount initialization, root cache-file close, concurrent
-kernel activity or Windows pools. The root-fileref branch is not exercised.
-Still leaking on some failure paths: FCBs marked dirty and changed-extent records
-created while clearing the free-space cache; the root fileref and root FCB
-on the root-fileref branch; the notify synchronization object set up with
-`FsRtlNotifyInitializeSync`. No complete mount-failure cleanup or #832 hang
-fix is claimed.
+kernel activity or Windows pools. The root-fileref allocation-failure branch is also exercised.
+No complete mount-failure cleanup or #832 hang fix is claimed.
 
 Each case runs separately with a five-second timeout and core dumps disabled.
 Windows runtime validation remains outstanding. LeakSanitizer may require
@@ -106,3 +102,30 @@ pending roots with multiple index groups and lookaside items, preserving both
 failure statuses. Before the mount cleanup, 127/133 cases pass; the six
 nonempty-list cases fail. The batch commit helper's detached current root
 and flattened local item list require separate ownership cleanup.
+
+Eight root-fileref cases represent root-CCB allocation failure, after the
+fileref and its FCB have been linked but before a stream-file owner exists.
+They execute production free/reap functions and require the fileref and
+FCB allocations and references to be released. Before the fix, 133/141 pass;
+all eight new cases leak. The existing stream-file cases still require the
+root FCB, nonpaged part and fileref to survive while the stream file owns them.
+
+Eighteen notify-sync cases cover failure before initialization, after
+initialization, and with a live root stream file, across both errors and
+zero/one/three devices. Before the fix, 147/159 pass; the twelve initialized
+objects leak. Cleanup uninitializes a nonnull notify-sync pointer once and
+skips the never-initialized pointer.
+
+Thirty-six cache-mutation cases combine dirty FCBs, changed-extent records,
+and both, with and without a root stream file. Production mark_fcb_dirty
+runs twice per cache FCB to verify the extra dirty reference is added once.
+Fixtures include a released cache held only by its dirty reference, a cache
+shared by chunks, and changed extents with current and old reference lists.
+Before the fix, 159/195 pass; all 36 mutation cases leak. Cleanup drops dirty
+references before reaping FCBs and frees both nested changed-extent lists.
+
+Six chunk-device cases execute load_chunk_root's exact missing-device branch
+for one or three stripes. Missing first, middle and last stripes must free
+the devices array, chunk item and chunk; present-device controls retain all
+three allocations for the caller. Before the fix, 197/201 pass; all four
+missing-device cases leak the array.

@@ -21,11 +21,25 @@
 void cleanup_failed_mount(device_extension* Vcb, fcb* root_fcb, bool init_lookaside) {
     LIST_ENTRY* le;
 
+    if (Vcb->dirty_fcbs.Flink) {
+        while (!IsListEmpty(&Vcb->dirty_fcbs)) {
+            fcb* dirty_fcb = CONTAINING_RECORD(RemoveHeadList(&Vcb->dirty_fcbs), fcb, list_entry_dirty);
+
+            dirty_fcb->dirty = false;
+            free_fcb(dirty_fcb);
+        }
+    }
+
     if (Vcb->root_file)
         ObDereferenceObject(Vcb->root_file);
-    else if (Vcb->root_fileref)
+    else if (Vcb->root_fileref) {
         free_fileref(Vcb->root_fileref);
-    else if (root_fcb)
+
+        if (Vcb->root_fileref->refcount == 0) {
+            reap_fileref(Vcb, Vcb->root_fileref);
+            Vcb->root_fileref = NULL;
+        }
+    } else if (root_fcb)
         free_fcb(root_fcb);
 
     if (root_fcb && root_fcb->refcount == 0)
@@ -104,6 +118,24 @@ void cleanup_failed_mount(device_extension* Vcb, fcb* root_fcb, bool init_lookas
                 ExFreePool(s);
             }
 
+            while (!IsListEmpty(&c->changed_extents)) {
+                changed_extent* ce = CONTAINING_RECORD(RemoveHeadList(&c->changed_extents), changed_extent, list_entry);
+
+                while (!IsListEmpty(&ce->refs)) {
+                    changed_extent_ref* cer = CONTAINING_RECORD(RemoveHeadList(&ce->refs), changed_extent_ref, list_entry);
+
+                    ExFreePool(cer);
+                }
+
+                while (!IsListEmpty(&ce->old_refs)) {
+                    changed_extent_ref* cer = CONTAINING_RECORD(RemoveHeadList(&ce->old_refs), changed_extent_ref, list_entry);
+
+                    ExFreePool(cer);
+                }
+
+                ExFreePool(ce);
+            }
+
             if (c->devices)
                 ExFreePool(c->devices);
 
@@ -128,6 +160,9 @@ void cleanup_failed_mount(device_extension* Vcb, fcb* root_fcb, bool init_lookas
         ExDeleteNPagedLookasideList(&Vcb->range_lock_lookaside);
         ExDeleteNPagedLookasideList(&Vcb->fcb_np_lookaside);
     }
+
+    if (Vcb->NotifySync)
+        FsRtlNotifyUninitializeSync(&Vcb->NotifySync);
 
     ExDeleteResourceLite(&Vcb->tree_lock);
     ExDeleteResourceLite(&Vcb->load_lock);

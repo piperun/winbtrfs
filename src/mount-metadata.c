@@ -625,6 +625,7 @@ NTSTATUS load_chunk_root(_In_ _Requires_lock_held_(_Curr_->tree_lock) device_ext
 
                         if (!c->devices[i]) {
                             ERR("missing device\n");
+                            ExFreePool(c->devices);
                             ExFreePool(c->chunk_item);
                             ExFreePool(c);
                             return STATUS_INTERNAL_ERROR;
