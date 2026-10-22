@@ -251,10 +251,11 @@ size:
     return STATUS_SUCCESS;
 }
 
-static void load_free_space_bitmap(device_extension* Vcb, chunk* c, uint64_t offset, void* data, uint64_t* total_space) {
+static NTSTATUS load_free_space_bitmap(device_extension* Vcb, chunk* c, uint64_t offset, void* data, uint64_t* total_space) {
     RTL_BITMAP bmph;
     uint32_t i, len, *dwords = data;
     ULONG runlength, index;
+    NTSTATUS Status;
 
     // flip bits
     for (i = 0; i < Vcb->superblock.sectorsize / sizeof(uint32_t); i++) {
@@ -284,12 +285,19 @@ static void load_free_space_bitmap(device_extension* Vcb, chunk* c, uint64_t off
         addr = offset + (index << Vcb->sector_shift);
         length = runlength << Vcb->sector_shift;
 
-        add_space_entry(&c->space, &c->space_size, addr, length);
+        Status = add_space_entry(&c->space, &c->space_size, addr, length);
+        if (!NT_SUCCESS(Status)) {
+            ERR("add_space_entry returned %08lx\n", Status);
+            return Status;
+        }
+
         index += runlength;
         *total_space += length;
 
         runlength = RtlFindNextForwardRunClear(&bmph, index, &index);
     }
+
+    return STATUS_SUCCESS;
 }
 
 static void order_space_entry(space* s, LIST_ENTRY* list_size) {
@@ -612,7 +620,7 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
             if (!NT_SUCCESS(Status)) {
                 ERR("add_space_entry returned %08lx\n", Status);
                 ExFreePool(data);
-                return Status;
+                goto end;
             }
 
             total_space += fse->bytes;
@@ -635,7 +643,13 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
 
             if (fse->type == BTRFS_FREE_SPACE_BITMAP) {
                 // FIXME - make sure we don't overflow the buffer here
-                load_free_space_bitmap(Vcb, c, fse->offset, &data[bmpnum << Vcb->sector_shift], &total_space);
+                Status = load_free_space_bitmap(Vcb, c, fse->offset, &data[bmpnum << Vcb->sector_shift], &total_space);
+                if (!NT_SUCCESS(Status)) {
+                    ERR("load_free_space_bitmap returned %08lx\n", Status);
+                    ExFreePool(data);
+                    goto end;
+                }
+
                 bmpnum++;
             }
 
@@ -649,7 +663,7 @@ NTSTATUS load_stored_free_space_cache(device_extension* Vcb, chunk* c, bool load
     if (!NT_SUCCESS(Status)) {
         ERR("get_superblock_size returned %08lx\n", Status);
         ExFreePool(data);
-        return Status;
+        goto end;
     }
 
     if (c->chunk_item->length - c->used != total_space + superblock_size) {
@@ -699,14 +713,14 @@ clearcache:
     Status = delete_tree_item(Vcb, &tp);
     if (!NT_SUCCESS(Status)) {
         ERR("delete_tree_item returned %08lx\n", Status);
-        return Status;
+        goto end;
     }
 
     Status = excise_extents(Vcb, c->cache, 0, c->cache->inode_item.size, Irp, &rollback);
     if (!NT_SUCCESS(Status)) {
         ERR("excise_extents returned %08lx\n", Status);
         do_rollback(Vcb, &rollback);
-        return Status;
+        goto end;
     }
 
     clear_rollback(&rollback);
@@ -716,6 +730,13 @@ clearcache:
 
     c->old_cache = c->cache;
     c->cache = NULL;
+
+    Status = STATUS_NOT_FOUND;
+
+end:
+    // Nothing loaded from the cache may stay. After STATUS_NOT_FOUND the caller
+    // regenerates the chunk's free space from the extent tree, and after an error
+    // the chunk is loaded again.
 
     le = c->space.Flink;
     while (le != &c->space) {
@@ -729,7 +750,7 @@ clearcache:
         le = le2;
     }
 
-    return STATUS_NOT_FOUND;
+    return Status;
 }
 
 static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIRP Irp) {
@@ -788,8 +809,7 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
             Status = add_space_entry(&c->space, &c->space_size, tp.item->key.objectid, tp.item->key.offset);
             if (!NT_SUCCESS(Status)) {
                 ERR("add_space_entry returned %08lx\n", Status);
-                if (bmparr) ExFreePool(bmparr);
-                return Status;
+                goto end;
             }
         } else if (tp.item->key.type == BTRFS_FREE_SPACE_BITMAP_KEY) {
             ULONG explen, index, runlength;
@@ -815,7 +835,8 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
                 bmparr = ExAllocatePoolWithTag(PagedPool, bmplen, ALLOC_TAG);
                 if (!bmparr) {
                     ERR("out of memory\n");
-                    return STATUS_INSUFFICIENT_RESOURCES;
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                    goto end;
                 }
             }
 
@@ -850,8 +871,7 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
                     Status = add_space_entry(&c->space, &c->space_size, lastoff, runstart - lastoff);
                     if (!NT_SUCCESS(Status)) {
                         ERR("add_space_entry returned %08lx\n", Status);
-                        if (bmparr) ExFreePool(bmparr);
-                        return Status;
+                        goto end;
                     }
                 }
 
@@ -864,8 +884,7 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
                 Status = add_space_entry(&c->space, &c->space_size, lastoff, tp.item->key.objectid + tp.item->key.offset - lastoff);
                 if (!NT_SUCCESS(Status)) {
                     ERR("add_space_entry returned %08lx\n", Status);
-                    if (bmparr) ExFreePool(bmparr);
-                    return Status;
+                    goto end;
                 }
             }
         }
@@ -907,8 +926,12 @@ static NTSTATUS load_stored_free_space_tree(device_extension* Vcb, chunk* c, PIR
     return STATUS_SUCCESS;
 
 clearcache:
-    // The caller regenerates the chunk's free space from the extent tree, so
-    // nothing loaded from the free space tree may stay.
+    Status = STATUS_NOT_FOUND;
+
+end:
+    // Nothing loaded from the free space tree may stay. After STATUS_NOT_FOUND the
+    // caller regenerates the chunk's free space from the extent tree, and after an
+    // error the chunk is loaded again.
 
     if (bmparr)
         ExFreePool(bmparr);
@@ -920,7 +943,7 @@ clearcache:
         ExFreePool(s);
     }
 
-    return STATUS_NOT_FOUND;
+    return Status;
 }
 
 static NTSTATUS load_free_space_cache(device_extension* Vcb, chunk* c, PIRP Irp) {
@@ -1035,6 +1058,7 @@ static NTSTATUS load_free_space_cache(device_extension* Vcb, chunk* c, PIRP Irp)
 
 NTSTATUS load_cache_chunk(device_extension* Vcb, chunk* c, PIRP Irp) {
     NTSTATUS Status;
+    bool space_changed;
 
     if (c->cache_loaded)
         return STATUS_SUCCESS;
@@ -1045,9 +1069,27 @@ NTSTATUS load_cache_chunk(device_extension* Vcb, chunk* c, PIRP Irp) {
         return Status;
     }
 
+    space_changed = c->space_changed;
+
     Status = protect_superblocks(c);
-    if (!NT_SUCCESS(Status))
+    if (!NT_SUCCESS(Status)) {
+        // The next call loads the chunk again, so free what was loaded. Through
+        // space_list_subtract, protect_superblocks has set space_changed, and the
+        // flush would write the empty lists out as the chunk's free space, so
+        // restore it too. changed is left set: nocow writes set it without the
+        // chunk lock, and it only makes the flush write out partial stripes.
+
+        while (!IsListEmpty(&c->space)) {
+            space* s = CONTAINING_RECORD(RemoveHeadList(&c->space), space, list_entry);
+
+            RemoveEntryList(&s->list_entry_size);
+            ExFreePool(s);
+        }
+
+        c->space_changed = space_changed;
+
         return Status;
+    }
 
     c->cache_loaded = true;
 
