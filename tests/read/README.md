@@ -14,10 +14,9 @@ allocation failure covered. Deferred jobs retain borrowed compressed input
 until modeled completion. Two discontiguous compressed extents cover queued
 and running jobs, a later read failure, allocation failures while submitting
 the second job, and preservation of the original error. The ownership checks
-compare allocation ranges and never read freed input. Use `--revision 5ed6211f`
-to reproduce the cleanup ordering bug: 146/194 scenarios pass. The corrected
-implementation passes 194/194 with patterned and zero initialization and
-ASan/UBSan.
+compare allocation ranges and never read freed input. The original 194-case suite
+passed 146/194 at `5ed6211f` and 194/194 after the cleanup-order correction.
+`--revision` compares the current reader suite against a historical source.
 
 Uncompressed inline extents are read from an item whose `ram_bytes` may claim
 more data than the item stores, as a damaged or crafted image can. The bytes
@@ -50,10 +49,14 @@ Five additional reader cases check the outer LZO header boundary: zero to three
 stored bytes must fail before submitting a job, and a complete four-byte header
 is passed to the modeled decompressor with no payload bytes. The reader checks
 the size before subtracting the header, preventing unsigned length underflow.
-The reader suite now passes 199/199 cases; the decoder suite remains 15/15.
+Twelve compressed inline cases check all three codecs when an earlier extent
+ends at or beyond the inline extent's logical end. The reader rejects these
+before subtracting the inline offset or decoding. Positive controls preserve
+an unread suffix of a partially overlapping inline range and adjacent ranges.
+The reader suite now passes 211/211 cases; the decoder suite remains 15/15.
 
-`--revision 96fe76d4` has neither the inline-extent nor the LZO correction:
-178/194 scenarios pass.
+`96fe76d4` had neither the original inline-extent nor LZO skip correction:
+178/194 scenarios passed in the original suite.
 
 Cache, disk, hashing, decompression and worker execution are modeled services.
 The compressed fixtures test the production reader's resource ownership, not

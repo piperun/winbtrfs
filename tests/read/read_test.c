@@ -218,8 +218,34 @@ static void lzo_outer_headers(void) {
         reclaim_allocations();
     }
 }
+static void compressed_inline_ranges(void) {
+    const unsigned codecs[]={BTRFS_COMPRESS_ZLIB,BTRFS_COMPRESS_LZO,BTRFS_COMPRESS_ZSTD};
+    const struct { unsigned offset, ram; bool valid; } layouts[]={
+        {100,8091,false}, {100,8092,false}, {100,8192,true}, {8192,100,true}
+    };
+    for(unsigned codec=0;codec<3;codec++)for(unsigned layout=0;layout<4;layout++) {
+        fcb f; device_extension v; init(&f,&v,8292,8292);
+        extent reg={.offset=0,.extent_data={.type=BTRFS_FILE_EXTENT_REG,
+            .compression=BTRFS_COMPRESS_NONE,.num_bytes=8192,.ram_bytes=8192,
+            .disk_bytenr=1048576,.disk_num_bytes=8192}};
+        extent* e=make_inline(layouts[layout].offset,layouts[layout].ram);
+        e->extent_data.compression=codecs[codec];
+        InsertTailList(&f.extents,&reg.list_entry);InsertTailList(&f.extents,&e->list_entry);
+        uint8_t data[8448];memset(data,0xa5,sizeof(data));ULONG got=123;
+        read_calls=0;job_status=STATUS_SUCCESS;
+        NTSTATUS status=read_file(&f,data,0,8292,&got,NULL);
+        bool valid=layouts[layout].valid;
+        bool ok=status==(valid?STATUS_SUCCESS:STATUS_INTERNAL_ERROR)&&
+            got==(valid?8292u:0u)&&allocation_count==0&&read_calls==(valid?1u:0u);
+        for(unsigned n=0;n<sizeof(data);n++)
+            ok=ok&&data[n]==(!valid||n>=8292?0xa5:n<8192?0x22:0x7e);
+        record(ok,"compressed inline range",codecs[codec],layout,got,valid?8292:0);
+        reclaim_allocations();free(e);
+    }
+}
 int main(void) {
-    eof_reads();compressed_jobs();pending_inputs();inline_reads();lzo_skips();lzo_outer_headers();
+    eof_reads();compressed_jobs();pending_inputs();inline_reads();lzo_skips();
+    lzo_outer_headers();compressed_inline_ranges();
     printf("%u/%u file read scenarios passed\n",cases-failures,cases);
     return failures!=0;
 }
