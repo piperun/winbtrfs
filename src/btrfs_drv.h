@@ -539,69 +539,7 @@ typedef struct {
     uint8_t data[1];
 } partial_stripe;
 
-typedef struct {
-    struct btrfs_chunk* chunk_item;
-    uint16_t size;
-    uint64_t offset;
-    uint64_t used;
-    uint64_t oldused;
-    device** devices;
-    fcb* cache;
-    fcb* old_cache;
-    LIST_ENTRY space;
-    LIST_ENTRY space_size;
-    LIST_ENTRY deleting;
-    LIST_ENTRY changed_extents;
-    LIST_ENTRY range_locks;
-    ERESOURCE range_locks_lock;
-    KEVENT range_locks_event;
-    ERESOURCE lock;
-    ERESOURCE changed_extents_lock;
-    bool created;
-    bool readonly;
-    bool reloc;
-    bool last_alloc_set;
-    bool cache_loaded;
-    bool changed;
-    bool space_changed;
-    bool using_fst_bitmaps;
-    uint64_t last_alloc;
-    uint16_t last_stripe;
-    LIST_ENTRY partial_stripes;
-    ERESOURCE partial_stripes_lock;
-    ULONG balance_num;
-
-    LIST_ENTRY list_entry;
-    LIST_ENTRY list_entry_balance;
-} chunk;
-
-typedef struct {
-    uint64_t address;
-    uint64_t size;
-    uint64_t old_size;
-    uint64_t count;
-    uint64_t old_count;
-    bool no_csum;
-    bool superseded;
-    LIST_ENTRY refs;
-    LIST_ENTRY old_refs;
-    LIST_ENTRY list_entry;
-} changed_extent;
-
-typedef struct {
-    uint8_t type;
-
-    union {
-        struct btrfs_extent_data_ref edr;
-
-        struct {
-            uint64_t offset;
-            struct btrfs_shared_data_ref sdr;
-        };
-    };
-
-    LIST_ENTRY list_entry;
-} changed_extent_ref;
+#include "chunk-types.h"
 
 typedef struct {
     struct btrfs_key key;
