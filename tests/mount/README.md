@@ -172,3 +172,27 @@ generated item, stable existing item identities, sorted bidirectional links,
 preserved reference data, and balanced pool/lookaside ownership. An insertion
 observer stops a repeated link before any pointers are changed. Before the
 single-insertion correction, 74/77 cases pass; all 77 pass after it.
+
+`check_batch_producers.py` adds 93 caller-level ownership cases:
+
+```sh
+python3 tests/mount/check_batch_producers.py . --build-dir /tmp/codex-mount-cleanup/batch-followups/producers-pattern
+python3 tests/mount/check_batch_producers.py . --init zero --sanitize --build-dir /tmp/codex-mount-cleanup/batch-followups/producers-zero-asan
+```
+
+These execute the complete production `flush_fileref`, the FCB extent loop and
+inode-item branch with the real shared FCB error exit, and the production queue
+insertion, split and destructor functions. Creation, deletion and rename cover
+every allocation and queue-submission failure, plus two distinct returned
+errors. Existing-queue controls cross the real 1,000-item split threshold.
+Allocation failures execute the real insertion and split paths. Additional
+queue-error injections return before insertion to test caller error handling.
+Failed payloads must be released by the caller; successful payloads must remain
+live until queue destruction. Retained queue links, exact metadata keys and
+operations, original errors, dirty flags, and pool/lookaside ownership are
+checked. Before the caller fix, 45/93 pass; the corrected callers pass 93/93.
+
+FCB setup outside the selected payload branches is not executed. These fixtures
+cover same-subvolume file references; root-reference mutation, full transaction
+commit, Windows scheduling and live kernel pools remain unverified. The mock
+checksum supplies repeatable key values and does not test CRC32C.

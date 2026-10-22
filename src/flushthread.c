@@ -4699,6 +4699,7 @@ NTSTATUS flush_fcb(fcb* fcb, bool cache, LIST_ENTRY* batchlist, PIRP Irp) {
                                             ed, ext->datalen, Batch_Insert);
             if (!NT_SUCCESS(Status)) {
                 ERR("insert_tree_item_batch returned %08lx\n", Status);
+                ExFreePool(ed);
                 goto end;
             }
 
@@ -4833,6 +4834,7 @@ NTSTATUS flush_fcb(fcb* fcb, bool cache, LIST_ENTRY* batchlist, PIRP Irp) {
                                         Batch_Insert);
         if (!NT_SUCCESS(Status)) {
             ERR("insert_tree_item_batch returned %08lx\n", Status);
+            ExFreePool(ii);
             goto end;
         }
 
@@ -6160,6 +6162,7 @@ static NTSTATUS flush_fileref(file_ref* fileref, LIST_ENTRY* batchlist, PIRP Irp
         di2 = ExAllocatePoolWithTag(PagedPool, disize, ALLOC_TAG);
         if (!di2) {
             ERR("out of memory\n");
+            ExFreePool(di);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
@@ -6169,6 +6172,8 @@ static NTSTATUS flush_fileref(file_ref* fileref, LIST_ENTRY* batchlist, PIRP Irp
                                         fileref->dc->index, di, disize, Batch_Insert);
         if (!NT_SUCCESS(Status)) {
             ERR("insert_tree_item_batch returned %08lx\n", Status);
+            ExFreePool(di2);
+            ExFreePool(di);
             return Status;
         }
 
@@ -6176,6 +6181,7 @@ static NTSTATUS flush_fileref(file_ref* fileref, LIST_ENTRY* batchlist, PIRP Irp
                                         di2, disize, Batch_DirItem);
         if (!NT_SUCCESS(Status)) {
             ERR("insert_tree_item_batch returned %08lx\n", Status);
+            ExFreePool(di2);
             return Status;
         }
 
@@ -6196,6 +6202,7 @@ static NTSTATUS flush_fileref(file_ref* fileref, LIST_ENTRY* batchlist, PIRP Irp
                                             ir, sizeof(struct btrfs_inode_ref) + ir->name_len, Batch_InodeRef);
             if (!NT_SUCCESS(Status)) {
                 ERR("insert_tree_item_batch returned %08lx\n", Status);
+                ExFreePool(ir);
                 return Status;
             }
         } else if (fileref->fcb != fileref->fcb->Vcb->dummy_fcb) {
@@ -6254,6 +6261,7 @@ static NTSTATUS flush_fileref(file_ref* fileref, LIST_ENTRY* batchlist, PIRP Irp
                                         crc32, di, sizeof(struct btrfs_dir_item) + name->Length, Batch_DeleteDirItem);
         if (!NT_SUCCESS(Status)) {
             ERR("insert_tree_item_batch returned %08lx\n", Status);
+            ExFreePool(di);
             return Status;
         }
 
@@ -6276,6 +6284,7 @@ static NTSTATUS flush_fileref(file_ref* fileref, LIST_ENTRY* batchlist, PIRP Irp
                                             fileref->parent->fcb->inode, ir, sizeof(struct btrfs_inode_ref) + name->Length, Batch_DeleteInodeRef);
             if (!NT_SUCCESS(Status)) {
                 ERR("insert_tree_item_batch returned %08lx\n", Status);
+                ExFreePool(ir);
                 return Status;
             }
         } else if (fileref->fcb != fileref->fcb->Vcb->dummy_fcb) { // subvolume
