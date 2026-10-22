@@ -23,6 +23,7 @@
 extern LIST_ENTRY VcbList;
 extern ERESOURCE global_loading_lock;
 extern PDRIVER_OBJECT drvobj;
+extern tIoUnregisterPlugPlayNotificationEx fIoUnregisterPlugPlayNotificationEx;
 
 static NTSTATUS is_device_part_of_mounted_btrfs_raid(PDEVICE_OBJECT devobj, PFILE_OBJECT fileobj) {
     NTSTATUS Status;
@@ -127,6 +128,8 @@ NTSTATUS add_device(device_extension* Vcb, PIRP Irp, KPROCESSOR_MODE processor_m
     GET_LENGTH_INFORMATION gli;
 
     pnp_name.Buffer = NULL;
+    dev = NULL;
+    vc = NULL;
 
     if (!SeSinglePrivilegeCheck(RtlConvertLongToLuid(SE_MANAGE_VOLUME_PRIVILEGE), processor_mode))
         return STATUS_PRIVILEGE_NOT_HELD;
@@ -178,15 +181,13 @@ NTSTATUS add_device(device_extension* Vcb, PIRP Irp, KPROCESSOR_MODE processor_m
     Status = dev_ioctl(DeviceObject, IOCTL_DISK_IS_WRITABLE, NULL, 0, NULL, 0, true, NULL);
     if (!NT_SUCCESS(Status)) {
         ERR("IOCTL_DISK_IS_WRITABLE returned %08lx\n", Status);
-        ObDereferenceObject(fileobj);
-        return Status;
+        goto end2;
     }
 
     Status = is_device_part_of_mounted_btrfs_raid(DeviceObject, fileobj);
     if (!NT_SUCCESS(Status)) {
         ERR("is_device_part_of_mounted_btrfs_raid returned %08lx\n", Status);
-        ObDereferenceObject(fileobj);
-        return Status;
+        goto end2;
     }
 
     // if disk, check it has no partitions
@@ -227,8 +228,8 @@ NTSTATUS add_device(device_extension* Vcb, PIRP Irp, KPROCESSOR_MODE processor_m
     if (NT_SUCCESS(Status)) {
         if (sdn.DeviceType != FILE_DEVICE_DISK) { // FIXME - accept floppies and CDs?
             WARN("device was not disk\n");
-            ObDereferenceObject(fileobj);
-            return STATUS_INVALID_PARAMETER;
+            Status = STATUS_INVALID_PARAMETER;
+            goto end2;
         }
     } else {
         sdn.DeviceNumber = 0xffffffff;
@@ -239,16 +240,15 @@ NTSTATUS add_device(device_extension* Vcb, PIRP Irp, KPROCESSOR_MODE processor_m
                         &gli, sizeof(gli), true, NULL);
     if (!NT_SUCCESS(Status)) {
         ERR("error reading length information: %08lx\n", Status);
-        ObDereferenceObject(fileobj);
-        return Status;
+        goto end2;
     }
 
     size = gli.Length.QuadPart;
 
     if (size < 0x100000) {
         ERR("device was not large enough to hold FS (%I64x bytes, need at least 1 MB)\n", size);
-        ObDereferenceObject(fileobj);
-        return STATUS_INTERNAL_ERROR;
+        Status = STATUS_INTERNAL_ERROR;
+        goto end2;
     }
 
     volume_removal(&pnp_name);
@@ -411,6 +411,7 @@ NTSTATUS add_device(device_extension* Vcb, PIRP Irp, KPROCESSOR_MODE processor_m
     vc->devobj = DeviceObject;
     vc->fileobj = fileobj;
     vc->notification_entry = NULL;
+    vc->pnp_name.Buffer = NULL;
     vc->boot_volume = false;
 
     Status = IoRegisterPlugPlayNotification(EventCategoryTargetDeviceChange, 0, fileobj,
@@ -468,10 +469,13 @@ NTSTATUS add_device(device_extension* Vcb, PIRP Irp, KPROCESSOR_MODE processor_m
         ObDereferenceObject(mountmgrfo);
     }
 
+    vc = NULL;
+
     Vcb->superblock.num_devices++;
     Vcb->superblock.total_bytes += size;
     Vcb->devices_loaded++;
     InsertTailList(&Vcb->devices, &dev->list_entry);
+    dev = NULL;
 
     // FIXME - send notification that volume size has increased
 
@@ -486,9 +490,33 @@ NTSTATUS add_device(device_extension* Vcb, PIRP Irp, KPROCESSOR_MODE processor_m
 end:
     free_trees(Vcb);
 
+    if (dev) {
+        while (!IsListEmpty(&dev->space)) {
+            space* s = CONTAINING_RECORD(RemoveHeadList(&dev->space), space, list_entry);
+
+            ExFreePool(s);
+        }
+
+        ExFreePool(dev);
+    }
+
     ExReleaseResourceLite(&Vcb->tree_lock);
 
 end2:
+    if (vc) {
+        if (vc->notification_entry) {
+            if (fIoUnregisterPlugPlayNotificationEx)
+                fIoUnregisterPlugPlayNotificationEx(vc->notification_entry);
+            else
+                IoUnregisterPlugPlayNotification(vc->notification_entry);
+        }
+
+        if (vc->pnp_name.Buffer)
+            ExFreePool(vc->pnp_name.Buffer);
+
+        ExFreePool(vc);
+    }
+
     ObDereferenceObject(fileobj);
 
     if (pnp_name.Buffer)
