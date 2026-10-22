@@ -38,10 +38,16 @@ typedef struct { struct btrfs_super_block superblock; LOOKASIDE batch_item_looka
 #define RtlZeroMemory(p,n) memset(p,0,n)
 #define min(a,b) ((a)<(b)?(a):(b))
 #define CHECK(c) do { if (!(c)) { fprintf(stderr,"line %u: %s\n",__LINE__,#c); exit(1); } } while(0)
+static bool observe_single_insertion;
+static unsigned observed_insertions;
+static void observe_insertion(void) {
+    /* Stop a duplicate link before changing any list pointers. */
+    if(observe_single_insertion)CHECK(observed_insertions++==0);
+}
 static void InitializeListHead(LIST_ENTRY* h) { h->Flink=h->Blink=h; }
 static bool IsListEmpty(LIST_ENTRY* h) { CHECK(h->Flink && h->Blink); return h->Flink==h; }
-static void InsertTailList(LIST_ENTRY* h,LIST_ENTRY* e) { e->Flink=h; e->Blink=h->Blink; h->Blink->Flink=e; h->Blink=e; }
-static void InsertHeadList(LIST_ENTRY* h,LIST_ENTRY* e) { e->Blink=h; e->Flink=h->Flink; h->Flink->Blink=e; h->Flink=e; }
+static void InsertTailList(LIST_ENTRY* h,LIST_ENTRY* e) { observe_insertion();e->Flink=h; e->Blink=h->Blink; h->Blink->Flink=e; h->Blink=e; }
+static void InsertHeadList(LIST_ENTRY* h,LIST_ENTRY* e) { observe_insertion();e->Blink=h; e->Flink=h->Flink; h->Flink->Blink=e; h->Flink=e; }
 void RemoveEntryList(LIST_ENTRY* e) { e->Flink->Blink=e->Blink; e->Blink->Flink=e->Flink; }
 static LIST_ENTRY* RemoveHeadList(LIST_ENTRY* h) { CHECK(!IsListEmpty(h)); LIST_ENTRY* e=h->Flink; e->Flink->Blink=h; h->Flink=e->Flink; return e; }
 static int keycmp(struct btrfs_key a,struct btrfs_key b) {
@@ -128,8 +134,64 @@ static void exercise(unsigned root_count,unsigned items,enum batch_operation ope
     }
     CHECK(!live && !volume.tree_data_lookaside.outstanding);
 }
+static void overflow_order(unsigned layout,unsigned failure) {
+    device_extension v={0};v.batch_item_lookaside.size=sizeof(batch_item);
+    v.tree_data_lookaside.size=sizeof(tree_data);
+    v.superblock.nodesize=sizeof(struct btrfs_header)+sizeof(struct btrfs_item)+sizeof(struct btrfs_inode_ref);
+    v.superblock.incompat_flags=layout==6?0:BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF;
+    LIST_ENTRY items;InitializeListHead(&items);
+    batch_item original={0},pending[3]={0};
+    original.key=(struct btrfs_key){10,BTRFS_INODE_REF_KEY,77};
+    original.operation=Batch_InodeRef;
+    original.datalen=sizeof(struct btrfs_inode_ref)+3;
+    original.data=allocate(original.datalen,NULL);
+    struct btrfs_inode_ref* ir=(struct btrfs_inode_ref*)original.data;
+    ir->index=45;ir->name_len=3;memcpy(ir+1,"abc",3);
+    struct btrfs_key generated_key={10,BTRFS_INODE_EXTREF_KEY,calc_crc32c(77,(uint8_t*)"abc",3)};
+    InsertTailList(&items,&original.list_entry);
+    unsigned count=layout==0||layout==6?0:layout==2?3:layout==5?1:2;
+    for(unsigned i=0;i<count;i++) {
+        pending[i].key=(struct btrfs_key){20+i*10,BTRFS_INODE_ITEM_KEY,0};
+        if((layout==2&&i==0)||layout==3)
+            pending[i].key=(struct btrfs_key){10,BTRFS_INODE_REF_KEY,78+i};
+        if(layout==4)pending[i].key=generated_key;
+        InsertTailList(&items,&pending[i].list_entry);
+    }
+    tree t={0};tree_data old={.size=sizeof(struct btrfs_inode_ref)},newtd={0};
+    bool ignore=false;fail_allocation=failure;committing=true;observe_single_insertion=true;
+    NTSTATUS status=handle_batch_collision(&v,&original,&t,&old,&newtd,&items,&ignore);
+    observe_single_insertion=false;committing=false;
+    bool generated=layout!=6&&!failure;
+    CHECK(status==(layout==6?STATUS_INTERNAL_ERROR:failure?STATUS_INSUFFICIENT_RESOURCES:STATUS_SUCCESS));
+    CHECK(ignore==generated&&observed_insertions==(generated?1u:0u));
+    unsigned visited=0,next_pending=0,generated_count=0;
+    struct btrfs_key previous=original.key;
+    while(!IsListEmpty(&items)) {
+        batch_item* item=CONTAINING_RECORD(items.Flink,batch_item,list_entry);
+        CHECK(visited++<count+2);
+        CHECK(item->list_entry.Flink->Blink==&item->list_entry&&item->list_entry.Blink->Flink==&item->list_entry);
+        CHECK(keycmp(previous,item->key)<=0);previous=item->key;
+        RemoveHeadList(&items);
+        if(item==&original)CHECK(visited==1);
+        else if(next_pending<count&&item==&pending[next_pending])next_pending++;
+        else {
+            CHECK(generated&&++generated_count==1&&keycmp(item->key,generated_key)==0);
+            struct btrfs_inode_extref* ier=(struct btrfs_inode_extref*)item->data;
+            CHECK(item->operation==Batch_InodeExtRef&&ier->parent_objectid==77&&ier->index==45&&ier->name_len==3);
+            CHECK(!memcmp(ier->name,"abc",3));
+            ExFreePool(item->data);ExFreeToPagedLookasideList(&v.batch_item_lookaside,item);
+        }
+    }
+    CHECK(next_pending==count&&generated_count==(generated?1u:0u));
+    ExFreePool(original.data);CHECK(!live&&!v.batch_item_lookaside.outstanding);
+}
 int main(int argc,char** argv){
     CHECK(argc==2);
+    for(unsigned layout=0;layout<7;layout++)for(unsigned failure=0;failure<(layout==6?1u:3u);failure++) {
+        char name[80];snprintf(name,sizeof(name),"overflow-order-layout%u-allocation%u",layout,failure);
+        if(!strcmp(argv[1],"--list")){puts(name);continue;}if(strcmp(argv[1],name))continue;
+        overflow_order(layout,failure);return 0;
+    }
     for(unsigned failure=0;failure<3;failure++) {
         char name[80];snprintf(name,sizeof(name),"extref-allocation%u",failure);
         if(!strcmp(argv[1],"--list")){puts(name);continue;}if(strcmp(argv[1],name))continue;
