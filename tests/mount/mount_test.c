@@ -2,6 +2,7 @@
 #include "host.h"
 #include "services.inc"
 #include "free.inc"
+#include "mark_dirty.inc"
 #include "free_fileref.inc"
 #include "reap.inc"
 #include "reap_fcbs.inc"
@@ -93,6 +94,17 @@ int main(int argc, char** argv) {
         CHECK(dev && !dev->space.Flink && !dev->space.Blink);
         ExFreePool(dev); CHECK(!allocations); return 0;
     }
+    for (unsigned mutations = 1; mutations <= 3; mutations++) for (unsigned stream = 0; stream < 2; stream++)
+        for (unsigned d = 0; d < 3; d++) for (unsigned error = 0; error < 2; error++) {
+            const unsigned counts[] = { 0, 1, 3 };
+            char name[100]; snprintf(name, sizeof(name), "cache-mutations%u-stream%u-devices%u-error%u", mutations, stream, counts[d], error);
+            if (strcmp(argv[1], "--list") == 0) { puts(name); continue; }
+            if (strcmp(argv[1], name) != 0) continue;
+            cache_mutations = mutations;
+            exercise(stream ? 6 : 4, counts[d], error ? STATUS_INTERNAL_ERROR : STATUS_INSUFFICIENT_RESOURCES,
+                stream ? 3 : 0, LOADED_CACHES, stream != 0);
+            CHECK(IsListEmpty(&volume.dirty_fcbs)); return 0;
+        }
     for (unsigned stage = 0; stage < 3; stage++) for (unsigned d = 0; d < 3; d++)
         for (unsigned error = 0; error < 2; error++) {
             const unsigned counts[] = { 0, 1, 3 };

@@ -34,7 +34,7 @@ typedef struct _fcb {
     root* subvol;
     struct _file_ref* fileref; bool ads;
     device_extension* Vcb;
-    LONG refcount;
+    LONG refcount; bool dirty; LIST_ENTRY list_entry_dirty;
     fcb_nonpaged* nonpaged;
     LIST_ENTRY list_entry, list_entry_all, extents, hardlinks, xattrs, dir_children_index;
     void* sd;
@@ -53,15 +53,18 @@ typedef struct { LIST_ENTRY list_entry; } xattr;
 typedef struct { LIST_ENTRY list_entry_index; STRING utf8, name, name_uc; } dir_child;
 typedef struct { LIST_ENTRY list_entry, space; } device;
 typedef struct { LIST_ENTRY list_entry; } space;
+typedef struct { LIST_ENTRY list_entry, refs, old_refs; } changed_extent;
+typedef struct { LIST_ENTRY list_entry; } changed_extent_ref;
 typedef struct { LIST_ENTRY list_entry; } batch_item;
 typedef struct { LIST_ENTRY list_entry, items; } batch_item_ind;
 typedef struct { LIST_ENTRY list_entry, items_ind; } batch_root;
 typedef struct { LIST_ENTRY list_entry; void* data; } sys_chunk;
 typedef struct {
-    LIST_ENTRY list_entry, space, deleting; fcb* cache; device** devices; void* chunk_item;
+    LIST_ENTRY list_entry, space, deleting, changed_extents; fcb* cache; device** devices; void* chunk_item;
     ERESOURCE lock, changed_extents_lock, range_locks_lock, partial_stripes_lock;
 } chunk;
 struct device_extension {
+    bool need_write;
     LOOKASIDE tree_data_lookaside, traverse_ptr_lookaside, batch_item_lookaside, fileref_lookaside,
               fcb_lookaside, name_bit_lookaside, range_lock_lookaside, fcb_np_lookaside;
     ERESOURCE tree_lock, load_lock, fcb_lock, fileref_lock, chunk_lock,
@@ -72,10 +75,12 @@ struct device_extension {
     file_ref* root_fileref;
     fcb* volume_fcb;
     fcb* dummy_fcb;
-    LIST_ENTRY devices, roots, sys_chunks, chunks, trees, trees_hash, all_fcbs;
+    LIST_ENTRY devices, roots, sys_chunks, chunks, trees, trees_hash, all_fcbs, dirty_fcbs;
     LIST_ENTRY* trees_ptrs[256];
 };
 typedef struct { bool deleted; device_extension* DeviceExtension; } DEVICE_OBJECT, *PDEVICE_OBJECT;
+
+void mark_fcb_dirty(fcb* f);
 
 #define STATUS_SUCCESS ((NTSTATUS)0)
 #define STATUS_INSUFFICIENT_RESOURCES ((NTSTATUS)0xc000009a)
