@@ -144,6 +144,7 @@ set(SRC_FILES src/balance.c
     src/volume-ioctl.c
     src/worker-thread.c
     src/write.c
+    src/chunk-allocation.c
     src/write-extents.c
     ${CMAKE_CURRENT_BINARY_DIR}/btrfs.rc)
 
