@@ -26,6 +26,9 @@ runner.argparser.add_argument("--build-dir", required=True)
 runner.argparser.add_argument("--baseline-dir", help="Interleave before/after cases in one suite")
 args = runner.parse_args()
 root = Path(args.build_dir).resolve()
+candidate_provenance = json.loads((root / "provenance.json").read_text())
+if not candidate_provenance.get("optimized"):
+    raise ValueError("rebuild the replay with --bench before timing it")
 runner.metadata.update({"description": "Production get/update/add replay; C interval only",
                         "fixture_setup": "excluded identically before and after",
                         "source_provenance": json.dumps(json.loads((root / "provenance.json").read_text()))})
@@ -39,6 +42,8 @@ for count in (40000, 87000):
             baseline = Path(args.baseline_dir).resolve()
             old = json.loads((baseline / "provenance.json").read_text())
             new = json.loads((root / "provenance.json").read_text())
+            if not old.get("optimized"):
+                raise ValueError("rebuild the baseline with --bench before timing it")
             if old["trace_sha256"] != new["trace_sha256"]:
                 raise ValueError("before/after trace hashes differ")
             runner.bench_time_func(name + "/before", replay, str(baseline / "replay"),
