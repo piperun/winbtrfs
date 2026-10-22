@@ -102,6 +102,7 @@ set(SRC_FILES src/balance.c
     src/directory-query.c
     src/ea.c
     src/extent-tree.c
+    src/changed-extents.c
     src/extent-ranges.c
     src/fastio.c
     src/fileinfo.c
