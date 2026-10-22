@@ -30,6 +30,11 @@ collision = (repo / "src/batch-collision.c").read_text()
 (out / "batch_commit.inc").write_text("".join(block(source, marker) for marker in (
     "static NTSTATUS find_tree_end(", "void clear_batch_list(", "static NTSTATUS commit_batch_list_root(", "NTSTATUS commit_batch_list(")))
 (out / "batch_collision.inc").write_text("".join(block(collision, "NTSTATUS " + name + "(") for name in ("add_delete_inode_extref", "handle_batch_collision")))
+producer = (repo / "src/flushthread.c").read_text()
+producer_start = producer.rindex("static NTSTATUS insert_tree_item_batch(")
+limit = next(line for line in producer.splitlines() if line.startswith("#define BATCH_ITEM_LIMIT "))
+(out / "batch_producer.inc").write_text(limit + "\n" + block(producer, "static NTSTATUS split_batch_item_list(") +
+    block(producer[producer_start:], "static NTSTATUS insert_tree_item_batch("))
 binary = out / "batch_test"
 flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie"] if args.sanitize else []
 subprocess.run(["gcc", "-std=c11", "-O0", "-g", "-Wall", "-Wextra", "-Werror", f"-ftrivial-auto-var-init={args.init}", *flags,

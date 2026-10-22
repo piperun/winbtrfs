@@ -4457,8 +4457,17 @@ static NTSTATUS insert_tree_item_batch(LIST_ENTRY* batchlist, device_extension* 
         bii->num_items++;
 
 end:
-        if (bii->num_items > BATCH_ITEM_LIMIT)
-            return split_batch_item_list(bii);
+        if (bii->num_items > BATCH_ITEM_LIMIT) {
+            NTSTATUS Status = split_batch_item_list(bii);
+
+            if (!NT_SUCCESS(Status)) {
+                RemoveEntryList(&bi->list_entry);
+                bii->num_items--;
+                ExFreeToPagedLookasideList(&Vcb->batch_item_lookaside, bi);
+            }
+
+            return Status;
+        }
 
         return STATUS_SUCCESS;
     }

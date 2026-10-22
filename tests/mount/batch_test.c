@@ -31,6 +31,8 @@ typedef struct { struct btrfs_super_block superblock; LOOKASIDE batch_item_looka
 #define WARN(...) ((void)0)
 #define ERR(...) ((void)0)
 #define _Requires_exclusive_lock_held_(...)
+#define _In_opt_
+#define _When_(...)
 #define CONTAINING_RECORD(p,t,m) ((t*)((char*)(p)-offsetof(t,m)))
 #define RtlCopyMemory memcpy
 #define RtlZeroMemory(p,n) memset(p,0,n)
@@ -40,6 +42,7 @@ static void InitializeListHead(LIST_ENTRY* h) { h->Flink=h->Blink=h; }
 static bool IsListEmpty(LIST_ENTRY* h) { CHECK(h->Flink && h->Blink); return h->Flink==h; }
 static void InsertTailList(LIST_ENTRY* h,LIST_ENTRY* e) { e->Flink=h; e->Blink=h->Blink; h->Blink->Flink=e; h->Blink=e; }
 static void InsertHeadList(LIST_ENTRY* h,LIST_ENTRY* e) { e->Blink=h; e->Flink=h->Flink; h->Flink->Blink=e; h->Flink=e; }
+void RemoveEntryList(LIST_ENTRY* e) { e->Flink->Blink=e->Blink; e->Blink->Flink=e->Flink; }
 static LIST_ENTRY* RemoveHeadList(LIST_ENTRY* h) { CHECK(!IsListEmpty(h)); LIST_ENTRY* e=h->Flink; e->Flink->Blink=h; h->Flink=e->Flink; return e; }
 static int keycmp(struct btrfs_key a,struct btrfs_key b) {
     if(a.objectid!=b.objectid)return a.objectid<b.objectid?-1:1;
@@ -48,17 +51,17 @@ static int keycmp(struct btrfs_key a,struct btrfs_key b) {
 }
 static size_t RtlCompareMemory(const void* a,const void* b,size_t n) { size_t i=0; while(i<n && ((const uint8_t*)a)[i]==((const uint8_t*)b)[i])i++; return i; }
 static uint32_t calc_crc32c(uint32_t seed,const uint8_t* p,uint32_t n) { while(n--)seed=seed*33+*p++; return seed; }
-static struct { void* p; LOOKASIDE* owner; } owned[256];
+static struct { void* p; LOOKASIDE* owner; } owned[4096];
 static unsigned live, allocation_calls, fail_allocation, find_calls, fail_find;
 static bool committing, failure_hit;
 static void* allocate(size_t size,LOOKASIDE* owner) {
     if(committing && ++allocation_calls==fail_allocation) { failure_hit=true; return NULL; }
     void* p=calloc(1,size?size:1); CHECK(p);
-    for(unsigned i=0;i<256;i++)if(!owned[i].p){owned[i].p=p;owned[i].owner=owner;live++;if(owner)owner->outstanding++;return p;}
+    for(unsigned i=0;i<4096;i++)if(!owned[i].p){owned[i].p=p;owned[i].owner=owner;live++;if(owner)owner->outstanding++;return p;}
     CHECK(false);return NULL;
 }
 static void release(void* p,LOOKASIDE* owner) {
-    CHECK(p);for(unsigned i=0;i<256;i++)if(owned[i].p==p){CHECK(owned[i].owner==owner);owned[i].p=NULL;live--;if(owner){CHECK(owner->outstanding);owner->outstanding--;}free(p);return;}CHECK(false);
+    CHECK(p);for(unsigned i=0;i<4096;i++)if(owned[i].p==p){CHECK(owned[i].owner==owner);owned[i].p=NULL;live--;if(owner){CHECK(owner->outstanding);owner->outstanding--;}free(p);return;}CHECK(false);
 }
 static void* ExAllocatePoolWithTag(int pool,size_t n,unsigned tag) { (void)pool;(void)tag;return allocate(n,NULL); }
 static void ExFreePool(void* p) { release(p,NULL); }
@@ -74,9 +77,9 @@ static NTSTATUS find_item(device_extension* v,root* r,traverse_ptr* tp,const str
 static bool find_next_item(device_extension* v,traverse_ptr* tp,traverse_ptr* next,bool ignore,PIRP irp) { (void)v;(void)tp;(void)next;(void)ignore;(void)irp;return false; }
 #include "batch_collision.inc"
 #include "batch_commit.inc"
+#include "batch_producer.inc"
 
-
-int main(int argc,char** argv) {
+int main(int argc,char** argv){
     CHECK(argc==2);
     for(unsigned failure=0;failure<3;failure++) {
         char name[80];snprintf(name,sizeof(name),"extref-allocation%u",failure);
@@ -99,6 +102,40 @@ int main(int argc,char** argv) {
         ExFreePool(bi.data);
         CHECK(IsListEmpty(&items) && !live && !volume.batch_item_lookaside.outstanding);
         return 0;
+    }
+    for(unsigned existing=0;existing<2;existing++)for(unsigned failure=0;failure<(existing?3u:4u);failure++) {
+        char name[80];snprintf(name,sizeof(name),"producer-existing%u-allocation%u",existing,failure);
+        if(!strcmp(argv[1],"--list")){puts(name);continue;}if(strcmp(argv[1],name))continue;
+        device_extension volume={0};volume.batch_item_lookaside.size=sizeof(batch_item);
+        volume.tree_data_lookaside.size=sizeof(tree_data);root r={0};LIST_ENTRY list;InitializeListHead(&list);
+        unsigned initial=existing?BATCH_ITEM_LIMIT:0;
+        for(unsigned i=0;i<initial;i++)CHECK(insert_tree_item_batch(&list,&volume,&r,i,BTRFS_INODE_ITEM_KEY,0,NULL,0,Batch_Insert)==STATUS_SUCCESS);
+        uint8_t* data=allocate(8,NULL);data[0]=0x5a;
+        fail_allocation=failure;committing=true;
+        NTSTATUS status=insert_tree_item_batch(&list,&volume,&r,initial+1,BTRFS_INODE_ITEM_KEY,0,data,8,Batch_Insert);
+        committing=false;CHECK(status==(failure?STATUS_INSUFFICIENT_RESOURCES:STATUS_SUCCESS));
+        unsigned queued=0;
+        for(LIST_ENTRY* le=list.Flink;le!=&list;le=le->Flink){
+            batch_root* br=CONTAINING_RECORD(le,batch_root,list_entry);
+            for(LIST_ENTRY* li=br->items_ind.Flink;li!=&br->items_ind;li=li->Flink){
+                batch_item_ind* bii=CONTAINING_RECORD(li,batch_item_ind,list_entry);unsigned actual=0;
+                for(LIST_ENTRY* item=bii->items.Flink;item!=&bii->items;item=item->Flink){queued++;actual++;}
+                CHECK(actual==bii->num_items);
+            }
+        }
+        CHECK(queued==initial+(failure?0u:1u));CHECK(data[0]==0x5a);
+        if(failure)ExFreePool(data);
+        /* Release queued payloads explicitly so this producer regression is independent of clear's policy. */
+        for(LIST_ENTRY* le=list.Flink;le!=&list;le=le->Flink){
+            batch_root* br=CONTAINING_RECORD(le,batch_root,list_entry);
+            for(LIST_ENTRY* li=br->items_ind.Flink;li!=&br->items_ind;li=li->Flink){
+                batch_item_ind* bii=CONTAINING_RECORD(li,batch_item_ind,list_entry);
+                for(LIST_ENTRY* item=bii->items.Flink;item!=&bii->items;item=item->Flink){
+                    batch_item* bi=CONTAINING_RECORD(item,batch_item,list_entry);if(bi->data){ExFreePool(bi->data);bi->data=NULL;}
+                }
+            }
+        }
+        clear_batch_list(&volume,&list);CHECK(!live && !volume.batch_item_lookaside.outstanding);return 0;
     }
     return strcmp(argv[1],"--list")?2:0;
 }

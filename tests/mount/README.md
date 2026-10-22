@@ -143,3 +143,12 @@ including success and each allocation failure. Before the wrong-pool fix,
 ExFreePool. The corrected helper returns it to its original lookaside.
 The mock checksum only supplies consistent hash ordering; these cases do
 not validate the checksum algorithm or disk transactions.
+
+Seven producer cases exercise the actual queue insertion and index split,
+including the real 1,000-item threshold. Before the producer fix, 9/10
+combined helper/producer cases pass: a failed index allocation leaves the
+new item queued even though the caller receives an error and retains its
+payload. On failure, insertion removes only that new item, preserves the
+existing queue and returns its original insufficient-resources status.
+The producer tests release queued payloads explicitly so they also cover
+this ownership boundary independently of the commit destructor.
