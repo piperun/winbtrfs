@@ -50,32 +50,39 @@ typedef struct {
     fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c); exit(1); \
 } } while (0)
 
-static void InitializeListHead(LIST_ENTRY* h) { h->Flink = h->Blink = h; }
-static bool IsListEmpty(const LIST_ENTRY* h) { return h->Flink == h; }
-static void InsertHeadList(LIST_ENTRY* h, LIST_ENTRY* e) {
+static inline void InitializeListHead(LIST_ENTRY* h) { h->Flink = h->Blink = h; }
+static inline bool IsListEmpty(const LIST_ENTRY* h) { return h->Flink == h; }
+static inline void InsertHeadList(LIST_ENTRY* h, LIST_ENTRY* e) {
     e->Flink = h->Flink; e->Blink = h;
     h->Flink->Blink = e; h->Flink = e;
 }
-static void RemoveEntryList(LIST_ENTRY* e) {
+static inline void RemoveEntryList(LIST_ENTRY* e) {
     e->Blink->Flink = e->Flink; e->Flink->Blink = e->Blink;
 }
-static LIST_ENTRY* RemoveHeadList(LIST_ENTRY* h) {
+static inline LIST_ENTRY* RemoveHeadList(LIST_ENTRY* h) {
     LIST_ENTRY* e = h->Flink; CHECK(e != h); RemoveEntryList(e); return e;
 }
 
-static void* ExAllocatePoolWithTag(unsigned pool, size_t size, unsigned tag);
-static void ExFreePool(void* p);
-static chunk* get_chunk_from_address(device_extension* v, uint64_t address);
-static NTSTATUS update_changed_extent_ref(device_extension* v, chunk* c, uint64_t address,
+/* extents_test.c defines the services in the same file as the function. The
+ * comparison build defines them once, with SERVICE set to extern, and links two
+ * copies of the function against them. */
+#ifndef SERVICE
+#define SERVICE static
+#endif
+
+SERVICE void* ExAllocatePoolWithTag(unsigned pool, size_t size, unsigned tag);
+SERVICE void ExFreePool(void* p);
+SERVICE chunk* get_chunk_from_address(device_extension* v, uint64_t address);
+SERVICE NTSTATUS update_changed_extent_ref(device_extension* v, chunk* c, uint64_t address,
     uint64_t size, uint64_t root_id, uint64_t inode, uint64_t offset, int32_t count,
     bool no_csum, bool superseded, PIRP irp, LIST_ENTRY* rollback);
-static NTSTATUS add_changed_extent_ref(chunk* c, uint64_t address, uint64_t size,
+SERVICE NTSTATUS add_changed_extent_ref(chunk* c, uint64_t address, uint64_t size,
     uint64_t root_id, uint64_t inode, uint64_t offset, uint32_t count,
     bool no_csum, LIST_ENTRY* rollback);
-static NTSTATUS add_checksum_entry(device_extension* v, uint64_t address, ULONG length,
+SERVICE NTSTATUS add_checksum_entry(device_extension* v, uint64_t address, ULONG length,
     void* csum, PIRP irp);
-static void acquire_chunk_lock(chunk* c, device_extension* v);
-static void release_chunk_lock(chunk* c, device_extension* v);
-static NTSTATUS load_cache_chunk(device_extension* v, chunk* c, PIRP irp);
-static NTSTATUS space_list_add(chunk* c, uint64_t address, uint64_t length,
+SERVICE void acquire_chunk_lock(chunk* c, device_extension* v);
+SERVICE void release_chunk_lock(chunk* c, device_extension* v);
+SERVICE NTSTATUS load_cache_chunk(device_extension* v, chunk* c, PIRP irp);
+SERVICE NTSTATUS space_list_add(chunk* c, uint64_t address, uint64_t length,
     LIST_ENTRY* rollback);

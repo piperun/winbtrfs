@@ -166,7 +166,7 @@ static void run_merge(enum trimming trim, unsigned type, bool checksums, int fai
         CHECK(false);
     }
     CHECK(call_count == (fail < 0 ? expected_count : fail_call));
-    CHECK(storage.used == 3 * page && allocations == 3 && lookups == 1);
+    CHECK(storage.used == 3 * page && lookups == 1);
     for (unsigned i = 0; i < 3; i++) {
         bool merged = fail < 0 || (int)(2 * i) < fail;
         struct btrfs_file_extent_item* e = &extents[i].extent_data;
@@ -175,6 +175,53 @@ static void run_merge(enum trimming trim, unsigned type, bool checksums, int fai
         CHECK(e->ram_bytes == e->disk_num_bytes);
         CHECK(e->offset == (merged ? i * page : 0));
         CHECK(e->num_bytes == page && e->type == type && e->generation == 99);
+    }
+}
+
+/* Fail each allocation in turn, until the function makes fewer allocations than
+ * the one set to fail and merges the extents. */
+static void run_allocation_failures(void) {
+    for (unsigned n = 1;; n++) {
+        setup(UNTRIMMED, BTRFS_FILE_EXTENT_REG, true);
+        expected_count = call_count = allocations = lookups = 0;
+        merge_calls(UNTRIMMED);
+        fail_allocation = n;
+        NTSTATUS status = rationalize_extents(&file, &request);
+        CHECK(pool_live == 0);
+        if (allocations < n) {
+            CHECK(n > 1 && status == STATUS_SUCCESS && call_count == expected_count);
+            return;
+        }
+        CHECK(status == STATUS_INSUFFICIENT_RESOURCES && call_count == 0 && lookups == 0);
+        for (unsigned i = 0; i < 3; i++) {
+            CHECK(extents[i].extent_data.disk_bytenr == base + i * page);
+            CHECK(extents[i].extent_data.disk_num_bytes == page);
+        }
+    }
+}
+
+/* One two-page disk extent used by two extents, the first in the list using
+ * all of it or only its second page, the other one the rest. Whether the
+ * function looks up the chunk to trim depends on the first extent alone. */
+static void run_shared_extent(bool first_full) {
+    setup(UNTRIMMED, BTRFS_FILE_EXTENT_REG, true);
+    InitializeListHead(&file.extents);
+    for (unsigned i = 0; i < 2; i++) {
+        bool full = (i == 0) == first_full;
+        extents[i] = (extent){ .offset = i * 2 * page, .unique = true,
+            .extent_data = { .generation = 99, .ram_bytes = 2 * page,
+                .compression = BTRFS_COMPRESS_NONE, .type = BTRFS_FILE_EXTENT_REG,
+                .disk_bytenr = base, .disk_num_bytes = 2 * page,
+                .offset = full ? 0 : page, .num_bytes = full ? 2 * page : page } };
+        InsertHeadList(file.extents.Blink, &extents[i].list_entry);
+    }
+    CHECK(rationalize_extents(&file, &request) == STATUS_SUCCESS);
+    CHECK(call_count == 0 && lookups == (first_full ? 0 : 1));
+    for (unsigned i = 0; i < 2; i++) {
+        bool full = (i == 0) == first_full;
+        CHECK(extents[i].extent_data.disk_bytenr == base);
+        CHECK(extents[i].extent_data.disk_num_bytes == 2 * page);
+        CHECK(extents[i].extent_data.offset == (full ? 0 : page));
     }
 }
 
@@ -189,18 +236,18 @@ static void run_control(unsigned n) {
         case 4: for (unsigned i = 0; i < 3; i++) extents[i].extent_data.disk_num_bytes = 0; break;
         case 5: for (unsigned i = 0; i < 3; i++) extents[i].extent_data.type = BTRFS_FILE_EXTENT_INLINE; break;
         case 6: for (unsigned i = 0; i < 3; i++) extents[i].extent_data.disk_bytenr += i * page; break;
-        case 7: case 8: case 9:
-            fail_allocation = n - 6; wanted = STATUS_INSUFFICIENT_RESOURCES; break;
-        case 10: missing_chunk = true; wanted = STATUS_INTERNAL_ERROR; break;
-        case 11: case 12: case 13: {
+        case 7: run_allocation_failures(); return;
+        case 8: missing_chunk = true; wanted = STATUS_INTERNAL_ERROR; break;
+        case 9: case 10: case 11: {
             setup(PREFIX, BTRFS_FILE_EXTENT_REG, true);
             storage.cache_loaded = false;
             trim_calls(PREFIX, true); merge_calls(PREFIX);
             /* Exercise truncation errors that already use the returned status. */
-            fail_call = n == 11 ? 1 : n == 12 ? 4 : 5;
+            fail_call = n == 9 ? 1 : n == 10 ? 4 : 5;
             failure = STATUS_IO_DEVICE_ERROR; wanted = failure;
             break;
         }
+        case 12: case 13: run_shared_extent(n == 12); return;
         default: CHECK(false);
     }
     CHECK(rationalize_extents(&file, &request) == wanted);
