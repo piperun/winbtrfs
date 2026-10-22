@@ -204,7 +204,7 @@ void do_rollback(device_extension* Vcb, LIST_ENTRY* rollback) {
                             ExFreePool(cer);
                         }
 
-                        RemoveEntryList(&ce->list_entry);
+                        remove_changed_extent(c, ce);
                         ExFreePool(ce);
                     }
 

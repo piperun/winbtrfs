@@ -647,7 +647,7 @@ NTSTATUS load_chunk_root(_In_ _Requires_lock_held_(_Curr_->tree_lock) device_ext
                 InitializeListHead(&c->space);
                 InitializeListHead(&c->space_size);
                 InitializeListHead(&c->deleting);
-                InitializeListHead(&c->changed_extents);
+                initialize_changed_extents(c);
 
                 InitializeListHead(&c->range_locks);
                 ExInitializeResourceLite(&c->range_locks_lock);

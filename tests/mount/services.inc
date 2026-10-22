@@ -206,3 +206,8 @@ static void make_metadata(unsigned loaded) {
         mark_fcb_dirty(f); LONG marked = f->refcount; mark_fcb_dirty(f); CHECK(f->refcount == marked);
     }
 }
+/* The production AVL/root invariant is exercised by changed-extents checks. */
+static void initialize_changed_extents(chunk* c) {
+    CHECK(IsListEmpty(&c->changed_extents));
+    InitializeListHead(&c->changed_extents);
+}

@@ -534,7 +534,7 @@ NTSTATUS alloc_chunk(device_extension* Vcb, uint64_t flags, chunk** pc, bool ful
     InitializeListHead(&c->space);
     InitializeListHead(&c->space_size);
     InitializeListHead(&c->deleting);
-    InitializeListHead(&c->changed_extents);
+    initialize_changed_extents(c);
 
     InitializeListHead(&c->range_locks);
     ExInitializeResourceLite(&c->range_locks_lock);

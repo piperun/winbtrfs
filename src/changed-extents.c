@@ -18,6 +18,138 @@
 // Pending extent reference changes; callers retain the existing chunk/tree locks.
 #include "btrfs_drv.h"
 
+static int compare_changed_extent(const changed_extent* ce, uint64_t address, uint64_t size) {
+    if (ce->address != address)
+        return ce->address < address ? -1 : 1;
+    if (ce->size != size)
+        return ce->size < size ? -1 : 1;
+    return 0;
+}
+
+static unsigned extent_height(const changed_extent* ce) {
+    return ce ? ce->height : 0;
+}
+
+static void update_extent_height(changed_extent* ce) {
+    unsigned left = extent_height(ce->left), right = extent_height(ce->right);
+    ce->height = (uint8_t)(1 + (left > right ? left : right));
+}
+
+static void replace_extent_node(chunk* c, changed_extent* old, changed_extent* replacement) {
+    if (!old->parent)
+        c->changed_extents_root = replacement;
+    else if (old->parent->left == old)
+        old->parent->left = replacement;
+    else
+        old->parent->right = replacement;
+    if (replacement)
+        replacement->parent = old->parent;
+}
+
+static changed_extent* rotate_extent_left(chunk* c, changed_extent* ce) {
+    changed_extent* pivot = ce->right;
+    ce->right = pivot->left;
+    if (ce->right)
+        ce->right->parent = ce;
+    replace_extent_node(c, ce, pivot);
+    pivot->left = ce;
+    ce->parent = pivot;
+    update_extent_height(ce);
+    update_extent_height(pivot);
+    return pivot;
+}
+
+static changed_extent* rotate_extent_right(chunk* c, changed_extent* ce) {
+    changed_extent* pivot = ce->left;
+    ce->left = pivot->right;
+    if (ce->left)
+        ce->left->parent = ce;
+    replace_extent_node(c, ce, pivot);
+    pivot->right = ce;
+    ce->parent = pivot;
+    update_extent_height(ce);
+    update_extent_height(pivot);
+    return pivot;
+}
+
+static void rebalance_changed_extents(chunk* c, changed_extent* ce) {
+    while (ce) {
+        int balance;
+        update_extent_height(ce);
+        balance = (int)extent_height(ce->left) - (int)extent_height(ce->right);
+        if (balance > 1) {
+            if (extent_height(ce->left->right) > extent_height(ce->left->left))
+                rotate_extent_left(c, ce->left);
+            ce = rotate_extent_right(c, ce);
+        } else if (balance < -1) {
+            if (extent_height(ce->right->left) > extent_height(ce->right->right))
+                rotate_extent_right(c, ce->right);
+            ce = rotate_extent_left(c, ce);
+        }
+        ce = ce->parent;
+    }
+}
+
+void initialize_changed_extents(chunk* c) {
+    InitializeListHead(&c->changed_extents);
+    c->changed_extents_root = NULL;
+}
+
+void insert_changed_extent(chunk* c, changed_extent* ce) {
+    changed_extent** link = &c->changed_extents_root;
+    changed_extent* parent = NULL;
+
+    // Upper-bound insertion preserves append order among equal keys. Rotations
+    // preserve this in-order identity sequence, even when equal keys move left.
+    while (*link) {
+        parent = *link;
+        if (compare_changed_extent(parent, ce->address, ce->size) > 0)
+            link = &parent->left;
+        else
+            link = &parent->right;
+    }
+    ce->parent = parent;
+    ce->left = ce->right = NULL;
+    ce->height = 1;
+    *link = ce;
+    InsertTailList(&c->changed_extents, &ce->list_entry);
+    rebalance_changed_extents(c, parent);
+}
+
+void remove_changed_extent(chunk* c, changed_extent* ce) {
+    changed_extent* parent;
+
+    if (ce->left && ce->right) {
+        changed_extent* successor = ce->right;
+        while (successor->left)
+            successor = successor->left;
+        if (successor->parent != ce) {
+            parent = successor->parent;
+            replace_extent_node(c, successor, successor->right);
+            successor->right = ce->right;
+            successor->right->parent = successor;
+        } else
+            parent = successor;
+        // Move the node itself; copying its payload would change list identity.
+        replace_extent_node(c, ce, successor);
+        successor->left = ce->left;
+        successor->left->parent = successor;
+    } else {
+        parent = ce->parent;
+        replace_extent_node(c, ce, ce->left ? ce->left : ce->right);
+    }
+    RemoveEntryList(&ce->list_entry);
+    ce->parent = ce->left = ce->right = NULL;
+    ce->height = 1;
+    rebalance_changed_extents(c, parent);
+}
+
+void move_changed_extent(chunk* source, chunk* destination, changed_extent* ce, uint64_t address) {
+    remove_changed_extent(source, ce);
+    ce->address = address;
+    insert_changed_extent(destination, ce);
+}
+
 static uint32_t find_extent_data_refcount(device_extension* Vcb, uint64_t address, uint64_t size, uint64_t root, uint64_t objid, uint64_t offset, PIRP Irp) {
     NTSTATUS Status;
     struct btrfs_key searchkey;
@@ -137,18 +269,20 @@ static uint32_t find_extent_data_refcount(device_extension* Vcb, uint64_t addres
 
 changed_extent* get_changed_extent_item(chunk* c, uint64_t address, uint64_t size,
                                         bool no_csum) {
-    LIST_ENTRY* le;
-    changed_extent* ce;
+    changed_extent* ce = c->changed_extents_root;
+    changed_extent* found = NULL;
 
-    le = c->changed_extents.Flink;
-    while (le != &c->changed_extents) {
-        ce = CONTAINING_RECORD(le, changed_extent, list_entry);
-
-        if (ce->address == address && ce->size == size)
-            return ce;
-
-        le = le->Flink;
+    while (ce) {
+        int order = compare_changed_extent(ce, address, size);
+        if (order >= 0) {
+            if (order == 0)
+                found = ce;
+            ce = ce->left;
+        } else
+            ce = ce->right;
     }
+    if (found)
+        return found;
 
     ce = ExAllocatePoolWithTag(PagedPool, sizeof(changed_extent), ALLOC_TAG);
     if (!ce) {
@@ -166,7 +300,7 @@ changed_extent* get_changed_extent_item(chunk* c, uint64_t address, uint64_t siz
     InitializeListHead(&ce->refs);
     InitializeListHead(&ce->old_refs);
 
-    InsertTailList(&c->changed_extents, &ce->list_entry);
+    insert_changed_extent(c, ce);
 
     return ce;
 }
@@ -202,7 +336,7 @@ NTSTATUS update_changed_extent_ref(device_extension* Vcb, chunk* c, uint64_t add
         Status = find_item(Vcb, Vcb->extent_root, &tp, &searchkey, false, Irp);
         if (!NT_SUCCESS(Status)) {
             ERR("error - find_item returned %08lx\n", Status);
-            RemoveEntryList(&ce->list_entry);
+            remove_changed_extent(c, ce);
             ExFreePool(ce);
             goto end;
         }
@@ -210,7 +344,7 @@ NTSTATUS update_changed_extent_ref(device_extension* Vcb, chunk* c, uint64_t add
         if (tp.item->key.objectid != searchkey.objectid || tp.item->key.type != searchkey.type) {
             ERR("could not find address %I64x in extent tree\n", address);
             Status = STATUS_INTERNAL_ERROR;
-            RemoveEntryList(&ce->list_entry);
+            remove_changed_extent(c, ce);
             ExFreePool(ce);
             goto end;
         }
@@ -218,7 +352,7 @@ NTSTATUS update_changed_extent_ref(device_extension* Vcb, chunk* c, uint64_t add
         if (tp.item->key.offset != size) {
             ERR("extent %I64x had size %I64x, not %I64x as expected\n", address, tp.item->key.offset, size);
             Status = STATUS_INTERNAL_ERROR;
-            RemoveEntryList(&ce->list_entry);
+            remove_changed_extent(c, ce);
             ExFreePool(ce);
             goto end;
         }
@@ -234,7 +368,7 @@ NTSTATUS update_changed_extent_ref(device_extension* Vcb, chunk* c, uint64_t add
         } else {
             ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset, tp.item->size, sizeof(struct btrfs_extent_item));
             Status = STATUS_INTERNAL_ERROR;
-            RemoveEntryList(&ce->list_entry);
+            remove_changed_extent(c, ce);
             ExFreePool(ce);
             goto end;
         }
@@ -358,7 +492,7 @@ NTSTATUS add_changed_extent_ref(chunk* c, uint64_t address, uint64_t size,
             ERR("out of memory\n");
 
             if (IsListEmpty(&ce->refs) && ce->count == 0) {
-                RemoveEntryList(&ce->list_entry);
+                remove_changed_extent(c, ce);
                 ExFreePool(ce);
             }
 
@@ -397,7 +531,7 @@ NTSTATUS add_changed_extent_ref(chunk* c, uint64_t address, uint64_t size,
         ERR("out of memory\n");
 
         if (IsListEmpty(&ce->refs) && ce->count == 0) {
-            RemoveEntryList(&ce->list_entry);
+            remove_changed_extent(c, ce);
             ExFreePool(ce);
         }
 

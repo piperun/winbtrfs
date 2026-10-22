@@ -135,6 +135,7 @@ void cleanup_failed_mount(device_extension* Vcb, fcb* root_fcb, bool init_lookas
 
                 ExFreePool(ce);
             }
+            initialize_changed_extents(c);
 
             if (c->devices)
                 ExFreePool(c->devices);

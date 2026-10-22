@@ -185,7 +185,7 @@ end:
         Status = space_list_add(c, ce->address, ce->size, NULL);
     }
 
-    RemoveEntryList(&ce->list_entry);
+    remove_changed_extent(c, ce);
     ExFreePool(ce);
 
     return Status;

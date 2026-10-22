@@ -439,9 +439,7 @@ NTSTATUS balance_data_chunk(device_extension* Vcb, chunk* c, bool* changed) {
             data_reloc* dr = CONTAINING_RECORD(le2, data_reloc, list_entry);
 
             if (ce->address == dr->address) {
-                ce->address = dr->new_address;
-                RemoveEntryList(&ce->list_entry);
-                InsertTailList(&dr->newchunk->changed_extents, &ce->list_entry);
+                move_changed_extent(c, dr->newchunk, ce, dr->new_address);
                 break;
             }
 

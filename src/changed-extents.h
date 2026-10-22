@@ -17,6 +17,14 @@
 
 #pragma once
 
+// Mutations of published chunks hold changed_extents_lock or exclusive
+// Vcb->tree_lock. Initialization and terminal reset require private ownership.
+// These operations allocate nothing and preserve list append order.
+void initialize_changed_extents(chunk* c);
+void insert_changed_extent(chunk* c, changed_extent* ce);
+void remove_changed_extent(chunk* c, changed_extent* ce);
+void move_changed_extent(chunk* source, chunk* destination, changed_extent* ce, uint64_t address);
+
 changed_extent* get_changed_extent_item(chunk* c, uint64_t address, uint64_t size,
                                         bool no_csum);
 

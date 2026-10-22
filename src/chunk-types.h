@@ -18,6 +18,8 @@
 #pragma once
 
 // Chunk ownership and pending extent reference records.
+struct changed_extent;
+
 typedef struct {
     struct btrfs_chunk* chunk_item;
     uint16_t size;
@@ -31,6 +33,7 @@ typedef struct {
     LIST_ENTRY space_size;
     LIST_ENTRY deleting;
     LIST_ENTRY changed_extents;
+    struct changed_extent* changed_extents_root;
     LIST_ENTRY range_locks;
     ERESOURCE range_locks_lock;
     KEVENT range_locks_event;
@@ -54,7 +57,7 @@ typedef struct {
     LIST_ENTRY list_entry_balance;
 } chunk;
 
-typedef struct {
+typedef struct changed_extent {
     uint64_t address;
     uint64_t size;
     uint64_t old_size;
@@ -65,6 +68,10 @@ typedef struct {
     LIST_ENTRY refs;
     LIST_ENTRY old_refs;
     LIST_ENTRY list_entry;
+    struct changed_extent* left;
+    struct changed_extent* right;
+    struct changed_extent* parent;
+    uint8_t height;
 } changed_extent;
 
 typedef struct {

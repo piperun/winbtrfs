@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,32 +19,16 @@ typedef struct LIST_ENTRY { struct LIST_ENTRY *Flink, *Blink; } LIST_ENTRY;
 typedef struct { int unused; } ERESOURCE;
 typedef struct _root { uint64_t id; } root;
 typedef struct { root* extent_root; } device_extension;
-typedef struct { LIST_ENTRY changed_extents; ERESOURCE changed_extents_lock; } chunk;
-
 typedef struct {
-    uint64_t address;
-    uint64_t size;
-    uint64_t old_size;
-    uint64_t count;
-    uint64_t old_count;
-    bool no_csum;
-    bool superseded;
-    LIST_ENTRY refs;
-    LIST_ENTRY old_refs;
-    LIST_ENTRY list_entry;
-} changed_extent;
+    LIST_ENTRY changed_extents;
+#if HAVE_INDEX
+    struct changed_extent* changed_extents_root;
+#endif
+    ERESOURCE changed_extents_lock;
+    uint64_t used;
+} chunk;
 
-typedef struct {
-    uint8_t type;
-    union {
-        struct btrfs_extent_data_ref edr;
-        struct {
-            uint64_t offset;
-            struct btrfs_shared_data_ref sdr;
-        };
-    };
-    LIST_ENTRY list_entry;
-} changed_extent_ref;
+#include "extent-type.inc"
 
 typedef struct { struct btrfs_key key; uint16_t size; uint8_t* data; } tree_data;
 typedef struct { void* tree; tree_data* item; } traverse_ptr;
@@ -75,10 +60,28 @@ static inline void InsertTailList(LIST_ENTRY* h, LIST_ENTRY* e) {
     e->Blink = h->Blink; e->Flink = h; h->Blink->Flink = e; h->Blink = e;
 }
 static inline void RemoveEntryList(LIST_ENTRY* e) { e->Blink->Flink = e->Flink; e->Flink->Blink = e->Blink; }
-static void* ExAllocatePoolWithTag(unsigned pool, size_t size, unsigned tag) {
-    (void)pool; (void)tag; return malloc(size);
+static inline LIST_ENTRY* RemoveHeadList(LIST_ENTRY* h) {
+    LIST_ENTRY* e = h->Flink; RemoveEntryList(e); return e;
 }
-static void ExFreePool(void* p) { free(p); }
+#ifdef CE_TEST
+static void* ce_allocate(size_t size);
+static void ce_release(void* pointer);
+#endif
+static void* ExAllocatePoolWithTag(unsigned pool, size_t size, unsigned tag) {
+    (void)pool; (void)tag;
+#ifdef CE_TEST
+    return ce_allocate(size);
+#else
+    return malloc(size);
+#endif
+}
+static void ExFreePool(void* p) {
+#ifdef CE_TEST
+    ce_release(p);
+#else
+    free(p);
+#endif
+}
 static void ExAcquireResourceExclusiveLite(ERESOURCE* r, bool wait) { (void)r; (void)wait; }
 static void ExReleaseResourceLite(ERESOURCE* r) { (void)r; }
 
@@ -86,6 +89,10 @@ unsigned long long loop_steps;
 static uint64_t looked_up_size;
 static struct btrfs_extent_item item_data = { .refs = 1 };
 static tree_data found;
+#ifdef CE_TEST
+static unsigned lookup_fault;
+static uint32_t prior_refs = 1;
+#endif
 
 static NTSTATUS find_item(device_extension* Vcb, root* r, traverse_ptr* tp, const struct btrfs_key* searchkey,
                           bool ignore, PIRP Irp) {
@@ -95,12 +102,24 @@ static NTSTATUS find_item(device_extension* Vcb, root* r, traverse_ptr* tp, cons
     found.size = sizeof(item_data);
     found.data = (uint8_t*)&item_data;
     tp->item = &found;
+#ifdef CE_TEST
+    if (lookup_fault == 1) return STATUS_INTERNAL_ERROR;
+    if (lookup_fault == 2) found.key.objectid++;
+    if (lookup_fault == 3) found.key.type++;
+    if (lookup_fault == 4) found.key.offset++;
+    if (lookup_fault == 5) found.size = 0;
+    if (lookup_fault == 6) found.size = sizeof(struct btrfs_extent_item_v0);
+#endif
     return STATUS_SUCCESS;
 }
 
 static uint32_t find_extent_data_refcount(device_extension* Vcb, uint64_t address, uint64_t size, uint64_t root,
                                           uint64_t objid, uint64_t offset, PIRP Irp) {
     (void)Vcb; (void)address; (void)size; (void)root; (void)objid; (void)offset; (void)Irp;
+#ifdef CE_TEST
+    return prior_refs;
+#else
     return 1;
+#endif
 }
 

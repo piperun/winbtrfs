@@ -16,12 +16,15 @@ int main(int argc, char** argv) {
     CHECK(f && fscanf(f, "%u %lf", &num_chunks, &rationalize_ms) == 2);
     size_t num_calls = 0, capacity = 1024;
     call* calls = malloc(capacity * sizeof(call));
+    CHECK(calls != NULL);
     call c;
-    while (fscanf(f, " %c %d %llu %llu %llu %llu %llu %lld", &c.op, &c.chunk,
-                  (unsigned long long*)&c.address, (unsigned long long*)&c.size, (unsigned long long*)&c.root,
-                  (unsigned long long*)&c.inode, (unsigned long long*)&c.offset, &c.count) == 8) {
-        if (num_calls == capacity)
-            calls = realloc(calls, (capacity *= 2) * sizeof(call));
+    while (fscanf(f, " %c %d %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %lld",
+                  &c.op, &c.chunk, &c.address, &c.size, &c.root, &c.inode, &c.offset, &c.count) == 8) {
+        if (num_calls == capacity) {
+            void* resized = realloc(calls, (capacity *= 2) * sizeof(call));
+            CHECK(resized != NULL);
+            calls = resized;
+        }
         calls[num_calls++] = c;
     }
     fclose(f);
@@ -30,11 +33,17 @@ int main(int argc, char** argv) {
     device_extension vcb = { .extent_root = &extent_root };
     IRP irp = { 0 };
     chunk* chunks = calloc(num_chunks, sizeof(chunk));
+    CHECK(chunks != NULL);
     for (unsigned i = 0; i < num_chunks; i++) {
+#if HAVE_INDEX
+        initialize_changed_extents(&chunks[i]);
+#else
         InitializeListHead(&chunks[i].changed_extents);
+#endif
         for (unsigned j = 0; j < prefill; j++) {
             changed_extent* ce = calloc(1, sizeof(changed_extent));
             changed_extent_ref* cer = calloc(1, sizeof(changed_extent_ref));
+            CHECK(ce != NULL && cer != NULL);
             ce->address = 0x100000000000ULL + ((uint64_t)i * prefill + j) * 4096;
             ce->size = 4096;
             ce->count = 1;
@@ -43,7 +52,11 @@ int main(int argc, char** argv) {
             cer->type = BTRFS_EXTENT_DATA_REF_KEY;
             cer->edr.count = 1;
             InsertTailList(&ce->refs, &cer->list_entry);
+#if HAVE_INDEX
+            insert_changed_extent(&chunks[i], ce);
+#else
             InsertTailList(&chunks[i].changed_extents, &ce->list_entry);
+#endif
         }
     }
 
@@ -76,7 +89,12 @@ int main(int argc, char** argv) {
                 changed_extent_ref* ref = CONTAINING_RECORD(ce->old_refs.Flink, changed_extent_ref, list_entry);
                 RemoveEntryList(&ref->list_entry); ExFreePool(ref);
             }
-            RemoveEntryList(&ce->list_entry); ExFreePool(ce);
+#if HAVE_INDEX
+            remove_changed_extent(&chunks[i], ce);
+#else
+            RemoveEntryList(&ce->list_entry);
+#endif
+            ExFreePool(ce);
         }
     }
     free(chunks); free(calls);
