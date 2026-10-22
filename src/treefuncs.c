@@ -1024,5 +1024,3 @@ NTSTATUS delete_tree_item(_In_ _Requires_exclusive_lock_held_(_Curr_->tree_lock)
 
     return STATUS_SUCCESS;
 }
-
-

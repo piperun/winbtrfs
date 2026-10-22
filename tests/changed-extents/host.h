@@ -122,4 +122,3 @@ static uint32_t find_extent_data_refcount(device_extension* Vcb, uint64_t addres
     return 1;
 #endif
 }
-
