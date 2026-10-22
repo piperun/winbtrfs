@@ -5055,6 +5055,8 @@ end:
 
         if (lock)
             ExReleaseResourceLite(&fcb->Vcb->dirty_fcbs_lock);
+
+        free_fcb(fcb);
     }
 
     return Status;
@@ -7126,8 +7128,6 @@ static NTSTATUS do_write2(device_extension* Vcb, PIRP Irp) {
             Status = flush_fcb(fcb, false, &batchlist, Irp);
             ExReleaseResourceLite(fcb->Header.Resource);
 
-            free_fcb(fcb);
-
             if (!NT_SUCCESS(Status)) {
                 ERR("flush_fcb returned %08lx\n", Status);
                 clear_batch_list(Vcb, &batchlist);
@@ -7159,8 +7159,6 @@ static NTSTATUS do_write2(device_extension* Vcb, PIRP Irp) {
             ExAcquireResourceExclusiveLite(fcb->Header.Resource, true);
             Status = flush_fcb(fcb, false, &batchlist, Irp);
             ExReleaseResourceLite(fcb->Header.Resource);
-            free_fcb(fcb);
-
             if (!NT_SUCCESS(Status)) {
                 ERR("flush_fcb returned %08lx\n", Status);
                 ExReleaseResourceLite(&Vcb->dirty_fcbs_lock);

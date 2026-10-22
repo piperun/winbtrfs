@@ -108,12 +108,24 @@ bitmap = re.search(r"static \w+ load_free_space_bitmap\(", source)[0]
     "NTSTATUS space_list_subtract(")))
 (out / "btrfs.h").write_text(read("src/btrfs.h"))
 
+# Exercise the production dirty-list ownership transitions without pulling the
+# tree-writing dependencies of flush_fcb into the host model.
+flush = read("src/flushthread.c")
+flush_body = function(flush, "NTSTATUS flush_fcb(")
+cleanup = flush_body[flush_body.rindex("\nend:"):]
+(out / "flush_ref.inc").write_text(
+    function(read("src/btrfs.c"), "void mark_fcb_dirty(") +
+    "NTSTATUS flush_fcb(fcb* fcb) {\n"
+    "    NTSTATUS Status = flush_status;\n"
+    "    goto end;\n" + cleanup)
+
 flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie"] if args.sanitize else []
 binaries = []
 for name, program, functions_dir, defines in (
         ("free_space_test", test, "counted", [f"-DMERGE_HOOKS={int(helper)}"]),
         ("cache_test", test.with_name("cache_test.c"), "plain", []),
-        ("load_test", test.with_name("load_test.c"), "plain", [])):
+        ("load_test", test.with_name("load_test.c"), "plain", []),
+        ("flush_ref_test", test.with_name("flush_ref_test.c"), "plain", [])):
     binary = out / name
     subprocess.run(["gcc", "-std=c11", "-O0", "-g", "-Wall", "-Wextra", "-Werror",
                     f"-ftrivial-auto-var-init={args.init}", *flags, *defines,
