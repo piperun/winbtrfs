@@ -129,3 +129,17 @@ for one or three stripes. Missing first, middle and last stripes must free
 the devices array, chunk item and chunk; present-device controls retain all
 three allocations for the caller. Before the fix, 197/201 pass; all four
 missing-device cases leak the array.
+
+Run the batch helper ownership cases with the same native options:
+
+```sh
+python3 tests/mount/check_batch.py . --build-dir build/batch-tests
+python3 tests/mount/check_batch.py . --init zero --sanitize --build-dir build/batch-tests-asan
+```
+
+Three extended-reference allocation cases execute the production helper,
+including success and each allocation failure. Before the wrong-pool fix,
+2/3 pass: payload allocation failure returns a lookaside allocation through
+ExFreePool. The corrected helper returns it to its original lookaside.
+The mock checksum only supplies consistent hash ordering; these cases do
+not validate the checksum algorithm or disk transactions.
