@@ -6,6 +6,8 @@
 #include "reservations.inc"
 #include "queue.inc"
 #include "mapping.inc"
+#include "clean.inc"
+#include "balance.inc"
 
 static device_extension volume;
 static chunk chunks[3];
@@ -138,15 +140,39 @@ static void physical_oom(unsigned slot) {
 }
 static void poll_during_signal(void) {trim_process(&volume);volume.removing=true;trim_destroy(&volume);}
 static void completion_poll_race(void) {setup(1);commit();trim_process(&volume);preempt_on_signal=true;finish_all(false);cleanup();}
+static void clean_merge_failure(unsigned failing) {
+    setup(3);volume.options.no_trim=true;fail_at=allocations+failing;
+    ExAcquireResourceExclusiveLite(&volume.tree_lock,true);
+    CHECK(clean_space_cache(&volume)==STATUS_INSUFFICIENT_RESOURCES);
+    ExReleaseResourceLite(&volume.tree_lock);fail_at=0;
+    CHECK(!volume.chunk_lock.held&&!submitted);
+    for(unsigned i=0;i<3;i++){bool merged=i+1<failing;CHECK(!chunks[i].held&&IsListEmpty(&chunks[i].deleting)==merged&&chunks[i].space_changed==!merged);}
+    cleanup();
+}
+static void clean_queues_without_wait(void) {
+    setup(3);ExAcquireResourceExclusiveLite(&volume.tree_lock,true);CHECK(clean_space_cache(&volume)==STATUS_SUCCESS);ExReleaseResourceLite(&volume.tree_lock);
+    for(unsigned i=0;i<3;i++){CHECK(!chunks[i].space_changed&&IsListEmpty(&chunks[i].deleting)&&trim_chunk_pending(&chunks[i]));}
+    trim_process(&volume);CHECK(pending_count==3&&waits==0);finish_all(false);trim_process(&volume);cleanup();
+}
+static void balance_excludes_pending(void) {
+    setup(1);volume.balance.opts[0].flags=BTRFS_BALANCE_OPTS_ENABLED;
+    CHECK(should_balance_chunk(&volume,0,&chunks[0]));commit();CHECK(!should_balance_chunk(&volume,0,&chunks[0]));
+    trim_process(&volume);CHECK(!should_balance_chunk(&volume,0,&chunks[0]));finish_all(false);fail_at=allocations+1;trim_process(&volume);fail_at=0;
+    CHECK(!should_balance_chunk(&volume,0,&chunks[0]));trim_process(&volume);CHECK(should_balance_chunk(&volume,0,&chunks[0]));cleanup();
+}
+static void relocating_chunk_not_queued(void) {
+    setup(1);chunks[0].list_entry_balance.Flink=(LIST_ENTRY*)1;commit();CHECK(!trim_chunk_pending(&chunks[0])&&!IsListEmpty(&chunks[0].deleting));
+    chunks[0].list_entry_balance.Flink=NULL;chunks[0].reloc=true;commit();CHECK(!trim_chunk_pending(&chunks[0]));cleanup();
+}
 static void initialization_oom(void) {
     InitializeListHead(&volume.chunks);InitializeListHead(&volume.devices);active=&volume;
     fail_at=1;trim_initialize(&volume);CHECK(!volume.trim_state);trim_commit(&volume);trim_process(&volume);trim_drain(&volume);trim_destroy(&volume);CHECK(!pool_live);
 }
 int main(int argc,char** argv) {
     if(argc!=2)return 2;
-    const char* names[]={"deferred-unrelated-open-and-allocation","multiple-commits-one-inflight","pending-cache-view","reclaim-oom-no-resubmit","physical-intersection-excludes-reused-range","queue-memory-ceiling","partial-reclaim-never-serializes-reused-space","removed-device-not-replacement","removal-before-submission","regenerated-device-map-excludes-reservations","queued-shutdown-no-discard","inflight-shutdown-drains-outside-lock","initialization-oom","completion-poll-before-wakeup"};
-    if(!strcmp(argv[1],"--list")) {for(unsigned i=0;i<14;i++)puts(names[i]);for(unsigned i=1;i<=40;i++)printf("preparation-oom-%u\n",i);for(unsigned i=1;i<=20;i++)printf("physical-oom-%u\n",i);for(unsigned m=0;m<3;m++)for(unsigned s=0;s<3;s++)printf("completion-%u-status-%u\n",m,s);return 0;}
-    for(unsigned i=0;i<14;i++)if(!strcmp(argv[1],names[i])){switch(i){case 0:deferred();break;case 1:repeated();break;case 2:cache_view();break;case 3:reclaim_failure();break;case 4:physical();break;case 5:ceiling();break;case 6:partial_reclaim();break;case 7:removed_device();break;case 8:removal_before_submission();break;case 9:regenerated_map();break;case 10:queued_shutdown();break;case 11:inflight_shutdown();break;case 12:initialization_oom();break;case 13:completion_poll_race();break;}return 0;}
+    const char* names[]={"deferred-unrelated-open-and-allocation","multiple-commits-one-inflight","pending-cache-view","reclaim-oom-no-resubmit","physical-intersection-excludes-reused-range","queue-memory-ceiling","partial-reclaim-never-serializes-reused-space","removed-device-not-replacement","removal-before-submission","regenerated-device-map-excludes-reservations","queued-shutdown-no-discard","inflight-shutdown-drains-outside-lock","initialization-oom","completion-poll-before-wakeup","clean-queues-without-wait","merge-failure-first-chunk","merge-failure-second-chunk","balance-excludes-pending","relocating-chunk-not-queued"};
+    if(!strcmp(argv[1],"--list")) {for(unsigned i=0;i<19;i++)puts(names[i]);for(unsigned i=1;i<=40;i++)printf("preparation-oom-%u\n",i);for(unsigned i=1;i<=20;i++)printf("physical-oom-%u\n",i);for(unsigned m=0;m<3;m++)for(unsigned s=0;s<3;s++)printf("completion-%u-status-%u\n",m,s);return 0;}
+    for(unsigned i=0;i<19;i++)if(!strcmp(argv[1],names[i])){switch(i){case 0:deferred();break;case 1:repeated();break;case 2:cache_view();break;case 3:reclaim_failure();break;case 4:physical();break;case 5:ceiling();break;case 6:partial_reclaim();break;case 7:removed_device();break;case 8:removal_before_submission();break;case 9:regenerated_map();break;case 10:queued_shutdown();break;case 11:inflight_shutdown();break;case 12:initialization_oom();break;case 13:completion_poll_race();break;case 14:clean_queues_without_wait();break;case 15:clean_merge_failure(1);break;case 16:clean_merge_failure(2);break;case 17:balance_excludes_pending();break;case 18:relocating_chunk_not_queued();break;}return 0;}
     unsigned a,b;if(sscanf(argv[1],"preparation-oom-%u",&a)==1){preparation_failure(a);return 0;}
     if(sscanf(argv[1],"physical-oom-%u",&a)==1){physical_oom(a);return 0;}
     if(sscanf(argv[1],"completion-%u-status-%u",&a,&b)==2){NTSTATUS status[]={STATUS_SUCCESS,STATUS_IO_DEVICE_ERROR,STATUS_CANCELLED};modes(a,status[b]);return 0;}return 2;

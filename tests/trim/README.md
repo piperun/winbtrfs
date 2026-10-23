@@ -1,66 +1,32 @@
-# TRIM allocation-failure regressions
+# Explicit TRIM allocation-failure regressions
 
-Run from the repository root with Python 3 and GCC supporting
-`-ftrivial-auto-var-init`:
+Run with Python 3 and GCC supporting `-ftrivial-auto-var-init`:
 
 ```sh
 python3 tests/trim/check_trim.py . --build-dir build/trim-tests
-python3 tests/trim/check_trim.py . --init zero --build-dir build/trim-tests-zero
-ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
-  python3 tests/trim/check_trim.py . --sanitize --build-dir build/trim-tests-asan
+python3 tests/trim/check_trim.py . --init zero --sanitize --build-dir build/trim-tests
 ```
 
-Add `--revision 4a8bf1a9` to reproduce before the fix. The baseline passes
-21/169 cases. 146 failures reach an unsignaled wait after every submitted
-IRP has completed: devices skipped after DSM-buffer or IRP allocation failure
-still own a pending slot. A single failing device can leave no submitted I/O
-and no possible future completion to wake the flush thread. The other two are
-the merge-failure cases below. The fixed source passes all 169 cases with
-pattern/zero locals and sanitizers. This addresses the production TRIM hang in
-[upstream issue #815](https://github.com/maharmstone/btrfs/issues/815).
+The 166 scenarios execute the production synchronous `trim_devices` helper
+used for explicit balance discard. The 156-case matrix covers successful
+allocation, DSM-buffer failure and IRP failure for one or three devices,
+plus mixed read-only, missing, unsupported and empty devices. Completion
+orders include inline, deferred FIFO, deferred reverse and mixed timing.
+Controls cover opt-outs, multiple ranges, allocation failure, device errors
+and cancellation. Exact 64-bit offsets, DSM layout, IRP ownership and pool
+cleanup are checked.
 
-`--revision 4a99d1c5^` passes 167/169: when a chunk's space merge failed,
-`clean_space_cache` returned with the volume's `chunk_lock` still held shared,
-and both merge-failure cases stop there.
+The wait model completes all submitted requests before requiring the event
+to be signaled. A skipped device must retire its completion slot; otherwise
+it reports a deterministic hang. Each scenario runs in its own process with
+a five-second test timeout. Production code gains no timeout.
 
-The runner extracts production `clean_space_cache`, TRIM context types,
-`trim_completion`, and the extracted `trim_devices` helper when present.
-Historical sources with all submission code in `flushthread.c` remain supported.
-Allocation and I/O services are deterministic native models; submission and
-completion accounting execute the actual production code.
+Automatic transaction discard is exercised separately by
+`tests/trim-queue/check_trim_queue.py`. Those tests cover nonblocking
+submission, range reservation, transaction merge errors, partial reclaim,
+shutdown and completion races. `tests/free-space/check_free_space.py`
+executes both cache writers with pending reservations and allocation faults.
 
-The 156-case matrix covers all combinations of successful allocation,
-DSM-buffer failure and IRP allocation failure for one or three devices, plus
-mixed eligible, read-only, missing, unsupported and empty devices. Each runs
-with inline completions, deferred FIFO completions, deferred reverse completions
-and mixed inline/deferred completions. Eleven controls cover no work, disabled
-TRIM, the no-TRIM mount option, context-array allocation failure, multiple
-ranges, failed/cancelled device requests and successful space merging before I/O.
-Two merge-failure cases fail the space merge of the first or second of three
-changed chunks. `clean_space_cache` must return the merge's status with the
-volume's and every chunk's lock released, leave the freed ranges of the failed
-chunk and the chunks after it queued, and start no TRIM.
-
-The wait model executes every deferred production completion, then requires
-the event to be signaled with no remaining pending slots. If all possible
-completions have run without signaling the event, it reports the deterministic
-hang immediately. It does not add a timeout to production code. Event signaling
-must not happen while requests remain pending or eligible devices remain
-unvisited. Pool buffers and IRPs must stay alive through completion and be
-released exactly once afterward. Skipped/disabled devices retain or discard
-their queues according to the existing best-effort TRIM behavior.
-
-Checks verify request flags, completion registration on success/error/cancel,
-input lengths, aligned DSM ranges and their exact 64-bit offsets and lengths.
-Layout assertions match the installed MinGW Windows DSM headers. Resource
-ownership, device queue counts, pool ownership, IRP ownership and the volume's
-writable state are checked after each call. Fixture teardown releases only
-the queues that production intentionally retained.
-
-Each case runs in its own process with a five-second timeout and core dumps
-disabled. LeakSanitizer may require execution outside a tracing sandbox.
-These tests do not run real storage drivers, Windows scheduling, kernel pools
-or concurrent kernel threads. Chunk-to-device range mapping and space merging
-are modeled. Debug TRIM emulation is moved unchanged and syntax-checked only;
-its separate write/MDL path is outside these production-TRIM tests. Windows
-runtime testing remains outstanding.
+`--revision` selects historical sources containing the standalone
+`trim_devices` helper. Earlier inline-only implementations require the
+matching historical test runner.

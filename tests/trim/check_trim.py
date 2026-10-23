@@ -43,7 +43,6 @@ start = trim.index("typedef struct {\n    DEVICE_MANAGE_DATA_SET_ATTRIBUTES* dmd
 (out / "completion.inc").write_text(function(trim, "static NTSTATUS __stdcall trim_completion("))
 submission = function(trim, "NTSTATUS trim_devices(") if "NTSTATUS trim_devices(" in trim else ""
 (out / "submission.inc").write_text(submission)
-(out / "clean.inc").write_text(function(flush, "static NTSTATUS clean_space_cache("))
 binary = out / "trim_test"
 flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie"] if args.sanitize else []
 subprocess.run(["gcc", "-std=c11", "-O0", "-g", "-Wall", "-Wextra", "-Werror",

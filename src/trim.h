@@ -19,7 +19,7 @@
 
 #include "btrfs_drv.h"
 
-// Submit queued TRIM ranges after pending free space has been merged.
+// Synchronous discard for explicitly collected unallocated device ranges.
 NTSTATUS trim_devices(device_extension* Vcb);
 
 // Automatic discard queue: commit is serialized by tree_lock; the worker owns

@@ -17,6 +17,7 @@
 
 // Serialization of legacy and tree free-space caches.
 #include "btrfs_drv.h"
+#include "trim.h"
 
 
 static NTSTATUS copy_space_list(LIST_ENTRY* old_list, LIST_ENTRY* new_list) {
@@ -79,6 +80,8 @@ static NTSTATUS update_chunk_cache(device_extension* Vcb, chunk* c, struct btrfs
     }
 
     Status = space_list_merge(&space_list, NULL, &deleting);
+    if (NT_SUCCESS(Status))
+        Status = trim_merge_pending(c, &space_list, NULL);
     if (!NT_SUCCESS(Status))
         goto end;
 
@@ -624,6 +627,8 @@ static NTSTATUS update_chunk_cache_tree(device_extension* Vcb, chunk* c, PIRP Ir
     }
 
     Status = space_list_merge(&space_list, NULL, &c->deleting);
+    if (NT_SUCCESS(Status))
+        Status = trim_merge_pending(c, &space_list, NULL);
     if (!NT_SUCCESS(Status)) {
         while (!IsListEmpty(&space_list)) {
             ExFreePool(CONTAINING_RECORD(RemoveHeadList(&space_list), space, list_entry));

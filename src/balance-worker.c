@@ -18,6 +18,7 @@
 // Balance chunk selection and background worker.
 #include "btrfs_drv.h"
 #include "balance-worker.h"
+#include "trim.h"
 
 static __inline uint64_t get_chunk_dup_type(chunk* c) {
     if (c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID0)
@@ -55,6 +56,9 @@ static uint16_t get_chunk_size_factor(chunk* c) {
 
 static bool should_balance_chunk(device_extension* Vcb, uint8_t sort, chunk* c) {
     btrfs_balance_opts* opts;
+
+    if (trim_chunk_pending(c))
+        return false;
 
     opts = &Vcb->balance.opts[sort];
 
@@ -154,7 +158,7 @@ static NTSTATUS try_consolidation(device_extension* Vcb, uint64_t flags, chunk**
             chunk* c = CONTAINING_RECORD(le, chunk, list_entry);
 
             // FIXME - skip full-size chunks over e.g. 90% full?
-            if (c->chunk_item->type & BTRFS_BLOCK_GROUP_DATA && !c->readonly && c->balance_num != Vcb->balance.balance_num && (!rc || c->used < rc->used))
+            if (c->chunk_item->type & BTRFS_BLOCK_GROUP_DATA && !c->readonly && !trim_chunk_pending(c) && c->balance_num != Vcb->balance.balance_num && (!rc || c->used < rc->used))
                 rc = c;
 
             le = le->Flink;
@@ -287,7 +291,7 @@ static NTSTATUS regenerate_space_list(device_extension* Vcb, device* dev) {
         le = le->Flink;
     }
 
-    return STATUS_SUCCESS;
+    return trim_subtract_device_pending(Vcb, dev);
 }
 
 _Function_class_(KSTART_ROUTINE)

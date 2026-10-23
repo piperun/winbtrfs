@@ -18,6 +18,7 @@
 // Chunk creation, retirement and transaction updates.
 #include "btrfs_drv.h"
 #include "transaction-chunks.h"
+#include "trim.h"
 
 static void regen_bootstrap(device_extension* Vcb) {
     sys_chunk* sc2;
@@ -588,7 +589,7 @@ NTSTATUS update_chunks(device_extension* Vcb, LIST_ENTRY* batchlist,
                 ExReleaseResourceLite(&c->partial_stripes_lock);
             }
 
-            if (c->list_entry_balance.Flink) {
+            if (c->list_entry_balance.Flink || trim_chunk_pending(c)) {
                 release_chunk_lock(c, Vcb);
                 le = le2;
                 continue;

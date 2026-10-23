@@ -5,7 +5,7 @@ static PIRP irps[MAX_DEVICES], queued[MAX_DEVICES];
 static DEVICE_DATA_SET_RANGE expected_ranges[MAX_DEVICES][MAX_RANGES];
 static unsigned range_counts[MAX_DEVICES], faults[MAX_DEVICES];
 static unsigned live, live_irps, eligible, dmdsa_attempts, irp_attempts, batch_attempts;
-static unsigned submitted, completed, pending, queue_count, signals, waits, timing, merge_calls, fail_merge;
+static unsigned submitted, completed, pending, queue_count, signals, waits, timing;
 static unsigned current_slot;
 static bool executing, fail_batch;
 static void* stripe_pool;
@@ -127,13 +127,4 @@ static NTSTATUS KeWaitForSingleObject(KEVENT* event, int reason, int mode, bool 
     }
     CHECK(CONTAINING_RECORD(event, trim_context, Event)->left == 0);
     return STATUS_SUCCESS;
-}
-static void ExAcquireResourceSharedLite(ERESOURCE* lock, bool wait) { CHECK(wait && !lock->held); lock->held = 1; }
-static void ExReleaseResourceLite(ERESOURCE* lock) { CHECK(lock->held == 1); lock->held = 0; }
-static void acquire_chunk_lock(chunk* c, device_extension* volume) { CHECK(volume->chunk_lock.held && !c->held); c->held = 1; }
-static void release_chunk_lock(chunk* c, device_extension* volume) { CHECK(volume->chunk_lock.held && c->held); c->held = 0; }
-static void clean_space_cache_chunk(device_extension* volume, chunk* c) { CHECK(volume->chunk_lock.held && c->held); }
-static NTSTATUS space_list_merge(LIST_ENTRY* space, LIST_ENTRY* size, LIST_ENTRY* deleting) {
-    CHECK(space && size && deleting); merge_calls++;
-    return merge_calls == fail_merge ? STATUS_INSUFFICIENT_RESOURCES : STATUS_SUCCESS;
 }

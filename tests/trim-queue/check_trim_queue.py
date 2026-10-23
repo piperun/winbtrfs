@@ -9,6 +9,10 @@ def function(source,name):
  while depth:depth+=(source[e]=='{')-(source[e]=='}');e+=1
  return source[a:e]+'\n'
 header=(repo/'src/btrfs_drv.h').read_text();end=header.index('} space;')+len('} space;');(out/'types.inc').write_text(header[header.rindex('typedef struct {',0,end):end])
+ioctl=(repo/'src/btrfsioctl.h').read_text();end=ioctl.index('} btrfs_balance_opts;')+len('} btrfs_balance_opts;');start=ioctl.rindex('typedef struct {',0,end)
+(out/'balance-types.inc').write_text('\n'.join(line for line in ioctl.splitlines() if line.startswith('#define BTRFS_BALANCE_OPTS_') or line.startswith('#define BTRFS_AVAIL_ALLOC_BIT_SINGLE'))+'\n'+ioctl[start:end])
+balance=(repo/'src/balance-worker.c').read_text()
+(out/'balance.inc').write_text('\n'.join(function(balance,n) for n in ['static __inline uint64_t get_chunk_dup_type(','static uint16_t get_chunk_size_factor(','static bool should_balance_chunk(']))
 source=(repo/'src/free-space.c').read_text()
 names=['static void order_space_entry(','static void place_space_entry(','static NTSTATUS space_list_add_from(','NTSTATUS space_list_add2(','static void order_space_entries(','NTSTATUS space_list_merge(','NTSTATUS space_list_subtract2(']
 (out/'spaces.inc').write_text('\n'.join(function(source,n) for n in names))
@@ -16,6 +20,8 @@ for src,dest in [('src/trim-state.h','queue-types.inc'),('src/trim-queue.c','que
  path=repo/src
  if not path.exists():raise SystemExit('FAIL: asynchronous discard ownership is not implemented; synchronous baseline blocks ordinary opens (retained lock-regression/results.log)')
  (out/dest).write_text('\n'.join(line for line in path.read_text().splitlines() if not line.startswith('#include') and line!='#pragma once'))
+clean = (repo/'src/trim-mapping.c').read_text()
+(out/'clean.inc').write_text(function(clean, 'NTSTATUS clean_space_cache('))
 flags=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-no-pie'] if args.sanitize else []
 binary=out/'trim_queue_test'
 subprocess.run(['gcc','-std=c11','-O0','-g','-Wall','-Wextra','-Werror',f'-ftrivial-auto-var-init={args.init}',*flags,'-I',str(out),'-I',str(repo/'tests/free-space'),str(Path(__file__).with_name('queue_test.c')),'-o',str(binary)],check=True)

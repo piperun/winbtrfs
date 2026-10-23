@@ -101,6 +101,11 @@ if args.bench:
 (out / "cache.inc").write_text("".join(function(source, marker) for marker in (
     "static NTSTATUS copy_space_list(", "static NTSTATUS update_chunk_cache(",
     "static NTSTATUS update_chunk_cache_tree(")))
+pending = read("src/trim-reservations.c", optional=True)
+if pending:
+    (out / "pending.inc").write_text("typedef struct { LIST_ENTRY list_entry, chunk_entry, ranges; chunk* owner; } trim_chunk;\n" + function(pending, "NTSTATUS trim_merge_pending("))
+else:
+    (out / "pending.inc").write_text("typedef struct { LIST_ENTRY list_entry, chunk_entry, ranges; chunk* owner; } trim_chunk;\nstatic NTSTATUS trim_merge_pending(chunk* c, LIST_ENTRY* l, LIST_ENTRY* s) { (void)c; (void)l; (void)s; return STATUS_SUCCESS; }\n")
 # The loaders add stored entries with the plain add_space_entry, the v1 loader the
 # runs of a bitmap through load_free_space_bitmap. That returned void before it
 # reported failures, so its marker takes any return type. load_cache_chunk runs the

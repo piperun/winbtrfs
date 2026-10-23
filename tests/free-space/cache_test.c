@@ -17,7 +17,7 @@ struct chunk {
     struct btrfs_chunk* chunk_item;
     uint64_t offset;
     fcb* cache;
-    LIST_ENTRY space, space_size, deleting;
+    LIST_ENTRY space, space_size, deleting, pending_trims;
     bool using_fst_bitmaps;
 };
 typedef struct {
@@ -197,6 +197,7 @@ static NTSTATUS update_free_space_info(device_extension* Vcb, chunk* c, uint32_t
 }
 
 #include "space.inc"
+#include "pending.inc"
 #include "cache.inc"
 
 static void build_list(LIST_ENTRY* list, const range* r, size_t count) {
@@ -235,6 +236,7 @@ static void set_up(void) {
     cache_chunk = (chunk){ .chunk_item = &chunk_item, .offset = BASE, .cache = &cache_file };
     build_list(&cache_chunk.space, space_ranges, COUNT(space_ranges));
     InitializeListHead(&cache_chunk.space_size);
+    InitializeListHead(&cache_chunk.pending_trims);
     build_list(&cache_chunk.deleting, freed_ranges, COUNT(freed_ranges));
     header = (struct btrfs_free_space_header){ .num_entries = 99 };
     header_item = (tree_data){ .key = { BTRFS_FREE_SPACE_OBJECTID, 0, BASE },
@@ -328,7 +330,50 @@ static void tree_allocation_failures(void) {
     }
 }
 
+static const range pending_ranges[] = {
+    { BASE + 0x14000, BASE + 0x15000 },
+    { BASE + 0x40000, BASE + 0x41000 },
+};
+static const range pending_union[] = {
+    { BASE + 0x10000, BASE + 0x12000 },
+    { BASE + 0x13000, BASE + 0x15000 },
+    { BASE + 0x16000, BASE + 0x17000 },
+    { BASE + 0x20000, BASE + 0x22000 },
+    { BASE + 0x30000, BASE + 0x31000 },
+    { BASE + 0x40000, BASE + 0x41000 },
+};
+static void pending_written(bool tree_mode, bool fail) {
+    unsigned count = (tree_mode ? TREE_ALLOCATIONS : CACHE_ALLOCATIONS) + 1;
+    for (unsigned k = fail ? 1 : 0; k <= (fail ? count : 0); k++) {
+        set_up();trim_chunk pending = {0};
+        build_list(&pending.ranges, pending_ranges, COUNT(pending_ranges));
+        InsertTailList(&cache_chunk.pending_trims, &pending.chunk_entry);
+        fail_allocation = k;
+        NTSTATUS status = tree_mode ? update_chunk_cache_tree(&volume, &cache_chunk, NULL) : write_cache();
+        if (fail) { CHECK(status == STATUS_INSUFFICIENT_RESOURCES); CHECK(!writes && !insert_count); }
+        else if (tree_mode) {CHECK(status == STATUS_SUCCESS && insert_count == COUNT(pending_union));CHECK(!memcmp(inserted,pending_union,sizeof(pending_union)));}
+        else {
+            CHECK(status == STATUS_SUCCESS && header.num_entries == COUNT(pending_union));
+            const uint8_t* at = written + 2 * sizeof(uint32_t) + sizeof(uint64_t);
+            for(size_t i=0;i<COUNT(pending_union);i++,at+=sizeof(struct btrfs_free_space_entry)) {
+                const struct btrfs_free_space_entry* e=(const void*)at;
+                CHECK(e->offset==pending_union[i].start && e->bytes==pending_union[i].end-pending_union[i].start);
+            }
+        }
+        check_list(&pending.ranges,pending_ranges,COUNT(pending_ranges));
+        free_list(&pending.ranges);RemoveEntryList(&pending.chunk_entry);tear_down("pending reservations");
+    }
+}
+static void pending_cache(void){pending_written(false,false);}
+static void pending_tree(void){pending_written(true,false);}
+static void pending_cache_oom(void){pending_written(false,true);}
+static void pending_tree_oom(void){pending_written(true,true);}
+
 static const struct { const char* name; void (*run)(void); } cases[] = {
+    { "cache-includes-pending-reservations", pending_cache },
+    { "tree-includes-pending-reservations", pending_tree },
+    { "cache-pending-reservation-oom", pending_cache_oom },
+    { "tree-pending-reservation-oom", pending_tree_oom },
     { "update-chunk-cache-written", cache_written },
     { "update-chunk-cache-allocation-failures", cache_allocation_failures },
     { "update-chunk-cache-flush-failure", cache_flush_failure },

@@ -150,6 +150,9 @@ NTSTATUS trim_devices(device_extension* Vcb) {
 
     context.left = 0;
 
+    if (!Vcb->trim || Vcb->options.no_trim)
+        return STATUS_SUCCESS;
+
     le = Vcb->devices.Flink;
     while (le != &Vcb->devices) {
         device* dev = CONTAINING_RECORD(le, device, list_entry);

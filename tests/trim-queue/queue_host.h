@@ -3,7 +3,9 @@
 typedef unsigned POOL_TYPE;
 typedef unsigned KIRQL;
 typedef struct {bool held;} KSPIN_LOCK;
-typedef int32_t LONG;typedef uint32_t ULONG;typedef void* PVOID;
+typedef int32_t LONG;
+#include "balance-types.inc"
+typedef uint32_t ULONG;typedef void* PVOID;
 typedef struct {unsigned held;} ERESOURCE;
 typedef struct {bool signaled;} KEVENT;
 typedef struct {unsigned refs,id,StackSize;} DEVICE_OBJECT,*PDEVICE_OBJECT,FILE_OBJECT,*PFILE_OBJECT;
@@ -15,10 +17,10 @@ typedef NTSTATUS (*COMPLETION)(PDEVICE_OBJECT,PIRP,PVOID);
 typedef struct {unsigned MajorFunction;PFILE_OBJECT FileObject;struct {struct {ULONG IoControlCode,InputBufferLength,OutputBufferLength;} DeviceIoControl;} Parameters;} IO_STACK_LOCATION,*PIO_STACK_LOCATION;
 struct IRP {IO_STACK_LOCATION stack;struct{void* SystemBuffer;}AssociatedIrp;unsigned Flags;void* UserBuffer;IO_STATUS_BLOCK* UserIosb;COMPLETION completion;void* context;bool submitted,completed;};
 typedef struct {LIST_ENTRY list_entry,space,trim_list;PDEVICE_OBJECT devobj;PFILE_OBJECT fileobj;bool trim,readonly;ULONG num_trim_entries;} device;
-struct btrfs_chunk {uint64_t type,stripe_len;uint16_t num_stripes,sub_stripes;struct {uint64_t offset;} stripe[4];};
-struct chunk {LIST_ENTRY list_entry,space,space_size,deleting,pending_trims,list_entry_balance;unsigned held;uint64_t offset;struct btrfs_chunk* chunk_item;device** devices;bool space_changed,reloc;};
+struct btrfs_chunk {uint64_t type,stripe_len,length;uint16_t num_stripes,sub_stripes;struct {uint64_t offset,devid;} stripe[4];};
+struct chunk {LIST_ENTRY list_entry,space,space_size,deleting,pending_trims,list_entry_balance;unsigned held;uint64_t offset,used;struct btrfs_chunk* chunk_item;device** devices;bool space_changed,reloc;};
 struct trim_state;
-typedef struct {LIST_ENTRY devices,chunks;ERESOURCE tree_lock,chunk_lock;bool trim,removing;struct{bool no_trim,no_barrier;}options;struct trim_state* trim_state;}device_extension;
+typedef struct {LIST_ENTRY devices,chunks;ERESOURCE tree_lock,chunk_lock;bool trim,removing;struct{bool no_trim,no_barrier;}options;struct trim_state* trim_state;struct {btrfs_balance_opts opts[3];}balance;}device_extension;
 #define NonPagedPool 0
 #define NotificationEvent 0
 #define Executive 0
@@ -63,3 +65,5 @@ static NTSTATUS trim_merge_pending(chunk*,LIST_ENTRY*,LIST_ENTRY*);
 static void get_raid0_offset(uint64_t a,uint64_t b,uint16_t c,uint64_t* d,uint16_t* e){*d=(a/(b*c))*b+a%b;*e=(uint16_t)((a/b)%c);}
 
 static void poll_during_signal(void);
+
+#define TRACE(...) ((void)0)

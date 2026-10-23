@@ -18,6 +18,7 @@
 // Device removal and unallocated space discard during balance.
 #include "btrfs_drv.h"
 #include "balance-worker.h"
+#include "trim.h"
 #include <mountmgr.h>
 #include <ntddstor.h>
 #include "btrfsioctl.h"
@@ -120,6 +121,7 @@ NTSTATUS finish_removing_device(_Requires_exclusive_lock_held_(_Curr_->tree_lock
     Vcb->superblock.total_bytes -= dev->devitem.total_bytes;
     Vcb->devices_loaded--;
 
+    trim_forget_device(Vcb, dev);
     RemoveEntryList(&dev->list_entry);
 
     // flush
@@ -269,15 +271,11 @@ NTSTATUS finish_removing_device(_Requires_exclusive_lock_held_(_Curr_->tree_lock
 }
 
 void trim_unalloc_space(_Requires_lock_held_(_Curr_->tree_lock) device_extension* Vcb, device* dev) {
-    DEVICE_MANAGE_DATA_SET_ATTRIBUTES* dmdsa;
-    DEVICE_DATA_SET_RANGE* ranges;
-    ULONG datalen, i;
     struct btrfs_key searchkey;
     traverse_ptr tp;
     NTSTATUS Status;
     bool b;
     uint64_t lastoff = 0x100000; // don't TRIM the first megabyte, in case someone has been daft enough to install GRUB there
-    LIST_ENTRY* le;
 
     dev->num_trim_entries = 0;
 
@@ -323,47 +321,6 @@ void trim_unalloc_space(_Requires_lock_held_(_Curr_->tree_lock) device_extension
     if (dev->num_trim_entries == 0)
         return;
 
-    datalen = (ULONG)sector_align(sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES), sizeof(uint64_t)) + (dev->num_trim_entries * sizeof(DEVICE_DATA_SET_RANGE));
-
-    dmdsa = ExAllocatePoolWithTag(PagedPool, datalen, ALLOC_TAG);
-    if (!dmdsa) {
-        ERR("out of memory\n");
-        goto end;
-    }
-
-    dmdsa->Size = sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES);
-    dmdsa->Action = DeviceDsmAction_Trim;
-    dmdsa->Flags = DEVICE_DSM_FLAG_TRIM_NOT_FS_ALLOCATED;
-    dmdsa->ParameterBlockOffset = 0;
-    dmdsa->ParameterBlockLength = 0;
-    dmdsa->DataSetRangesOffset = (ULONG)sector_align(sizeof(DEVICE_MANAGE_DATA_SET_ATTRIBUTES), sizeof(uint64_t));
-    dmdsa->DataSetRangesLength = dev->num_trim_entries * sizeof(DEVICE_DATA_SET_RANGE);
-
-    ranges = (DEVICE_DATA_SET_RANGE*)((uint8_t*)dmdsa + dmdsa->DataSetRangesOffset);
-
-    i = 0;
-    le = dev->trim_list.Flink;
-    while (le != &dev->trim_list) {
-        space* s = CONTAINING_RECORD(le, space, list_entry);
-
-        ranges[i].StartingOffset = s->address;
-        ranges[i].LengthInBytes = s->size;
-        i++;
-
-        le = le->Flink;
-    }
-
-    Status = dev_ioctl(dev->devobj, IOCTL_STORAGE_MANAGE_DATA_SET_ATTRIBUTES, dmdsa, datalen, NULL, 0, true, NULL);
-    if (!NT_SUCCESS(Status))
-        WARN("IOCTL_STORAGE_MANAGE_DATA_SET_ATTRIBUTES returned %08lx\n", Status);
-
-    ExFreePool(dmdsa);
-
-end:
-    while (!IsListEmpty(&dev->trim_list)) {
-        space* s = CONTAINING_RECORD(RemoveHeadList(&dev->trim_list), space, list_entry);
-        ExFreePool(s);
-    }
-
-    dev->num_trim_entries = 0;
+    // Explicit balance discard remains synchronous while allocation is excluded.
+    trim_devices(Vcb);
 }

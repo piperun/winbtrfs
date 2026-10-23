@@ -5,7 +5,6 @@ static const char* scenario;
 #include "services.inc"
 #include "completion.inc"
 #include "submission.inc"
-#include "clean.inc"
 
 enum kind { NORMAL, MIXED, EMPTY, DISABLED, OPT_OUT, NO_ELIGIBLE, CONTEXT_FAILURE, MANY_RANGES, MERGE };
 typedef struct { char name[96]; unsigned count, code, timing; enum kind kind; NTSTATUS status; } test_case;
@@ -43,7 +42,6 @@ static void define_cases(void) {
     add_case("inline-device-errors", 3, 0, 0, NORMAL, STATUS_IO_DEVICE_ERROR);
     add_case("deferred-device-errors-with-allocation-failure", 3, 5, 1, NORMAL, STATUS_IO_DEVICE_ERROR);
     add_case("cancelled-requests-with-allocation-failure", 3, 5, 3, NORMAL, STATUS_CANCELLED);
-    add_case("merge-before-trim", 3, 0, 1, MERGE, STATUS_SUCCESS);
 }
 static void run(const test_case* c) {
     device_extension volume = {.trim = c->kind != DISABLED, .options.no_trim = c->kind == OPT_OUT};
@@ -88,7 +86,7 @@ static void run(const test_case* c) {
     }
     timing = c->timing; fail_batch = c->kind == CONTEXT_FAILURE; completion_status = c->status;
     executing = true;
-    CHECK(clean_space_cache(&volume) == STATUS_SUCCESS);
+    CHECK(trim_devices(&volume) == STATUS_SUCCESS);
     executing = false;
     active_event = NULL;
     CHECK(!pending && submitted == completed && !live_irps && !stripe_pool);
@@ -106,7 +104,6 @@ static void run(const test_case* c) {
     CHECK(batch_attempts == (unsigned)(enabled && eligible));
     CHECK(waits <= 1 && signals <= 1);
     if (!processed) CHECK(!waits && !signals);
-    CHECK(merge_calls == (unsigned)(c->kind == MERGE));
     for (unsigned i = 0; i < c->count; i++) {
         unsigned expected = processed && selected[i] ? 0 : original_counts[i];
         CHECK(devices[i].num_trim_entries == expected);
@@ -122,45 +119,6 @@ static void run(const test_case* c) {
     CHECK(!live);
     active_volume = NULL;
 }
-/* Fails the merge of one of three changed chunks. clean_space_cache must return the
-   merge's status with the volume's and every chunk's lock released, keep the freed
-   ranges of the failed chunk and those after it, and start no TRIM. */
-static void merge_failure(unsigned failing) {
-    device_extension volume = {.trim = true};
-    active_volume = &volume;
-    InitializeListHead(&volume.chunks); InitializeListHead(&volume.devices);
-    DEVICE_OBJECT object = {.id = 0, .StackSize = 4};
-    device dev = {.devobj = &object, .fileobj = &object, .trim = true, .num_trim_entries = 1};
-    InitializeListHead(&dev.trim_list);
-    space* queued_range = allocate(PagedPool, sizeof(*queued_range));
-    InsertTailList(&dev.trim_list, &queued_range->list_entry);
-    InsertTailList(&volume.devices, &dev.list_entry);
-    chunk chunks[3] = {{.space_changed = true}, {.space_changed = true}, {.space_changed = true}};
-    for (unsigned i = 0; i < 3; i++) {
-        InitializeListHead(&chunks[i].space); InitializeListHead(&chunks[i].space_size);
-        InitializeListHead(&chunks[i].deleting);
-        space* freed = allocate(PagedPool, sizeof(*freed));
-        InsertTailList(&chunks[i].deleting, &freed->list_entry);
-        InsertTailList(&volume.chunks, &chunks[i].list_entry);
-    }
-    fail_merge = failing;
-    executing = true;
-    CHECK(clean_space_cache(&volume) == STATUS_INSUFFICIENT_RESOURCES);
-    executing = false;
-    CHECK(!volume.chunk_lock.held);
-    CHECK(merge_calls == failing && !batch_attempts && !dmdsa_attempts && !submitted);
-    for (unsigned i = 0; i < 3; i++) {
-        bool merged = i + 1 < failing;
-        CHECK(!chunks[i].held && chunks[i].space_changed == !merged);
-        CHECK(IsListEmpty(&chunks[i].deleting) == merged);
-        while (!IsListEmpty(&chunks[i].deleting))
-            ExFreePool(CONTAINING_RECORD(RemoveHeadList(&chunks[i].deleting), space, list_entry));
-    }
-    CHECK(dev.num_trim_entries == 1);
-    ExFreePool(CONTAINING_RECORD(RemoveHeadList(&dev.trim_list), space, list_entry));
-    CHECK(!live);
-    active_volume = NULL;
-}
 int main(int argc, char** argv) {
     scenario = "case setup";
     define_cases();
@@ -171,15 +129,6 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[1], cases[i].name) == 0) {
             scenario = cases[i].name;
             run(&cases[i]);
-            return 0;
-        }
-    }
-    static const char* const merge_failures[] = {"merge-failure-first-chunk", "merge-failure-second-chunk"};
-    for (unsigned i = 0; i < 2; i++) {
-        if (list) puts(merge_failures[i]);
-        else if (strcmp(argv[1], merge_failures[i]) == 0) {
-            scenario = merge_failures[i];
-            merge_failure(i + 1);
             return 0;
         }
     }

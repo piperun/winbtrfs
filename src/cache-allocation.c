@@ -17,6 +17,7 @@
 
 // Allocation of legacy free-space cache files.
 #include "btrfs_drv.h"
+#include "trim.h"
 #define CACHE_INCREMENTS 64
 
 static NTSTATUS insert_cache_extent(fcb* fcb, uint64_t start, uint64_t length) {
@@ -90,7 +91,7 @@ static NTSTATUS allocate_cache_chunk(device_extension* Vcb, chunk* c, bool* chan
 
     *changed = false;
 
-    num_entries = 0;
+    num_entries = trim_pending_count(c);
 
     // num_entries is the number of entries in c->space and c->deleting - it might
     // be slightly higher then what we end up writing, but doing it this way is much
