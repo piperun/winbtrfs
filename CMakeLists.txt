@@ -149,6 +149,7 @@ set(SRC_FILES src/balance.c
     src/batch-insert.c
     src/cache-allocation.c
     src/cache-write.c
+    src/volume-lock.c
     src/volume-lifecycle.c
     src/balance-device.c
     src/balance-worker.c
