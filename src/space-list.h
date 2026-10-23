@@ -20,3 +20,8 @@
 #include "btrfs_drv.h"
 
 void order_space_entry(space* s, LIST_ENTRY* list_size);
+
+// Consume each range immediately after its successful merge. A later failure
+// leaves only unreclaimed ranges in the input and both destination lists valid.
+NTSTATUS space_list_reclaim(LIST_ENTRY* list, LIST_ENTRY* list_size,
+                            LIST_ENTRY* ranges, uint64_t limit);

@@ -470,6 +470,36 @@ NTSTATUS space_list_merge(LIST_ENTRY* spacelist, LIST_ENTRY* spacelist_size,
     return Status;
 }
 
+NTSTATUS space_list_reclaim(LIST_ENTRY* list, LIST_ENTRY* list_size,
+                            LIST_ENTRY* ranges, uint64_t limit) {
+    NTSTATUS Status = STATUS_SUCCESS;
+    LIST_ENTRY* start = list->Flink;
+    LIST_ENTRY touched;
+    InitializeListHead(&touched);
+
+    while (!IsListEmpty(ranges)) {
+        space* s = CONTAINING_RECORD(ranges->Flink, space, list_entry);
+        uint64_t size = s->address >= limit ? 0 : min(s->size, limit - s->address);
+        if (size) {
+            space* holder;
+            if (start != list && s->address < CONTAINING_RECORD(start, space, list_entry)->address)
+                start = list->Flink;
+            Status = space_list_add_from(list, list_size, &touched, start,
+                                         s->address, size, NULL, NULL, &holder);
+            if (!NT_SUCCESS(Status))
+                break;
+            start = &holder->list_entry;
+        }
+        // Published ranges must leave the pending cache view before any later
+        // allocation failure can return control to the allocator.
+        RemoveEntryList(&s->list_entry);
+        ExFreePool(s);
+    }
+    if (list_size)
+        order_space_entries(list_size, &touched);
+    return Status;
+}
+
 NTSTATUS space_list_subtract2(LIST_ENTRY* list, LIST_ENTRY* list_size,
                               uint64_t address, uint64_t length, chunk* c,
                               LIST_ENTRY* rollback) {

@@ -1,5 +1,9 @@
 #pragma once
 #include "host.h"
+static size_t list_visits;
+static void* count_list_visit(void* record){list_visits++;return record;}
+#undef CONTAINING_RECORD
+#define CONTAINING_RECORD(p,t,m) ((t*)count_list_visit((char*)(p) - offsetof(t,m)))
 typedef unsigned POOL_TYPE;
 typedef unsigned KIRQL;
 typedef struct {bool held;} KSPIN_LOCK;

@@ -32,7 +32,7 @@ prefix=prefix.replace('void uninit(', 'static void uninit_preamble(').replace(' 
 handoff.append(prefix+'}\n')
 (out/'handoff.inc').write_text('\n'.join(handoff))
 source=(repo/'src/free-space.c').read_text()+(repo/'src/space-list.c').read_text()
-names=['static void order_space_entry(','static void place_space_entry(','static NTSTATUS space_list_add_from(','NTSTATUS space_list_add2(','static void order_space_entries(','NTSTATUS space_list_merge(','NTSTATUS space_list_subtract2(']
+names=['static void order_space_entry(','static void place_space_entry(','static NTSTATUS space_list_add_from(','NTSTATUS space_list_add2(','static void order_space_entries(','NTSTATUS space_list_merge(','NTSTATUS space_list_reclaim(','NTSTATUS space_list_subtract2(']
 (out/'spaces.inc').write_text('\n'.join(function(source,n) for n in names))
 for src,dest in [('src/trim-state.h','queue-types.inc'),('src/trim-queue.c','queue.inc'),('src/trim-reservations.c','reservations.inc'),('src/trim-map-queue.c','mapping.inc')]:
  path=repo/src

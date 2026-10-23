@@ -17,6 +17,7 @@
 
 // Free ranges stay reserved until their immutable discard requests complete.
 #include "trim-state.h"
+#include "space-list.h"
 
 static bool trim_append_range(trim_batch* batch, LIST_ENTRY* head, uint64_t address, uint64_t size) {
     space* s;
@@ -260,17 +261,7 @@ uint64_t trim_pending_count(chunk* c) {
 }
 
 static bool trim_reclaim_ranges(LIST_ENTRY* dest, LIST_ENTRY* sizes, LIST_ENTRY* ranges, uint64_t limit) {
-    while (!IsListEmpty(ranges)) {
-        space* s = CONTAINING_RECORD(ranges->Flink, space, list_entry);
-        uint64_t size = s->address >= limit ? 0 : min(s->size, limit - s->address);
-        if (size && !NT_SUCCESS(space_list_add2(dest, sizes, s->address, size, NULL, NULL)))
-            return false;
-        // Remove each published range immediately. A later allocation failure
-        // must not leave already reusable addresses in the pending cache view.
-        RemoveEntryList(&s->list_entry);
-        ExFreePool(s);
-    }
-    return true;
+    return NT_SUCCESS(space_list_reclaim(dest, sizes, ranges, limit));
 }
 
 bool trim_reclaim_batch(device_extension* Vcb, trim_batch* batch) {
