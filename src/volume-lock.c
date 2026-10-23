@@ -18,6 +18,7 @@
 // Volume cache flushing and exclusive lock ownership.
 #include "btrfs_drv.h"
 #include "volume-lock.h"
+#include "trim.h"
 
 void flush_fcb_caches(device_extension* Vcb) {
     LIST_ENTRY* le;
@@ -39,6 +40,7 @@ NTSTATUS lock_volume(device_extension* Vcb, PIRP Irp) {
     NTSTATUS Status;
     KIRQL irql;
     bool lock_paused_balance = false;
+    bool trim_paused = false;
 
     TRACE("FSCTL_LOCK_VOLUME\n");
 
@@ -88,12 +90,19 @@ NTSTATUS lock_volume(device_extension* Vcb, PIRP Irp) {
 
     free_trees(Vcb);
 
+    if (NT_SUCCESS(Status)) {
+        trim_pause_locked(Vcb);
+        trim_paused = true;
+    }
+
     ExReleaseResourceLite(&Vcb->tree_lock);
 
     if (!NT_SUCCESS(Status)) {
         ERR("do_write returned %08lx\n", Status);
         goto end;
     }
+
+    trim_wait_idle(Vcb);
 
     IoAcquireVpbSpinLock(&irql);
 
@@ -117,6 +126,8 @@ NTSTATUS lock_volume(device_extension* Vcb, PIRP Irp) {
     Status = STATUS_SUCCESS;
 
 end:
+    if (!NT_SUCCESS(Status) && trim_paused)
+        trim_resume(Vcb);
     if (!NT_SUCCESS(Status))
         FsRtlNotifyVolumeEvent(IrpSp->FileObject, FSRTL_VOLUME_LOCK_FAILED);
 
@@ -133,6 +144,8 @@ void do_unlock_volume(device_extension* Vcb) {
     Vcb->locked_fileobj = NULL;
 
     IoReleaseVpbSpinLock(irql);
+
+    trim_resume(Vcb);
 
     if (Vcb->lock_paused_balance)
         KeSetEvent(&Vcb->balance.event, 0, false);

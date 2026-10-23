@@ -164,15 +164,25 @@ static void relocating_chunk_not_queued(void) {
     setup(1);chunks[0].list_entry_balance.Flink=(LIST_ENTRY*)1;commit();CHECK(!trim_chunk_pending(&chunks[0])&&!IsListEmpty(&chunks[0].deleting));
     chunks[0].list_entry_balance.Flink=NULL;chunks[0].reloc=true;commit();CHECK(!trim_chunk_pending(&chunks[0]));cleanup();
 }
+static void volume_lock_quiesces_discard(void) {
+    setup(1);commit();trim_process(&volume);range(&chunks[0].deleting,0x14000,0x1000);commit();
+    CHECK(submitted==1&&pending_count==1);
+    ExAcquireResourceExclusiveLite(&volume.tree_lock,true);trim_pause_locked(&volume);ExReleaseResourceLite(&volume.tree_lock);
+    trim_wait_idle(&volume);CHECK(!pending_count&&waits==1);trim_process(&volume);trim_process(&volume);CHECK(submitted==1);
+    range(&chunks[0].deleting,0x16000,0x1000);commit();CHECK(!IsListEmpty(&chunks[0].deleting));
+    /* Handle cleanup resumes while holding the tree resource shared. */
+    ExAcquireResourceSharedLite(&volume.tree_lock,true);trim_resume(&volume);ExReleaseResourceLite(&volume.tree_lock);
+    trim_process(&volume);CHECK(submitted==1);cleanup();
+}
 static void initialization_oom(void) {
     InitializeListHead(&volume.chunks);InitializeListHead(&volume.devices);active=&volume;
     fail_at=1;trim_initialize(&volume);CHECK(!volume.trim_state);trim_commit(&volume);trim_process(&volume);trim_drain(&volume);trim_destroy(&volume);CHECK(!pool_live);
 }
 int main(int argc,char** argv) {
     if(argc!=2)return 2;
-    const char* names[]={"deferred-unrelated-open-and-allocation","multiple-commits-one-inflight","pending-cache-view","reclaim-oom-no-resubmit","physical-intersection-excludes-reused-range","queue-memory-ceiling","partial-reclaim-never-serializes-reused-space","removed-device-not-replacement","removal-before-submission","regenerated-device-map-excludes-reservations","queued-shutdown-no-discard","inflight-shutdown-drains-outside-lock","initialization-oom","completion-poll-before-wakeup","clean-queues-without-wait","merge-failure-first-chunk","merge-failure-second-chunk","balance-excludes-pending","relocating-chunk-not-queued"};
-    if(!strcmp(argv[1],"--list")) {for(unsigned i=0;i<19;i++)puts(names[i]);for(unsigned i=1;i<=40;i++)printf("preparation-oom-%u\n",i);for(unsigned i=1;i<=20;i++)printf("physical-oom-%u\n",i);for(unsigned m=0;m<3;m++)for(unsigned s=0;s<3;s++)printf("completion-%u-status-%u\n",m,s);return 0;}
-    for(unsigned i=0;i<19;i++)if(!strcmp(argv[1],names[i])){switch(i){case 0:deferred();break;case 1:repeated();break;case 2:cache_view();break;case 3:reclaim_failure();break;case 4:physical();break;case 5:ceiling();break;case 6:partial_reclaim();break;case 7:removed_device();break;case 8:removal_before_submission();break;case 9:regenerated_map();break;case 10:queued_shutdown();break;case 11:inflight_shutdown();break;case 12:initialization_oom();break;case 13:completion_poll_race();break;case 14:clean_queues_without_wait();break;case 15:clean_merge_failure(1);break;case 16:clean_merge_failure(2);break;case 17:balance_excludes_pending();break;case 18:relocating_chunk_not_queued();break;}return 0;}
+    const char* names[]={"deferred-unrelated-open-and-allocation","multiple-commits-one-inflight","pending-cache-view","reclaim-oom-no-resubmit","physical-intersection-excludes-reused-range","queue-memory-ceiling","partial-reclaim-never-serializes-reused-space","removed-device-not-replacement","removal-before-submission","regenerated-device-map-excludes-reservations","queued-shutdown-no-discard","inflight-shutdown-drains-outside-lock","initialization-oom","completion-poll-before-wakeup","clean-queues-without-wait","merge-failure-first-chunk","merge-failure-second-chunk","balance-excludes-pending","relocating-chunk-not-queued","volume-lock-quiesces-discard"};
+    if(!strcmp(argv[1],"--list")) {for(unsigned i=0;i<20;i++)puts(names[i]);for(unsigned i=1;i<=40;i++)printf("preparation-oom-%u\n",i);for(unsigned i=1;i<=20;i++)printf("physical-oom-%u\n",i);for(unsigned m=0;m<3;m++)for(unsigned s=0;s<3;s++)printf("completion-%u-status-%u\n",m,s);return 0;}
+    for(unsigned i=0;i<20;i++)if(!strcmp(argv[1],names[i])){switch(i){case 0:deferred();break;case 1:repeated();break;case 2:cache_view();break;case 3:reclaim_failure();break;case 4:physical();break;case 5:ceiling();break;case 6:partial_reclaim();break;case 7:removed_device();break;case 8:removal_before_submission();break;case 9:regenerated_map();break;case 10:queued_shutdown();break;case 11:inflight_shutdown();break;case 12:initialization_oom();break;case 13:completion_poll_race();break;case 14:clean_queues_without_wait();break;case 15:clean_merge_failure(1);break;case 16:clean_merge_failure(2);break;case 17:balance_excludes_pending();break;case 18:relocating_chunk_not_queued();break;case 19:volume_lock_quiesces_discard();break;}return 0;}
     unsigned a,b;if(sscanf(argv[1],"preparation-oom-%u",&a)==1){preparation_failure(a);return 0;}
     if(sscanf(argv[1],"physical-oom-%u",&a)==1){physical_oom(a);return 0;}
     if(sscanf(argv[1],"completion-%u-status-%u",&a,&b)==2){NTSTATUS status[]={STATUS_SUCCESS,STATUS_IO_DEVICE_ERROR,STATUS_CANCELLED};modes(a,status[b]);return 0;}return 2;

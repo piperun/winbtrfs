@@ -211,3 +211,5 @@ static void initialize_changed_extents(chunk* c) {
     CHECK(IsListEmpty(&c->changed_extents));
     InitializeListHead(&c->changed_extents);
 }
+
+void trim_destroy(device_extension* Vcb) {CHECK(Vcb==&volume);}

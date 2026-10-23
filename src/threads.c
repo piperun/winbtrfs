@@ -16,6 +16,7 @@
  * along with WinBtrfs.  If not, see <http://www.gnu.org/licenses/>. */
 
 #include "btrfs_drv.h"
+#include "trim.h"
 
 uint32_t get_num_of_processors() {
     KAFFINITY p = KeQueryActiveProcessors();
@@ -132,24 +133,37 @@ void __stdcall flush_thread(void* context) {
     DEVICE_OBJECT* devobj = context;
     device_extension* Vcb = devobj->DeviceExtension;
     LARGE_INTEGER due_time;
+    PVOID wait_objects[2];
+    ULONG wait_count = 1;
+    NTSTATUS wake;
 
     ObReferenceObject(devobj);
 
     due_time.QuadPart = (uint64_t)Vcb->options.flush_interval * -10000000;
 
+    wait_objects[0] = &Vcb->flush_thread_timer;
+    wait_objects[1] = trim_event(Vcb);
+    if (wait_objects[1])
+        wait_count = 2;
+
     // Rearming after do_flush can overwrite the shutdown timer wakeup.
     while (!Vcb->removing) {
-        KeWaitForSingleObject(&Vcb->flush_thread_timer, Executive, KernelMode, false, NULL);
+        wake = KeWaitForMultipleObjects(wait_count, wait_objects, WaitAny, Executive, KernelMode, false, NULL, NULL);
 
         if (!(devobj->Vpb->Flags & VPB_MOUNTED) || Vcb->removing)
             break;
 
-        if (!Vcb->locked)
-            do_flush(Vcb);
+        if (wake == STATUS_WAIT_0) {
+            if (!Vcb->locked)
+                do_flush(Vcb);
+            KeSetTimer(&Vcb->flush_thread_timer, due_time, NULL);
+        }
 
-        KeSetTimer(&Vcb->flush_thread_timer, due_time, NULL);
+        // Completion and queue wakeups never postpone the transaction timer.
+        trim_process(Vcb);
     }
 
+    trim_drain(Vcb);
     ObDereferenceObject(devobj);
     KeCancelTimer(&Vcb->flush_thread_timer);
 

@@ -15,6 +15,7 @@ static void acquire_chunk_lock(chunk* c,device_extension* v){CHECK(v->chunk_lock
 static void release_chunk_lock(chunk* c,device_extension* v){CHECK(v->chunk_lock.held&&c->held);c->held=0;}
 static void ObReferenceObject(void* p){CHECK(p);((DEVICE_OBJECT*)p)->refs++;references++;}
 static void ObDereferenceObject(void* p){CHECK(p&&((DEVICE_OBJECT*)p)->refs&&references);((DEVICE_OBJECT*)p)->refs--;references--;}
+static LONG InterlockedIncrement(volatile LONG* p){return ++*p;}
 static LONG InterlockedDecrement(volatile LONG* p){CHECK(*p>0);return --*p;}
 
 static void KeInitializeEvent(KEVENT* e,int t,bool b){CHECK(t==NotificationEvent);e->signaled=b;}

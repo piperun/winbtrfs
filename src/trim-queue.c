@@ -63,6 +63,7 @@ void trim_initialize(device_extension* Vcb) {
     InitializeListHead(&state->batches);
     KeInitializeEvent(&state->event, NotificationEvent, false);
     KeInitializeSpinLock(&state->completion_lock);
+    KeInitializeEvent(&state->idle, NotificationEvent, true);
     state->bytes = sizeof(*state);
     Vcb->trim_state = state;
 }
@@ -86,7 +87,7 @@ void trim_commit(device_extension* Vcb) {
     LIST_ENTRY* le;
     bool ready = true;
 
-    if (!state || state->stopping || Vcb->removing || !Vcb->trim || Vcb->options.no_trim)
+    if (!state || state->stopping || state->pauses || Vcb->removing || !Vcb->trim || Vcb->options.no_trim)
         goto done;
     if (sizeof(*batch) > TRIM_QUEUE_LIMIT - state->bytes)
         goto done;
@@ -148,8 +149,10 @@ static NTSTATUS __stdcall trim_batch_completion(PDEVICE_OBJECT DeviceObject, PIR
     // A poller cannot observe final completion until all callback accesses to
     // the context and its wake event have finished.
     KeAcquireSpinLock(&state->completion_lock, &irql);
-    if (InterlockedDecrement(&batch->left) == 0)
+    if (InterlockedDecrement(&batch->left) == 0) {
+        KeSetEvent(&state->idle, 0, false);
         KeSetEvent(&state->event, 0, false);
+    }
     KeReleaseSpinLock(&state->completion_lock, irql);
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
@@ -198,10 +201,12 @@ void trim_process(device_extension* Vcb) {
             }
             ExReleaseResourceLite(&Vcb->chunk_lock);
         }
-        if (!IsListEmpty(&state->batches) && !state->stopping && !Vcb->removing) {
+        if (!IsListEmpty(&state->batches) && !state->stopping && !state->pauses && !Vcb->removing) {
             batch = CONTAINING_RECORD(state->batches.Flink, trim_batch, list_entry);
             if (!batch->submitted) {
                 batch->submitted = true;
+                batch->left = 1;
+                KeClearEvent(&state->idle);
                 submit = batch;
             }
         }
@@ -209,6 +214,38 @@ void trim_process(device_extension* Vcb) {
     ExReleaseResourceLite(&Vcb->tree_lock);
     if (submit)
         trim_submit_batch(submit);
+}
+
+void trim_pause_locked(device_extension* Vcb) {
+    LIST_ENTRY* le;
+    trim_state* state = Vcb->trim_state;
+    if (!state)
+        return;
+    InterlockedIncrement(&state->pauses);
+    // Queued addresses must never be discarded after a raw volume writer has
+    // acquired the lock. Keep their free-range records solely for reclamation.
+    for (le = state->batches.Flink; le != &state->batches; le = le->Flink) {
+        trim_batch* batch = CONTAINING_RECORD(le, trim_batch, list_entry);
+        if (!batch->submitted) {
+            batch->submitted = true;
+            batch->left = 0;
+        }
+    }
+    KeSetEvent(&state->event, 0, false);
+}
+
+void trim_wait_idle(device_extension* Vcb) {
+    if (Vcb->trim_state)
+        KeWaitForSingleObject(&Vcb->trim_state->idle, Executive, KernelMode, false, NULL);
+}
+
+void trim_resume(device_extension* Vcb) {
+    trim_state* state = Vcb->trim_state;
+    if (!state)
+        return;
+    // Handle cleanup may already own tree_lock shared; never upgrade it here.
+    InterlockedDecrement(&state->pauses);
+    KeSetEvent(&state->event, 0, false);
 }
 
 void trim_forget_device(device_extension* Vcb, device* dev) {

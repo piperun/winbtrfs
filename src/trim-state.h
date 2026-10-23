@@ -65,9 +65,11 @@ struct trim_batch {
 
 typedef struct trim_state {
     KEVENT event;
+    KEVENT idle;
     KSPIN_LOCK completion_lock;
     LIST_ENTRY batches;
     size_t bytes;
+    volatile LONG pauses;
     bool stopping;
 } trim_state;
 

@@ -35,3 +35,9 @@ NTSTATUS trim_merge_pending(chunk* c, LIST_ENTRY* list, LIST_ENTRY* sizes);
 uint64_t trim_pending_count(chunk* c);
 void trim_forget_device(device_extension* Vcb, device* dev);
 NTSTATUS trim_subtract_device_pending(device_extension* Vcb, device* dev);
+
+// Pause while holding tree_lock exclusively, then wait with no volume resources.
+// The matching resume is safe from handle cleanup's shared-resource scope.
+void trim_pause_locked(device_extension* Vcb);
+void trim_wait_idle(device_extension* Vcb);
+void trim_resume(device_extension* Vcb);

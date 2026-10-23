@@ -17,6 +17,7 @@
 
 // Mounted volume teardown after background worker termination.
 #include "btrfs_drv.h"
+#include "trim.h"
 
 
 void uninit(_In_ device_extension* Vcb) {
@@ -91,6 +92,7 @@ void uninit(_In_ device_extension* Vcb) {
         WARN("registry_mark_volume_unmounted returned %08lx\n", Status);
 
     stop_flush_thread(Vcb);
+    trim_destroy(Vcb);
 
     stop_calc_threads(Vcb);
 

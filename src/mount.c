@@ -22,6 +22,7 @@
 
 #include "mount.h"
 #include "mount-cleanup.h"
+#include "trim.h"
 #include "notify.h"
 #include "crc32c.h"
 #include <mountdev.h>
@@ -844,6 +845,7 @@ NTSTATUS mount_vol(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
 
     KeInitializeTimer(&Vcb->flush_thread_timer);
     KeInitializeEvent(&Vcb->flush_thread_finished, NotificationEvent, false);
+    trim_initialize(Vcb);
 
     InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
 

@@ -16,6 +16,9 @@
 #define TRACE(...) ((void)0)
 #define NT_SUCCESS(s) ((s) >= 0)
 #define STATUS_SUCCESS 0
+#define STATUS_WAIT_0 0
+#define WaitAny 0
+typedef void* PVOID;
 #define STATUS_INSUFFICIENT_RESOURCES (-1)
 #define TEST_FAILURE (-42)
 #define SYNCHRONIZE 0x100000u
@@ -75,6 +78,9 @@ static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static _Thread_local HANDLE self;
 static struct thread_handle handles[8];
 static unsigned int attempts, created, joins, closes, frees, flushes;
+static unsigned int periodic_arms, trim_calls, trim_drains;
+static KEVENT trim_work;
+static bool trim_ready;
 static unsigned int processors = 4;
 static int failure_at = -1;
 static bool fail_allocation, allow_start, allow_termination, block_work, allow_work;
@@ -125,6 +131,7 @@ static void KeSetEvent(KEVENT* event, int priority, bool wait) {
     event->signaled = true;
     pthread_cond_broadcast(&event->condition);
     pthread_mutex_unlock(&event->mutex);
+    pthread_mutex_lock(&monitor);pthread_cond_broadcast(&changed);pthread_mutex_unlock(&monitor);
 }
 static void KeWaitForSingleObject(KEVENT* event, int reason, int mode, bool alertable, void* timeout) {
     CHECK(event->initialized && reason == Executive && mode == KernelMode && !alertable && timeout == NULL);
@@ -147,6 +154,21 @@ static void KeWaitForSingleObject(KEVENT* event, int reason, int mode, bool aler
         pthread_cond_wait(&event->condition, &event->mutex);
     pthread_mutex_unlock(&event->mutex);
 }
+NTSTATUS KeWaitForMultipleObjects(ULONG count,PVOID* objects,int type,int reason,int mode,bool alert,void* timeout,void* blocks) {
+    CHECK(count>=1&&count<=2&&type==WaitAny&&reason==Executive&&mode==KernelMode&&!alert&&!timeout&&!blocks);
+    pthread_mutex_lock(&monitor);
+    for(;;) {
+        for(ULONG i=0;i<count;i++) {
+            KEVENT* e=objects[i];CHECK(e->initialized);pthread_mutex_lock(&e->mutex);bool signaled=e->signaled;pthread_mutex_unlock(&e->mutex);
+            if(signaled){pthread_mutex_unlock(&monitor);return (NTSTATUS)i;}
+        }
+        pthread_cond_wait(&changed,&monitor);
+    }
+}
+void trim_initialize(device_extension* v){CHECK(v==&volume);KeInitializeEvent(&trim_work,NotificationEvent,false);trim_ready=true;}
+KEVENT* trim_event(device_extension* v){CHECK(v==&volume);return trim_ready?&trim_work:NULL;}
+void trim_process(device_extension* v){CHECK(v==&volume);pthread_mutex_lock(&trim_work.mutex);trim_work.signaled=false;pthread_mutex_unlock(&trim_work.mutex);pthread_mutex_lock(&monitor);trim_calls++;pthread_cond_broadcast(&changed);pthread_mutex_unlock(&monitor);}
+void trim_drain(device_extension* v){CHECK(v==&volume);if(trim_ready)trim_drains++;}
 static bool KeSetTimer(KTIMER* timer, LARGE_INTEGER due, void* dpc) {
     CHECK(timer->initialized && dpc == NULL);
     if (due.QuadPart == 0)
@@ -155,6 +177,7 @@ static bool KeSetTimer(KTIMER* timer, LARGE_INTEGER due, void* dpc) {
         /* Initial arming must happen only once the volume is published. */
         CHECK(vpb.Flags & VPB_MOUNTED);
         CHECK(created == processors + 1);
+        pthread_mutex_lock(&monitor);periodic_arms++;pthread_cond_broadcast(&changed);pthread_mutex_unlock(&monitor);
         pthread_mutex_lock(&timer->mutex);
         timer->signaled = false;
         pthread_mutex_unlock(&timer->mutex);
@@ -200,7 +223,7 @@ static void calc_thread_main(device_extension* vcb, void* job) {
 }
 static void do_flush(device_extension* vcb) {
     CHECK(vcb == &volume);
-    flushes++;
+    pthread_mutex_lock(&monitor);flushes++;pthread_cond_broadcast(&changed);pthread_mutex_unlock(&monitor);
     if (!strcmp(scenario, "flush-rearm")) {
         /* Model removal and its wakeup arriving after the worker checked
          * removing, while do_flush was running. The next periodic rearm
@@ -325,7 +348,20 @@ int main(int argc, char** argv) {
     block_work = strcmp(scenario, "busy") == 0;
     if (!strcmp(scenario, "single"))
         processors = 1;
-    if (!strcmp(scenario, "allocation")) {
+    if (!strcmp(scenario,"trim-deadline") || !strcmp(scenario,"trim-locked")) {
+        CHECK(activate_mount()==STATUS_SUCCESS);volume.locked=!strcmp(scenario,"trim-locked");
+        pthread_mutex_lock(&monitor);allow_start=true;pthread_cond_broadcast(&changed);pthread_mutex_unlock(&monitor);
+        KeSetEvent(&trim_work,0,false);
+        pthread_mutex_lock(&monitor);while(trim_calls<1)pthread_cond_wait(&changed,&monitor);CHECK(periodic_arms==1&&flushes==0);pthread_mutex_unlock(&monitor);
+        for(unsigned i=0;i<3;i++){
+            LARGE_INTEGER now={0};KeSetTimer(&volume.flush_thread_timer,now,NULL);
+            pthread_mutex_lock(&monitor);while(trim_calls<i+2)pthread_cond_wait(&changed,&monitor);
+            CHECK(periodic_arms==i+2&&flushes==(volume.locked?0:i+1));pthread_mutex_unlock(&monitor);
+        }
+        KeSetEvent(&trim_work,0,false);
+        pthread_mutex_lock(&monitor);while(trim_calls<5)pthread_cond_wait(&changed,&monitor);CHECK(periodic_arms==4);pthread_mutex_unlock(&monitor);
+        volume.removing=true;stop_volume_threads(&volume);CHECK(trim_drains==1);check_clean(processors+1,true);
+    } else if (!strcmp(scenario, "allocation")) {
         fail_allocation = true;
         CHECK(create_calc_threads(&device) == STATUS_INSUFFICIENT_RESOURCES);
         check_clean(0, false);

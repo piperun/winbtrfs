@@ -17,9 +17,12 @@
 
 /* Cleanup for an unpublished volume after mount failure. */
 #include "mount-cleanup.h"
+#include "trim.h"
 
 void cleanup_failed_mount(device_extension* Vcb, fcb* root_fcb, bool init_lookaside) {
     LIST_ENTRY* le;
+
+    trim_destroy(Vcb);
 
     if (Vcb->dirty_fcbs.Flink) {
         while (!IsListEmpty(&Vcb->dirty_fcbs)) {

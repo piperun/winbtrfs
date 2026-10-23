@@ -67,3 +67,7 @@ static void get_raid0_offset(uint64_t a,uint64_t b,uint16_t c,uint64_t* d,uint16
 static void poll_during_signal(void);
 
 #define TRACE(...) ((void)0)
+
+void trim_pause_locked(device_extension*);
+void trim_wait_idle(device_extension*);
+void trim_resume(device_extension*);

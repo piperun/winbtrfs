@@ -89,7 +89,7 @@ subprocess.run(["gcc", "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Wextr
                 "-O1", "-g", "-pthread", *flags, "-I", str(out),
                 str(Path(__file__).with_name("threads_test.c")), "-o", str(binary)], check=True)
 cases = ["allocation", "empty", "success", "single", "busy", "termination", "restart",
-         "mount-success", "mount-allocation", "flush-failure", "flush-rearm"]
+         "mount-success", "mount-allocation", "flush-failure", "flush-rearm", "trim-deadline", "trim-locked"]
 cases += [f"calc-failure-{i}" for i in range(4)]
 cases += [f"mount-failure-{i}" for i in range(4)]
 failed = 0
