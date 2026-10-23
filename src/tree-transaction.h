@@ -34,10 +34,6 @@ typedef struct {
 static_assert(sizeof(EXTENT_ITEM_SKINNY_METADATA) == 33, "EXTENT_ITEM_SKINNY_METADATA has wrong size");
 
 NTSTATUS update_tree_extents(device_extension* Vcb, tree* t, PIRP Irp);
-
-
-_Function_class_(IO_COMPLETION_ROUTINE)
-static NTSTATUS __stdcall write_completion(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID conptr);
 NTSTATUS reduce_tree_extent(device_extension* Vcb, uint64_t address, tree* t,
                                    uint64_t parent_root, PIRP Irp);
 NTSTATUS do_splits(device_extension* Vcb, PIRP Irp);
