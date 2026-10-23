@@ -40,6 +40,7 @@ typedef struct _device_extension {
     bool direct_mount;
     LONG page_file_count;
     bool trim;
+    struct trim_state* trim_state;
     PFILE_OBJECT locked_fileobj;
     fcb* volume_fcb;
     fcb* dummy_fcb;

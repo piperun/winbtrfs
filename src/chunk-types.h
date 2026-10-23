@@ -32,6 +32,7 @@ typedef struct {
     LIST_ENTRY space;
     LIST_ENTRY space_size;
     LIST_ENTRY deleting;
+    LIST_ENTRY pending_trims;
     LIST_ENTRY changed_extents;
     struct changed_extent* changed_extents_root;
     LIST_ENTRY range_locks;

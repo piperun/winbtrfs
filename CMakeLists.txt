@@ -152,6 +152,9 @@ set(SRC_FILES src/balance.c
     src/volume-lifecycle.c
     src/balance-device.c
     src/balance-worker.c
+    src/trim-queue.c
+    src/trim-reservations.c
+    src/trim-map-queue.c
     src/trim.c
     src/volume.c
     src/volume-ioctl.c

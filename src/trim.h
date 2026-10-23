@@ -21,3 +21,17 @@
 
 // Submit queued TRIM ranges after pending free space has been merged.
 NTSTATUS trim_devices(device_extension* Vcb);
+
+// Automatic discard queue: commit is serialized by tree_lock; the worker owns
+// submission, reclamation and final draining outside volume resource waits.
+void trim_initialize(device_extension* Vcb);
+void trim_destroy(device_extension* Vcb);
+KEVENT* trim_event(device_extension* Vcb);
+void trim_commit(device_extension* Vcb);
+void trim_process(device_extension* Vcb);
+void trim_drain(device_extension* Vcb);
+bool trim_chunk_pending(const chunk* c);
+NTSTATUS trim_merge_pending(chunk* c, LIST_ENTRY* list, LIST_ENTRY* sizes);
+uint64_t trim_pending_count(chunk* c);
+void trim_forget_device(device_extension* Vcb, device* dev);
+NTSTATUS trim_subtract_device_pending(device_extension* Vcb, device* dev);
