@@ -33,7 +33,7 @@ def block(source, start):
         end += 1
     return source[start:end]
 
-btrfs = read("src/btrfs.c")
+btrfs = read("src/btrfs.c") + read("src/volume-lifecycle.c", optional=True)
 mount_source = read("src/mount.c", optional=True) or btrfs
 mount = block(mount_source, mount_source.index("NTSTATUS mount_vol("))
 device_start = mount.index("    dev = ExAllocatePoolWithTag(")

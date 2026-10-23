@@ -26,6 +26,7 @@ def read(path, optional=False):
     return p.read_text() if p.exists() or not optional else ""
 
 def function(source, marker):
+    if marker not in source and marker.startswith("static "): marker = marker[7:]
     start = source.index(marker)
     brace = source.index("{", start)
     end, depth = brace + 1, 1
@@ -34,7 +35,7 @@ def function(source, marker):
         end += 1
     return source[start:end] + "\n"
 
-flush = read("src/flushthread.c")
+flush = read("src/flushthread.c") + read("src/trim-mapping.c", optional=True)
 trim = read("src/trim.c", optional=True) or flush
 end = trim.index("} trim_context;") + len("} trim_context;")
 start = trim.index("typedef struct {\n    DEVICE_MANAGE_DATA_SET_ATTRIBUTES* dmdsa;")

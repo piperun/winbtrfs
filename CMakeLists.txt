@@ -144,6 +144,14 @@ set(SRC_FILES src/balance.c
     src/threads.c
     src/treefuncs.c
     src/rollback.c
+    src/trim-mapping.c
+    src/transaction-chunks.c
+    src/batch-insert.c
+    src/cache-allocation.c
+    src/cache-write.c
+    src/volume-lifecycle.c
+    src/balance-device.c
+    src/balance-worker.c
     src/trim.c
     src/volume.c
     src/volume-ioctl.c

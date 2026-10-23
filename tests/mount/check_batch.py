@@ -14,6 +14,7 @@ args = parser.parse_args()
 repo, out = args.repo.resolve(), args.build_dir.resolve()
 out.mkdir(parents=True, exist_ok=True)
 def block(source, marker):
+    if marker not in source and marker.startswith("static "): marker = marker[7:]
     start = source.index(marker)
     end, depth = source.index("{", start) + 1, 1
     while depth:
@@ -30,8 +31,8 @@ collision = (repo / "src/batch-collision.c").read_text()
 (out / "batch_commit.inc").write_text("".join(block(source, marker) for marker in (
     "static NTSTATUS find_tree_end(", "void clear_batch_list(", "static NTSTATUS commit_batch_list_root(", "NTSTATUS commit_batch_list(")))
 (out / "batch_collision.inc").write_text("".join(block(collision, "NTSTATUS " + name + "(") for name in ("add_delete_inode_extref", "handle_batch_collision")))
-producer = (repo / "src/flushthread.c").read_text()
-producer_start = producer.rindex("static NTSTATUS insert_tree_item_batch(")
+producer = "\n".join((repo / path).read_text() for path in ["src/flushthread.c", "src/transaction-chunks.c", "src/batch-insert.c"] if (repo / path).exists())
+producer_start = producer.rindex("NTSTATUS insert_tree_item_batch(")
 limit = next(line for line in producer.splitlines() if line.startswith("#define BATCH_ITEM_LIMIT "))
 (out / "batch_producer.inc").write_text(limit + "\n" + block(producer, "static NTSTATUS split_batch_item_list(") +
     block(producer[producer_start:], "static NTSTATUS insert_tree_item_batch("))

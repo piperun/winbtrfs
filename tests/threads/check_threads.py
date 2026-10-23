@@ -32,7 +32,7 @@ def function(source, marker):
         end += 1
     return source[start:end] + "\n"
 
-btrfs = read("src/btrfs.c")
+btrfs = read("src/btrfs.c") + read("src/volume-lifecycle.c")
 lifecycle = read("src/threads.c") or btrfs
 flush = read("src/threads.c") or read("src/flushthread.c")
 header = read("src/btrfs_drv.h")

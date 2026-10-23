@@ -16,6 +16,7 @@ repo, out = args.repo.resolve(), args.build_dir.resolve()
 out.mkdir(parents=True, exist_ok=True)
 
 def block(source, marker):
+    if marker not in source and marker.startswith("static "): marker = marker[7:]
     start = source.index(marker)
     end, depth = source.index("{", start) + 1, 1
     while depth:
@@ -28,8 +29,8 @@ start = header.index("enum batch_operation {")
 end = header.index("} batch_root;", start) + len("} batch_root;")
 (out / "batch_types.inc").write_text(header[start:end] + "\n")
 (out / "btrfs.h").write_text((repo / "src/btrfs.h").read_text())
-source = (repo / "src/flushthread.c").read_text()
-start = source.rindex("static NTSTATUS insert_tree_item_batch(")
+source = "\n".join((repo / path).read_text() for path in ["src/flushthread.c", "src/transaction-chunks.c", "src/batch-insert.c"] if (repo / path).exists())
+start = source.rindex("NTSTATUS insert_tree_item_batch(")
 limit = next(line for line in source.splitlines() if line.startswith("#define BATCH_ITEM_LIMIT "))
 (out / "queue.inc").write_text(limit + "\n" + block(source, "static NTSTATUS split_batch_item_list(") +
                                block(source[start:], "static NTSTATUS insert_tree_item_batch("))

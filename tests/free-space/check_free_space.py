@@ -20,13 +20,18 @@ if args.bench and args.sanitize:
 repo, out = args.repo.resolve(), args.build_dir.resolve()
 out.mkdir(parents=True, exist_ok=True)
 
-def read(path):
+def read(path, optional=False):
     if args.revision:
-        return subprocess.check_output(["git", "-C", str(repo), "show", f"{args.revision}:{path}"],
-                                       text=True, timeout=10)
-    return (repo / path).read_text()
+        result = subprocess.run(["git", "-C", str(repo), "show", f"{args.revision}:{path}"],
+                                text=True, capture_output=True, timeout=10)
+        if result.returncode and not optional: raise RuntimeError(result.stderr)
+        return result.stdout if result.returncode == 0 else ""
+    p = repo / path
+    return p.read_text() if p.exists() or not optional else ""
+
 
 def function(source, marker):
+    if marker not in source and marker.startswith("static "): marker = marker[7:]
     start = source.index(marker)
     brace = source.index("{", start)
     end, depth = brace + 1, 1
@@ -39,7 +44,7 @@ header = read("src/btrfs_drv.h")
 end = header.index("} space;") + len("} space;")
 (out / "types.inc").write_text(header[header.rindex("typedef struct {", 0, end):end] + "\n")
 
-source = read("src/free-space.c")
+source = read("src/free-space.c") + read("src/cache-allocation.c", optional=True) + read("src/cache-write.c", optional=True)
 helper = "static NTSTATUS space_list_add_from(" in source
 # Marker, the counter for its list steps, and whether it must walk a list. The
 # helpers are absent before the one-pass merge. The loaders add entries with
@@ -118,7 +123,7 @@ if observed != 2:
 
 # Exercise the production dirty-list ownership transitions without pulling the
 # tree-writing dependencies of flush_fcb into the host model.
-flush = read("src/flushthread.c")
+flush = read("src/flushthread.c") + read("src/transaction-chunks.c", optional=True) + read("src/batch-insert.c", optional=True)
 flush_body = function(flush, "NTSTATUS flush_fcb(")
 cleanup = flush_body[flush_body.rindex("\nend:"):]
 (out / "flush_ref.inc").write_text(
