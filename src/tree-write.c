@@ -32,52 +32,75 @@ NTSTATUS do_tree_writes(device_extension* Vcb, LIST_ENTRY* tree_writes, bool no_
     ULONG bit_num = 0;
     bool raid56 = false;
 
-    // merge together runs
+    // Discover each complete run before allocating its final buffer.
     c = NULL;
     le = tree_writes->Flink;
     while (le != tree_writes) {
+        LIST_ENTRY* end;
+        uint32_t length;
+        uint64_t remaining;
+
         tw = CONTAINING_RECORD(le, tree_write, list_entry);
 
-        if (!c || tw->address < c->offset || tw->address >= c->offset + c->chunk_item->length)
+        if (!c || tw->address < c->offset || tw->address - c->offset >= c->chunk_item->length)
             c = get_chunk_from_address(Vcb, tw->address);
-        else {
-            tree_write* tw2 = CONTAINING_RECORD(le->Blink, tree_write, list_entry);
-
-            if (tw->address == tw2->address + tw2->length) {
-                uint8_t* data = ExAllocatePoolWithTag(NonPagedPool, tw2->length + tw->length, ALLOC_TAG);
-
-                if (!data) {
-                    ERR("out of memory\n");
-                    return STATUS_INSUFFICIENT_RESOURCES;
-                }
-
-                RtlCopyMemory(data, tw2->data, tw2->length);
-                RtlCopyMemory(&data[tw2->length], tw->data, tw->length);
-
-                if (!no_free || tw2->allocated)
-                    ExFreePool(tw2->data);
-
-                tw2->data = data;
-                tw2->length += tw->length;
-                tw2->allocated = true;
-
-                if (!no_free || tw->allocated)
-                    ExFreePool(tw->data);
-
-                RemoveEntryList(&tw->list_entry);
-                ExFreePool(tw);
-
-                le = tw2->list_entry.Flink;
-                continue;
-            }
-        }
-
         tw->c = c;
 
         if (c->chunk_item->type & (BTRFS_BLOCK_GROUP_RAID5 | BTRFS_BLOCK_GROUP_RAID6))
             raid56 = true;
 
-        le = le->Flink;
+        length = tw->length;
+        remaining = c->chunk_item->length - (tw->address - c->offset);
+        end = le->Flink;
+        while (end != tree_writes) {
+            tree_write* next = CONTAINING_RECORD(end, tree_write, list_entry);
+
+            if (next->address <= tw->address || next->address - tw->address != length ||
+                next->length > UINT32_MAX - length || length > remaining || next->length > remaining - length)
+                break;
+
+            length += next->length;
+            end = end->Flink;
+        }
+
+        if (end != le->Flink) {
+            uint8_t* data = ExAllocatePoolWithTag(NonPagedPool, length, ALLOC_TAG);
+            LIST_ENTRY* member;
+            uint32_t offset = 0;
+
+            if (!data) {
+                ERR("out of memory\n");
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            member = le;
+            while (member != end) {
+                tree_write* part = CONTAINING_RECORD(member, tree_write, list_entry);
+
+                RtlCopyMemory(&data[offset], part->data, part->length);
+                offset += part->length;
+                member = member->Flink;
+            }
+
+            if (!no_free || tw->allocated)
+                ExFreePool(tw->data);
+
+            while (le->Flink != end) {
+                tree_write* part = CONTAINING_RECORD(le->Flink, tree_write, list_entry);
+
+                if (!no_free || part->allocated)
+                    ExFreePool(part->data);
+
+                RemoveEntryList(&part->list_entry);
+                ExFreePool(part);
+            }
+
+            tw->data = data;
+            tw->length = length;
+            tw->allocated = true;
+        }
+
+        le = end;
     }
 
     num_bits = 0;
