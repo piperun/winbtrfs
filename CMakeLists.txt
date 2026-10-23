@@ -143,6 +143,10 @@ set(SRC_FILES src/balance.c
     src/send.c
     src/sha256.c
     src/threads.c
+    src/tree-search.c
+    src/tree-balance.c
+    src/tree-write.c
+    src/root-create.c
     src/treefuncs.c
     src/rollback.c
     src/trim-mapping.c
