@@ -27,6 +27,10 @@ end = header.index("} batch_root;", start) + len("} batch_root;")
 (out / "batch_types.inc").write_text(header[start:end] + "\n")
 (out / "btrfs.h").write_text((repo / "src/btrfs.h").read_text())
 source = (repo / "src/batch.c").read_text()
+search = repo / "src/tree-search.c"
+ownership = search.read_text() if search.exists() else ""
+(out / "tree_search_lifecycle.inc").write_text("".join(block(ownership, f"void {name}(")
+    for name in ("initialize_tree_search", "invalidate_tree_search")) if "void invalidate_tree_search(" in ownership else "")
 collision = (repo / "src/batch-collision.c").read_text()
 (out / "batch_commit.inc").write_text("".join(block(source, marker) for marker in (
     "static NTSTATUS find_tree_end(", "void clear_batch_list(", "static NTSTATUS commit_batch_list_root(", "NTSTATUS commit_batch_list(")))

@@ -16,6 +16,7 @@
  * along with WinBtrfs.  If not, see <http://www.gnu.org/licenses/>. */
 
 #include "btrfs_drv.h"
+#include "tree-search.h"
 #include "crc32c.h"
 
 __attribute__((nonnull(1,3,4,5)))
@@ -34,6 +35,8 @@ NTSTATUS load_tree(device_extension* Vcb, uint64_t addr, uint8_t* buf, root* r, 
         ERR("out of memory\n");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+
+    initialize_tree_search(t);
 
     if (th->level > 0) {
         t->nonpaged = ExAllocatePoolWithTag(NonPagedPool, sizeof(tree_nonpaged), ALLOC_TAG);
@@ -138,6 +141,8 @@ NTSTATUS load_tree(device_extension* Vcb, uint64_t addr, uint8_t* buf, root* r, 
         t->size = t->header.nritems * sizeof(struct btrfs_key_ptr);
         t->buf = NULL;
     }
+
+    cache_tree_search(t);
 
     ExAcquireFastMutex(&Vcb->trees_list_mutex);
 
@@ -268,6 +273,7 @@ void free_tree(tree* t) {
 
     // No need to acquire lock, as this is only ever called while Vcb->tree_lock held exclusively
 
+    invalidate_tree_search(t);
     par = t->parent;
 
     if (r && r->treeholder.tree != t)
@@ -488,6 +494,7 @@ NTSTATUS insert_tree_item(_In_ _Requires_exclusive_lock_held_(_Curr_->tree_lock)
         paritem = tp.tree->paritem;
         while (paritem) {
             if (!keycmp(paritem->key, tp.item->key)) {
+                invalidate_tree_search(paritem->treeholder.tree->parent);
                 paritem->key = searchkey;
             } else
                 break;

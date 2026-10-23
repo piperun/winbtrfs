@@ -17,6 +17,7 @@
 
 // Tree block checksums, serialization and queued physical writes.
 #include "btrfs_drv.h"
+#include "tree-search.h"
 #include "tree-transaction.h"
 #include "zstd/lib/common/xxhash.h"
 #include "crc32c.h"
@@ -269,6 +270,7 @@ NTSTATUS write_trees(device_extension* Vcb, PIRP Irp) {
                 }
 
                 if (t->parent) {
+                    invalidate_tree_search(t->parent);
                     t->paritem->key = firstitem;
                     t->paritem->treeholder.address = t->new_address;
                     t->paritem->treeholder.generation = Vcb->superblock.generation;

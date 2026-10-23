@@ -27,6 +27,7 @@ typedef struct {
 struct _tree {
     void* nonpaged; struct { uint8_t level; } header; uint32_t hash; device_extension* Vcb;
     tree* parent; tree_data* paritem; root* root; LIST_ENTRY itemlist, list_entry, list_entry_hash; uint8_t* buf;
+    tree_data** search_items; uint32_t search_count;
 };
 typedef struct { ERESOURCE resource, paging_resource, dir_children_lock; } fcb_nonpaged;
 typedef struct _fcb {

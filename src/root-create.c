@@ -17,6 +17,7 @@
 
 // Root creation and initial in-memory leaf construction.
 #include "btrfs_drv.h"
+#include "tree-search.h"
 
 NTSTATUS create_root(_In_ _Requires_exclusive_lock_held_(_Curr_->tree_lock) device_extension* Vcb, _In_ uint64_t id,
                      _Out_ root** rootptr, _In_ bool no_tree, _In_ uint64_t offset, _In_opt_ PIRP Irp) {
@@ -96,6 +97,7 @@ NTSTATUS create_root(_In_ _Requires_exclusive_lock_held_(_Curr_->tree_lock) devi
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
+        initialize_tree_search(t);
         t->nonpaged = NULL;
 
         t->is_unique = true;

@@ -18,6 +18,7 @@
 /* Apply batched tree updates and consume their queue on every exit.
  * Linked tree items keep their payloads; queued items own any nonnull data. */
 #include "batch.h"
+#include "tree-search.h"
 
 __attribute__((nonnull(1,2,3)))
 static NTSTATUS find_tree_end(tree* t, struct btrfs_key* tree_end, bool* no_end) {
@@ -356,6 +357,7 @@ static NTSTATUS commit_batch_list_root(_Requires_exclusive_lock_held_(_Curr_->tr
                     paritem = tp.tree->paritem;
                     while (paritem) {
                         if (!keycmp(paritem->key, tp.item->key)) {
+                            invalidate_tree_search(paritem->treeholder.tree->parent);
                             paritem->key = bi->key;
                         } else
                             break;

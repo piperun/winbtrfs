@@ -56,7 +56,10 @@ start = btrfs.index("#ifdef DEBUG_FCB_REFCOUNTS\nvoid _free_fcb(")
 (out / "reap_fileref.inc").write_text(block(btrfs, btrfs.index("void reap_fileref(")) + "\n")
 (out / "mark_dirty.inc").write_text(block(btrfs, btrfs.index("void mark_fcb_dirty(")) + "\n")
 treefuncs = read("src/treefuncs.c")
-(out / "trees.inc").write_text("".join(block(treefuncs, treefuncs.index(f"void {name}(")) + "\n"
+search = read("src/tree-search.c", optional=True)
+ownership = "".join(block(search, search.index(f"void {name}(")) + "\n"
+                    for name in ("initialize_tree_search", "invalidate_tree_search")) if "void invalidate_tree_search(" in search else ""
+(out / "trees.inc").write_text(ownership + "".join(block(treefuncs, treefuncs.index(f"void {name}(")) + "\n"
                                        for name in ("free_tree", "free_trees_root")))
 batch_source = read("src/batch.c", optional=True) or treefuncs
 (out / "clear_batch.inc").write_text(block(batch_source, batch_source.index("void clear_batch_list(")) + "\n")

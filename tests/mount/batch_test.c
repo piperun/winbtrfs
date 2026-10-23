@@ -15,7 +15,11 @@ typedef struct tree_data {
     struct btrfs_key key; LIST_ENTRY list_entry; bool ignore, inserted;
     uint16_t size; uint8_t* data; struct { tree* tree; } treeholder;
 } tree_data;
-struct tree { struct btrfs_header header; tree* parent; tree_data* paritem; LIST_ENTRY itemlist; uint32_t size; bool write; };
+struct tree {
+    struct btrfs_header header; tree* parent; tree_data* paritem;
+    LIST_ENTRY itemlist; uint32_t size; bool write;
+    tree_data** search_items; uint32_t search_count;
+};
 typedef struct { uint64_t id; tree leaf; } root;
 typedef struct { tree* tree; tree_data* item; } traverse_ptr;
 typedef struct { size_t size; unsigned outstanding; } LOOKASIDE;
@@ -81,6 +85,7 @@ static NTSTATUS find_item(device_extension* v,root* r,traverse_ptr* tp,const str
     return STATUS_SUCCESS;
 }
 static bool find_next_item(device_extension* v,traverse_ptr* tp,traverse_ptr* next,bool ignore,PIRP irp) { (void)v;(void)tp;(void)next;(void)ignore;(void)irp;return false; }
+#include "tree_search_lifecycle.inc"
 #include "batch_collision.inc"
 #include "batch_commit.inc"
 #include "batch_producer.inc"

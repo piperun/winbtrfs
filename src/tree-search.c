@@ -17,6 +17,78 @@
 
 // Ordered tree lookup and traversal with the caller's existing tree lock.
 #include "btrfs_drv.h"
+#include "tree-search.h"
+
+void initialize_tree_search(tree* t) {
+    t->search_items = NULL;
+    t->search_count = 0;
+}
+
+void invalidate_tree_search(tree* t) {
+    tree_data** items = t->search_items;
+
+    initialize_tree_search(t);
+    if (items)
+        ExFreePool(items);
+}
+
+void cache_tree_search(tree* t) {
+    size_t capacity = t->header.nritems;
+    tree_data** items;
+    LIST_ENTRY* le;
+    uint32_t count = 0;
+
+    if (!t->header.level || capacity < 16 || t->search_items ||
+        capacity > (size_t)-1 / sizeof(tree_data*))
+        return;
+
+    items = ExAllocatePoolWithTag(PagedPool, capacity * sizeof(tree_data*), ALLOC_TAG);
+    if (!items)
+        return;
+
+    le = t->itemlist.Flink;
+    while (le != &t->itemlist) {
+        tree_data* td = CONTAINING_RECORD(le, tree_data, list_entry);
+
+        if (count == capacity || (count && keycmp(items[count - 1]->key, td->key) > 0))
+            goto invalid;
+
+        items[count++] = td;
+        le = le->Flink;
+    }
+
+    if (count != capacity)
+        goto invalid;
+
+    t->search_count = count;
+    t->search_items = items;
+    return;
+
+invalid:
+    ExFreePool(items);
+}
+
+static tree_data* find_indexed_item(tree* t, const struct btrfs_key* searchkey) {
+    uint32_t low = 0, high = t->search_count;
+    struct btrfs_key key = *searchkey;
+
+    while (low < high) {
+        uint32_t mid = low + (high - low) / 2;
+
+        if (keycmp(t->search_items[mid]->key, key) < 0)
+            low = mid + 1;
+        else
+            high = mid;
+    }
+
+    if (low == t->search_count)
+        return t->search_items[low - 1];
+
+    if (low && keycmp(t->search_items[low]->key, key) != 0)
+        low--;
+
+    return t->search_items[low];
+}
 
 __attribute__((nonnull(1)))
 static __inline tree_data* first_item(tree* t) {
@@ -156,42 +228,46 @@ static NTSTATUS find_item_in_tree(device_extension* Vcb, tree* t, traverse_ptr* 
     tree_data *td, *lasttd;
     struct btrfs_key key2;
 
-    cmp = 1;
-    td = first_item(t);
-    lasttd = NULL;
+    if (t->search_items)
+        td = find_indexed_item(t, searchkey);
+    else {
+        cmp = 1;
+        td = first_item(t);
+        lasttd = NULL;
 
-    if (!td) return STATUS_NOT_FOUND;
+        if (!td) return STATUS_NOT_FOUND;
 
-    key2 = *searchkey;
+        key2 = *searchkey;
 
-    do {
-        cmp = keycmp(key2, td->key);
+        do {
+            cmp = keycmp(key2, td->key);
 
-        if (cmp == 1) {
-            lasttd = td;
-            td = next_item(t, td);
-        }
-
-        if (t->header.level == 0 && cmp == 0 && !ignore && td && td->ignore) {
-            tree_data* origtd = td;
-
-            while (td && td->ignore)
+            if (cmp == 1) {
+                lasttd = td;
                 td = next_item(t, td);
+            }
 
-            if (td) {
-                cmp = keycmp(key2, td->key);
+            if (t->header.level == 0 && cmp == 0 && !ignore && td && td->ignore) {
+                tree_data* origtd = td;
 
-                if (cmp != 0) {
+                while (td && td->ignore)
+                    td = next_item(t, td);
+
+                if (td) {
+                    cmp = keycmp(key2, td->key);
+
+                    if (cmp != 0) {
+                        td = origtd;
+                        cmp = 0;
+                    }
+                } else
                     td = origtd;
-                    cmp = 0;
-                }
-            } else
-                td = origtd;
-        }
-    } while (td && cmp == 1);
+            }
+        } while (td && cmp == 1);
 
-    if ((cmp == -1 || !td) && lasttd)
-        td = lasttd;
+        if ((cmp == -1 || !td) && lasttd)
+            td = lasttd;
+    }
 
     if (t->header.level == 0) {
         if (td->ignore && !ignore) {

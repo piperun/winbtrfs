@@ -17,6 +17,7 @@
 
 // Tree splitting, merging and height changes inside the existing transaction.
 #include "btrfs_drv.h"
+#include "tree-search.h"
 #include "tree-transaction.h"
 
 static void get_first_item(tree* t, struct btrfs_key* key) {
@@ -43,6 +44,8 @@ static NTSTATUS split_tree_at(device_extension* Vcb, tree* t, tree_data* newfirs
         ERR("out of memory\n");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+
+    initialize_tree_search(nt);
 
     if (t->header.level > 0) {
         nt->nonpaged = ExAllocatePoolWithTag(NonPagedPool, sizeof(tree_nonpaged), ALLOC_TAG);
@@ -80,6 +83,7 @@ static NTSTATUS split_tree_at(device_extension* Vcb, tree* t, tree_data* newfirs
     nt->buf = NULL;
     InitializeListHead(&nt->itemlist);
 
+    invalidate_tree_search(t);
     oldlastitem = CONTAINING_RECORD(newfirstitem->list_entry.Blink, tree_data, list_entry);
 
     nt->itemlist.Flink = &newfirstitem->list_entry;
@@ -144,6 +148,7 @@ static NTSTATUS split_tree_at(device_extension* Vcb, tree* t, tree_data* newfirs
 
         td->key = newfirstitem->key;
 
+        invalidate_tree_search(t->parent);
         InsertHeadList(&t->paritem->list_entry, &td->list_entry);
 
         td->ignore = false;
@@ -170,6 +175,7 @@ static NTSTATUS split_tree_at(device_extension* Vcb, tree* t, tree_data* newfirs
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
+    initialize_tree_search(pt);
     pt->nonpaged = ExAllocatePoolWithTag(NonPagedPool, sizeof(tree_nonpaged), ALLOC_TAG);
     if (!pt->nonpaged) {
         ERR("out of memory\n");
@@ -448,6 +454,8 @@ static NTSTATUS try_tree_amalgamate(device_extension* Vcb, tree* t, bool* done,
             }
         }
 
+        invalidate_tree_search(t);
+        invalidate_tree_search(next_tree);
         t->itemlist.Blink->Flink = next_tree->itemlist.Flink;
         t->itemlist.Blink->Flink->Blink = t->itemlist.Blink;
         t->itemlist.Blink = next_tree->itemlist.Blink;
@@ -490,6 +498,7 @@ static NTSTATUS try_tree_amalgamate(device_extension* Vcb, tree* t, bool* done,
             par = par->parent;
         }
 
+        invalidate_tree_search(next_tree->parent);
         RemoveEntryList(&nextparitem->list_entry);
         ExFreePool(next_tree->paritem);
         next_tree->paritem = NULL;
@@ -521,6 +530,8 @@ static NTSTATUS try_tree_amalgamate(device_extension* Vcb, tree* t, bool* done,
                 size = 0;
 
             if (t->size + size < Vcb->superblock.nodesize - sizeof(struct btrfs_header)) {
+                invalidate_tree_search(t);
+                invalidate_tree_search(next_tree);
                 RemoveEntryList(&td->list_entry);
                 InsertTailList(&t->itemlist, &td->list_entry);
 
@@ -570,8 +581,10 @@ static NTSTATUS try_tree_amalgamate(device_extension* Vcb, tree* t, bool* done,
         }
 
         // FIXME - once ascension is working, make this work with parent's parent, etc.
-        if (next_tree->paritem)
+        if (next_tree->paritem) {
+            invalidate_tree_search(next_tree->parent);
             next_tree->paritem->key = firstitem;
+        }
 
         par = next_tree;
         while (par) {
@@ -774,6 +787,7 @@ NTSTATUS do_splits(device_extension* Vcb, PIRP Irp) {
                             t->parent->size -= sizeof(struct btrfs_key_ptr);
                         }
 
+                        invalidate_tree_search(t->parent);
                         RemoveEntryList(&t->paritem->list_entry);
                         ExFreePool(t->paritem);
                         t->paritem = NULL;
@@ -789,6 +803,7 @@ NTSTATUS do_splits(device_extension* Vcb, PIRP Irp) {
                             }
                         }
 
+                        invalidate_tree_search(t);
                         t->header.level = 0;
                     }
                 } else if (t->size > Vcb->superblock.nodesize - sizeof(struct btrfs_header)) {

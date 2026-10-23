@@ -55,6 +55,8 @@ typedef struct _tree {
     tree_data* paritem;
     struct _root* root;
     LIST_ENTRY itemlist;
+    tree_data** search_items;
+    uint32_t search_count;
     LIST_ENTRY list_entry;
     LIST_ENTRY list_entry_hash;
     uint64_t new_address;
