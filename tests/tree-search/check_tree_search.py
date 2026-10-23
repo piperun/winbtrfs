@@ -156,7 +156,9 @@ def function(text, marker):
     return text[start:end] + "\n"
 
 trees = read("src/treefuncs.c")
-(out / "lifecycle.inc").write_text(function(read("src/tree-load.c", optional=True) or trees, "NTSTATUS load_tree(") + function(trees, "void free_tree("))
+loaders = read("src/tree-load.c", optional=True) or trees
+cleanup = function(loaders, "static void free_unpublished_tree(") if "static void free_unpublished_tree(" in loaders else ""
+(out / "lifecycle.inc").write_text(cleanup + function(loaders, "NTSTATUS load_tree(") + function(trees, "void free_tree("))
 binary = out / "tree-lifecycle-test"
 subprocess.run(["gcc", *flags, "-I", str(out), "-I", str(here), str(here / "lifecycle_test.c"), "-o", str(binary)], check=True)
 subprocess.run([str(binary)], check=True)

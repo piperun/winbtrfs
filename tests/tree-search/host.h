@@ -58,12 +58,17 @@ static unsigned allocations, releases;
 static uint64_t allocation_bytes;
 static bool fail_allocation;
 static size_t fail_bytes;
+static unsigned allocation_attempts, fail_at;
+#ifndef POOL_PATTERN
+#define POOL_PATTERN 0xa5
+#endif
 static void* ExAllocatePoolWithTag(int pool, size_t bytes, unsigned tag) {
     (void)pool; (void)tag;
-    if (fail_allocation || (fail_bytes && fail_bytes == bytes)) return NULL;
+    allocation_attempts++;
+    if (fail_allocation || (fail_at && allocation_attempts == fail_at) || (fail_bytes && fail_bytes == bytes)) return NULL;
     void* pointer = malloc(bytes);
     CHECK(pointer);
-    memset(pointer, 0xa5, bytes);
+    memset(pointer, POOL_PATTERN, bytes);
     allocations++;
     allocation_bytes += bytes;
     return pointer;
