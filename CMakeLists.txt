@@ -150,6 +150,8 @@ set(SRC_FILES src/balance.c
     src/cache-allocation.c
     src/cache-write.c
     src/volume-lock.c
+    src/volume-dismount.c
+    src/volume-wakeup.c
     src/volume-lifecycle.c
     src/balance-device.c
     src/balance-worker.c

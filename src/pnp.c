@@ -16,6 +16,7 @@
  * along with WinBtrfs.  If not, see <http://www.gnu.org/licenses/>. */
 
 #include "btrfs_drv.h"
+#include "volume-dismount.h"
 
 extern ERESOURCE pdo_list_lock;
 extern LIST_ENTRY pdo_list;
@@ -48,54 +49,6 @@ NTSTATUS pnp_query_remove_device(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
     ExReleaseResourceLite(&Vcb->tree_lock);
 
     return STATUS_UNSUCCESSFUL;
-}
-
-static NTSTATUS pnp_remove_device(PDEVICE_OBJECT DeviceObject) {
-    device_extension* Vcb = DeviceObject->DeviceExtension;
-    NTSTATUS Status;
-
-    if (DeviceObject->Vpb->Flags & VPB_MOUNTED) {
-        Status = FsRtlNotifyVolumeEvent(Vcb->root_file, FSRTL_VOLUME_DISMOUNT);
-        if (!NT_SUCCESS(Status)) {
-            WARN("FsRtlNotifyVolumeEvent returned %08lx\n", Status);
-        }
-
-        if (Vcb->vde)
-            Vcb->vde->mounted_device = NULL;
-
-        ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
-        Vcb->removing = true;
-        ExReleaseResourceLite(&Vcb->tree_lock);
-
-        if (Vcb->open_files == 0)
-            uninit(Vcb);
-    }
-
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS pnp_surprise_removal(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
-    device_extension* Vcb = DeviceObject->DeviceExtension;
-
-    TRACE("(%p, %p)\n", DeviceObject, Irp);
-
-    UNUSED(Irp);
-
-    if (DeviceObject->Vpb->Flags & VPB_MOUNTED) {
-        ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
-
-        if (Vcb->vde)
-            Vcb->vde->mounted_device = NULL;
-
-        Vcb->removing = true;
-
-        ExReleaseResourceLite(&Vcb->tree_lock);
-
-        if (Vcb->open_files == 0)
-            uninit(Vcb);
-    }
-
-    return STATUS_SUCCESS;
 }
 
 static NTSTATUS bus_query_capabilities(PIRP Irp) {
