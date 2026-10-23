@@ -259,10 +259,11 @@ uint64_t trim_pending_count(chunk* c) {
     return count;
 }
 
-static bool trim_reclaim_ranges(LIST_ENTRY* dest, LIST_ENTRY* sizes, LIST_ENTRY* ranges) {
+static bool trim_reclaim_ranges(LIST_ENTRY* dest, LIST_ENTRY* sizes, LIST_ENTRY* ranges, uint64_t limit) {
     while (!IsListEmpty(ranges)) {
         space* s = CONTAINING_RECORD(ranges->Flink, space, list_entry);
-        if (!NT_SUCCESS(space_list_add2(dest, sizes, s->address, s->size, NULL, NULL)))
+        uint64_t size = s->address >= limit ? 0 : min(s->size, limit - s->address);
+        if (size && !NT_SUCCESS(space_list_add2(dest, sizes, s->address, size, NULL, NULL)))
             return false;
         // Remove each published range immediately. A later allocation failure
         // must not leave already reusable addresses in the pending cache view.
@@ -278,7 +279,7 @@ bool trim_reclaim_batch(device_extension* Vcb, trim_batch* batch) {
         trim_chunk* entry = CONTAINING_RECORD(le, trim_chunk, list_entry);
         bool done;
         acquire_chunk_lock(entry->owner, Vcb);
-        done = trim_reclaim_ranges(&entry->owner->space, &entry->owner->space_size, &entry->ranges);
+        done = trim_reclaim_ranges(&entry->owner->space, &entry->owner->space_size, &entry->ranges, UINT64_MAX);
         release_chunk_lock(entry->owner, Vcb);
         if (!done)
             return false;
@@ -287,7 +288,8 @@ bool trim_reclaim_batch(device_extension* Vcb, trim_batch* batch) {
         trim_physical* physical = CONTAINING_RECORD(le, trim_physical, list_entry);
         if (!physical->owner)
             trim_free_ranges(&physical->ranges);
-        else if (!trim_reclaim_ranges(&physical->owner->space, NULL, &physical->ranges))
+        else if (!trim_reclaim_ranges(&physical->owner->space, NULL, &physical->ranges,
+                                     physical->owner->devitem.total_bytes))
             return false;
     }
     return true;

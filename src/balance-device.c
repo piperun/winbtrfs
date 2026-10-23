@@ -53,6 +53,24 @@ static NTSTATUS remove_superblocks(device* dev) {
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS check_device_removal(device_extension* Vcb, device* dev) {
+    LIST_ENTRY* le;
+    NTSTATUS Status = STATUS_SUCCESS;
+    ExAcquireResourceSharedLite(&Vcb->chunk_lock, true);
+    for (le = Vcb->chunks.Flink; le != &Vcb->chunks; le = le->Flink) {
+        chunk* c = CONTAINING_RECORD(le, chunk, list_entry);
+        for (uint16_t i = 0; i < c->chunk_item->num_stripes; i++) {
+            if (c->chunk_item->stripe[i].devid == dev->devitem.devid) {
+                Status = STATUS_DEVICE_NOT_READY;
+                goto end;
+            }
+        }
+    }
+end:
+    ExReleaseResourceLite(&Vcb->chunk_lock);
+    return Status;
+}
+
 NTSTATUS finish_removing_device(_Requires_exclusive_lock_held_(_Curr_->tree_lock) device_extension* Vcb, device* dev) {
     struct btrfs_key searchkey;
     traverse_ptr tp;
@@ -70,6 +88,10 @@ NTSTATUS finish_removing_device(_Requires_exclusive_lock_held_(_Curr_->tree_lock
 
     free_trees(Vcb);
 
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = check_device_removal(Vcb, dev);
     if (!NT_SUCCESS(Status))
         return Status;
 

@@ -16,7 +16,7 @@ typedef struct IRP IRP,*PIRP;
 typedef NTSTATUS (*COMPLETION)(PDEVICE_OBJECT,PIRP,PVOID);
 typedef struct {unsigned MajorFunction;PFILE_OBJECT FileObject;struct {struct {ULONG IoControlCode,InputBufferLength,OutputBufferLength;} DeviceIoControl;} Parameters;} IO_STACK_LOCATION,*PIO_STACK_LOCATION;
 struct IRP {IO_STACK_LOCATION stack;struct{void* SystemBuffer;}AssociatedIrp;unsigned Flags;void* UserBuffer;IO_STATUS_BLOCK* UserIosb;COMPLETION completion;void* context;bool submitted,completed;};
-typedef struct {LIST_ENTRY list_entry,space,trim_list;PDEVICE_OBJECT devobj;PFILE_OBJECT fileobj;bool trim,readonly;ULONG num_trim_entries;} device;
+typedef struct {LIST_ENTRY list_entry,space,trim_list;PDEVICE_OBJECT devobj;PFILE_OBJECT fileobj;bool trim,readonly;ULONG num_trim_entries;struct{uint64_t devid,total_bytes;}devitem;} device;
 struct btrfs_chunk {uint64_t type,stripe_len,length;uint16_t num_stripes,sub_stripes;struct {uint64_t offset,devid;} stripe[4];};
 struct chunk {LIST_ENTRY list_entry,space,space_size,deleting,pending_trims,list_entry_balance;unsigned held;uint64_t offset,used;struct btrfs_chunk* chunk_item;device** devices;bool space_changed,reloc;};
 struct trim_state;
@@ -29,6 +29,7 @@ typedef struct {LIST_ENTRY devices,chunks;ERESOURCE tree_lock,chunk_lock;bool tr
 #define STATUS_MORE_PROCESSING_REQUIRED ((NTSTATUS)0xc0000016)
 #define STATUS_IO_DEVICE_ERROR ((NTSTATUS)0xc0000185)
 #define STATUS_CANCELLED ((NTSTATUS)0xc0000120)
+#define STATUS_DEVICE_NOT_READY ((NTSTATUS)0xc00000a3)
 #define IRP_BUFFERED_IO 16
 #define IRP_MJ_DEVICE_CONTROL 14
 #define IOCTL_STORAGE_MANAGE_DATA_SET_ATTRIBUTES 0x2d9404
@@ -65,6 +66,7 @@ static NTSTATUS trim_merge_pending(chunk*,LIST_ENTRY*,LIST_ENTRY*);
 static void get_raid0_offset(uint64_t a,uint64_t b,uint16_t c,uint64_t* d,uint16_t* e){*d=(a/(b*c))*b+a%b;*e=(uint16_t)((a/b)%c);}
 
 static void poll_during_signal(void);
+static void balance_allocation_during_preparation(void);
 
 #define TRACE(...) ((void)0)
 

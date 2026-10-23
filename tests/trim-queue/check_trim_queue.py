@@ -12,7 +12,8 @@ header=(repo/'src/btrfs_drv.h').read_text();end=header.index('} space;')+len('} 
 ioctl=(repo/'src/btrfsioctl.h').read_text();end=ioctl.index('} btrfs_balance_opts;')+len('} btrfs_balance_opts;');start=ioctl.rindex('typedef struct {',0,end)
 (out/'balance-types.inc').write_text('\n'.join(line for line in ioctl.splitlines() if line.startswith('#define BTRFS_BALANCE_OPTS_') or line.startswith('#define BTRFS_AVAIL_ALLOC_BIT_SINGLE'))+'\n'+ioctl[start:end])
 balance=(repo/'src/balance-worker.c').read_text()
-(out/'balance.inc').write_text('\n'.join(function(balance,n) for n in ['static __inline uint64_t get_chunk_dup_type(','static uint16_t get_chunk_size_factor(','static bool should_balance_chunk(']))
+(out/'balance.inc').write_text('\n'.join(function(balance,n) for n in ['static __inline uint64_t get_chunk_dup_type(','static uint16_t get_chunk_size_factor(','static bool should_balance_chunk(','static NTSTATUS regenerate_space_list(']))
+with (out/'balance.inc').open('a') as stream:stream.write(function((repo/'src/balance-device.c').read_text(),'static NTSTATUS check_device_removal('))
 source=(repo/'src/free-space.c').read_text()
 names=['static void order_space_entry(','static void place_space_entry(','static NTSTATUS space_list_add_from(','NTSTATUS space_list_add2(','static void order_space_entries(','NTSTATUS space_list_merge(','NTSTATUS space_list_subtract2(']
 (out/'spaces.inc').write_text('\n'.join(function(source,n) for n in names))

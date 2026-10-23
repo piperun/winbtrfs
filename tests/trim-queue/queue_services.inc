@@ -1,5 +1,6 @@
 static size_t allocations,fail_at,pool_live,irp_live,references,submitted,waits;
 static bool inline_completion, preempt_on_signal, completion_lock_held;
+static bool inject_balance_allocation, balance_allocation_blocked;
 static NTSTATUS completion_status=STATUS_SUCCESS;
 static PIRP pending_irps[16];static unsigned pending_count;
 static void* ExAllocatePoolWithTag(unsigned pool,size_t n,unsigned tag) {
@@ -21,7 +22,7 @@ static LONG InterlockedDecrement(volatile LONG* p){CHECK(*p>0);return --*p;}
 static void KeInitializeEvent(KEVENT* e,int t,bool b){CHECK(t==NotificationEvent);e->signaled=b;}
 static void KeSetEvent(KEVENT* e,int boost,bool wait){CHECK(!boost&&!wait);if(preempt_on_signal&&!completion_lock_held){preempt_on_signal=false;poll_during_signal();}e->signaled=true;}
 static void KeClearEvent(KEVENT* e){e->signaled=false;}
-static PIRP IoAllocateIrp(unsigned n,bool charge){CHECK(n&&!charge);if(++allocations==fail_at)return NULL;PIRP p=calloc(1,sizeof(*p));CHECK(p);irp_live++;return p;}
+static PIRP IoAllocateIrp(unsigned n,bool charge){CHECK(n&&!charge);if(inject_balance_allocation)balance_allocation_during_preparation();if(++allocations==fail_at)return NULL;PIRP p=calloc(1,sizeof(*p));CHECK(p);irp_live++;return p;}
 static void IoFreeIrp(PIRP p){CHECK(p&&irp_live&&(!p->submitted||p->completed));irp_live--;free(p);}
 static void IoSetCompletionRoutine(PIRP p,COMPLETION c,void* v,bool a,bool b,bool d){CHECK(a&&b&&d);p->completion=c;p->context=v;}
 static void complete(PIRP p){CHECK(p->submitted&&!p->completed);p->completed=true;p->UserIosb->Status=completion_status;CHECK(p->completion(NULL,p,p->context)==STATUS_MORE_PROCESSING_REQUIRED);}

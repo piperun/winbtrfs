@@ -86,6 +86,7 @@ void trim_commit(device_extension* Vcb) {
     trim_batch* batch = NULL;
     LIST_ENTRY* le;
     bool ready = true;
+    bool chunks_locked = false;
 
     if (!state || state->stopping || state->pauses || Vcb->removing || !Vcb->trim || Vcb->options.no_trim)
         goto done;
@@ -102,7 +103,10 @@ void trim_commit(device_extension* Vcb) {
     InitializeListHead(&batch->targets);
     InitializeListHead(&batch->physical);
 
-    ExAcquireResourceSharedLite(&Vcb->chunk_lock, true);
+    // Balance allocates physical space without tree_lock. Keep its allocator
+    // excluded from the first snapshot through publication of every map.
+    ExAcquireResourceExclusiveLite(&Vcb->chunk_lock, true);
+    chunks_locked = true;
     for (le = Vcb->chunks.Flink; le != &Vcb->chunks; le = le->Flink) {
         chunk* c = CONTAINING_RECORD(le, chunk, list_entry);
         acquire_chunk_lock(c, Vcb);
@@ -112,7 +116,6 @@ void trim_commit(device_extension* Vcb) {
         if (!ready)
             break;
     }
-    ExReleaseResourceLite(&Vcb->chunk_lock);
     if (!ready)
         goto done;
 
@@ -125,15 +128,15 @@ void trim_commit(device_extension* Vcb) {
     if (IsListEmpty(&batch->targets) || !trim_prepare_requests(batch))
         goto done;
 
-    ExAcquireResourceExclusiveLite(&Vcb->chunk_lock, true);
     ready = trim_publish_batch(batch);
-    ExReleaseResourceLite(&Vcb->chunk_lock);
     if (!ready)
         goto done;
     InsertTailList(&state->batches, &batch->list_entry);
     batch = NULL;
     KeSetEvent(&state->event, 0, false);
 done:
+    if (chunks_locked)
+        ExReleaseResourceLite(&Vcb->chunk_lock);
     if (batch)
         trim_release_batch(batch);
     trim_clear_candidates(Vcb);
@@ -248,6 +251,32 @@ void trim_resume(device_extension* Vcb) {
     KeSetEvent(&state->event, 0, false);
 }
 
+NTSTATUS trim_quiesce(device_extension* Vcb) {
+    trim_state* state = Vcb->trim_state;
+    NTSTATUS Status = STATUS_SUCCESS;
+    if (!state)
+        return Status;
+    ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
+    trim_pause_locked(Vcb);
+    ExReleaseResourceLite(&Vcb->tree_lock);
+    trim_wait_idle(Vcb);
+
+    ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
+    ExAcquireResourceExclusiveLite(&Vcb->chunk_lock, true);
+    while (!IsListEmpty(&state->batches)) {
+        trim_batch* batch = CONTAINING_RECORD(state->batches.Flink, trim_batch, list_entry);
+        if (!trim_reclaim_batch(Vcb, batch)) {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+        RemoveEntryList(&batch->list_entry);
+        trim_release_batch(batch);
+    }
+    ExReleaseResourceLite(&Vcb->chunk_lock);
+    ExReleaseResourceLite(&Vcb->tree_lock);
+    return Status;
+}
+
 void trim_forget_device(device_extension* Vcb, device* dev) {
     LIST_ENTRY *le, *le2;
     if (!Vcb->trim_state)
@@ -267,7 +296,7 @@ void trim_forget_device(device_extension* Vcb, device* dev) {
     }
 }
 
-NTSTATUS trim_subtract_device_pending(device_extension* Vcb, device* dev) {
+NTSTATUS trim_subtract_device_pending(device_extension* Vcb, device* dev, LIST_ENTRY* spaces) {
     LIST_ENTRY *le, *le2, *le3;
     NTSTATUS Status;
     if (!Vcb->trim_state)
@@ -280,7 +309,7 @@ NTSTATUS trim_subtract_device_pending(device_extension* Vcb, device* dev) {
                 continue;
             for (le3 = physical->ranges.Flink; le3 != &physical->ranges; le3 = le3->Flink) {
                 space* s = CONTAINING_RECORD(le3, space, list_entry);
-                Status = space_list_subtract2(&dev->space, NULL, s->address, s->size, NULL, NULL);
+                Status = space_list_subtract2(spaces, NULL, s->address, s->size, NULL, NULL);
                 if (!NT_SUCCESS(Status))
                     return Status;
             }

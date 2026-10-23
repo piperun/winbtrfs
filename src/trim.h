@@ -34,10 +34,14 @@ bool trim_chunk_pending(const chunk* c);
 NTSTATUS trim_merge_pending(chunk* c, LIST_ENTRY* list, LIST_ENTRY* sizes);
 uint64_t trim_pending_count(chunk* c);
 void trim_forget_device(device_extension* Vcb, device* dev);
-NTSTATUS trim_subtract_device_pending(device_extension* Vcb, device* dev);
+NTSTATUS trim_subtract_device_pending(device_extension* Vcb, device* dev, LIST_ENTRY* spaces);
 
 // Pause while holding tree_lock exclusively, then wait with no volume resources.
 // The matching resume is safe from handle cleanup's shared-resource scope.
 void trim_pause_locked(device_extension* Vcb);
 void trim_wait_idle(device_extension* Vcb);
 void trim_resume(device_extension* Vcb);
+
+// Pause and reclaim before changing chunk/device mappings. Always resume once,
+// including on failure; callers hold no volume resources across this call.
+NTSTATUS trim_quiesce(device_extension* Vcb);

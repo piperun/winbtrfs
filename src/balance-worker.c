@@ -239,20 +239,17 @@ static NTSTATUS try_consolidation(device_extension* Vcb, uint64_t flags, chunk**
 
 static NTSTATUS regenerate_space_list(device_extension* Vcb, device* dev) {
     NTSTATUS Status;
-    LIST_ENTRY* le;
-
-    while (!IsListEmpty(&dev->space)) {
-        space* s = CONTAINING_RECORD(RemoveHeadList(&dev->space), space, list_entry);
-
-        ExFreePool(s);
-    }
+    LIST_ENTRY *le, replacement;
+    InitializeListHead(&replacement);
+    ExAcquireResourceExclusiveLite(&Vcb->chunk_lock, true);
 
     // The Linux driver doesn't like to allocate chunks within the first megabyte of a device.
 
-    Status = space_list_add2(&dev->space, NULL, 0x100000,
-                             dev->devitem.total_bytes - 0x100000, NULL, NULL);
+    Status = dev->devitem.total_bytes <= 0x100000 ? STATUS_SUCCESS :
+        space_list_add2(&replacement, NULL, 0x100000,
+                        dev->devitem.total_bytes - 0x100000, NULL, NULL);
     if (!NT_SUCCESS(Status))
-        return Status;
+        goto end;
 
     le = Vcb->chunks.Flink;
     while (le != &Vcb->chunks) {
@@ -280,18 +277,34 @@ static NTSTATUS regenerate_space_list(device_extension* Vcb, device* dev) {
                     stripe_size = c->chunk_item->length / factor;
                 }
 
-                Status = space_list_subtract2(&dev->space, NULL,
+                Status = space_list_subtract2(&replacement, NULL,
                                               c->chunk_item->stripe[n].offset,
                                               stripe_size, NULL, NULL);
                 if (!NT_SUCCESS(Status))
-                    return Status;
+                    goto end;
             }
         }
 
         le = le->Flink;
     }
 
-    return trim_subtract_device_pending(Vcb, dev);
+    Status = trim_subtract_device_pending(Vcb, dev, &replacement);
+    if (NT_SUCCESS(Status)) {
+        // Keep the current allocator map on any failure, including a split
+        // needed to exclude an outstanding discard reservation.
+        while (!IsListEmpty(&dev->space))
+            ExFreePool(CONTAINING_RECORD(RemoveHeadList(&dev->space), space, list_entry));
+        if (!IsListEmpty(&replacement)) {
+            dev->space = replacement;
+            dev->space.Flink->Blink = dev->space.Blink->Flink = &dev->space;
+            InitializeListHead(&replacement);
+        }
+    }
+end:
+    while (!IsListEmpty(&replacement))
+        ExFreePool(CONTAINING_RECORD(RemoveHeadList(&replacement), space, list_entry));
+    ExReleaseResourceLite(&Vcb->chunk_lock);
+    return Status;
 }
 
 _Function_class_(KSTART_ROUTINE)
@@ -333,6 +346,12 @@ void __stdcall balance_thread(void* context) {
     Vcb->balance.total_chunks = Vcb->balance.chunks_left = 0;
 
     InitializeListHead(&chunks);
+
+    Status = trim_quiesce(Vcb);
+    if (!NT_SUCCESS(Status)) {
+        Vcb->balance.status = Status;
+        goto end;
+    }
 
     // FIXME - what are we supposed to do with limit_start?
 
@@ -659,11 +678,12 @@ end:
             }
 
             if (dev) {
-                if (Vcb->balance.chunks_left == 0) {
+                if (!Vcb->balance.stopping && NT_SUCCESS(Vcb->balance.status) && Vcb->balance.chunks_left == 0) {
                     Status = finish_removing_device(Vcb, dev);
 
                     if (!NT_SUCCESS(Status)) {
                         ERR("finish_removing_device returned %08lx\n", Status);
+                        Vcb->balance.status = Status;
                         dev->reloc = false;
                     }
                 } else
@@ -785,6 +805,8 @@ end:
             ExReleaseResourceLite(&Vcb->tree_lock);
         }
     }
+
+    trim_resume(Vcb);
 
     ZwClose(Vcb->balance.thread);
     Vcb->balance.thread = NULL;
