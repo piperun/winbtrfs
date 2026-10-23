@@ -22,6 +22,85 @@
 #include "zstd/lib/common/xxhash.h"
 #include "crc32c.h"
 
+// Stable, allocation-free ordering of serialized metadata blocks.
+static void sort_tree_writes(LIST_ENTRY* writes) {
+    LIST_ENTRY* entry;
+    size_t width = 1;
+    bool ordered = true;
+
+    if (IsListEmpty(writes))
+        return;
+
+    entry = writes->Flink;
+    while (entry->Flink != writes) {
+        tree_write* tw = CONTAINING_RECORD(entry, tree_write, list_entry);
+        tree_write* next = CONTAINING_RECORD(entry->Flink, tree_write, list_entry);
+
+        if (tw->address > next->address) {
+            ordered = false;
+            break;
+        }
+        entry = entry->Flink;
+    }
+    if (ordered)
+        return;
+
+    for (;;) {
+        LIST_ENTRY result;
+        size_t merges = 0;
+
+        InitializeListHead(&result);
+        entry = writes->Flink;
+        while (entry != writes) {
+            LIST_ENTRY* right_entry = entry;
+            size_t left_count = 0, right_count = width;
+
+            merges++;
+            while (left_count < width && right_entry != writes) {
+                left_count++;
+                right_entry = right_entry->Flink;
+            }
+
+            while (left_count || (right_count && right_entry != writes)) {
+                LIST_ENTRY* selected;
+                bool take_left;
+
+                if (!left_count)
+                    take_left = false;
+                else if (!right_count || right_entry == writes)
+                    take_left = true;
+                else {
+                    tree_write* left = CONTAINING_RECORD(entry, tree_write, list_entry);
+                    tree_write* right = CONTAINING_RECORD(right_entry, tree_write, list_entry);
+
+                    take_left = left->address <= right->address;
+                }
+
+                if (take_left) {
+                    selected = entry;
+                    entry = entry->Flink;
+                    left_count--;
+                } else {
+                    selected = right_entry;
+                    right_entry = right_entry->Flink;
+                    right_count--;
+                }
+                InsertTailList(&result, selected);
+            }
+            entry = right_entry;
+        }
+
+        writes->Flink = result.Flink;
+        writes->Blink = result.Blink;
+        writes->Flink->Blink = writes;
+        writes->Blink->Flink = writes;
+        if (merges <= 1)
+            return;
+
+        width *= 2;
+    }
+}
+
 NTSTATUS do_tree_writes(device_extension* Vcb, LIST_ENTRY* tree_writes, bool no_free) {
     chunk* c;
     LIST_ENTRY* le;
@@ -492,32 +571,13 @@ NTSTATUS write_trees(device_extension* Vcb, PIRP Irp) {
             tw->data = data;
             tw->allocated = false;
 
-            if (IsListEmpty(&tree_writes))
-                InsertTailList(&tree_writes, &tw->list_entry);
-            else {
-                bool inserted = false;
-
-                le2 = tree_writes.Flink;
-                while (le2 != &tree_writes) {
-                    tree_write* tw2 = CONTAINING_RECORD(le2, tree_write, list_entry);
-
-                    if (tw2->address > tw->address) {
-                        InsertHeadList(le2->Blink, &tw->list_entry);
-                        inserted = true;
-                        break;
-                    }
-
-                    le2 = le2->Flink;
-                }
-
-                if (!inserted)
-                    InsertTailList(&tree_writes, &tw->list_entry);
-            }
+            InsertTailList(&tree_writes, &tw->list_entry);
         }
 
         le = le->Flink;
     }
 
+    sort_tree_writes(&tree_writes);
     Status = do_tree_writes(Vcb, &tree_writes, false);
     if (!NT_SUCCESS(Status)) {
         ERR("do_tree_writes returned %08lx\n", Status);
