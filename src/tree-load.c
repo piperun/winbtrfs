@@ -18,6 +18,7 @@
 #include "btrfs_drv.h"
 #include "tree-search.h"
 #include "crc32c.h"
+#include "tree-load.h"
 
 // Construction failures leave the raw node buffer owned by the caller.
 static void free_unpublished_tree(tree* t) {
@@ -282,5 +283,32 @@ NTSTATUS do_load_tree(device_extension* Vcb, tree_holder* th, root* r, tree* t, 
     }
 
     return Status;
+}
+
+bool publish_prefetched_tree(device_extension* Vcb, tree_holder* holder, root* r,
+                             tree* parent, tree_data* item, uint64_t address,
+                             uint64_t generation, uint8_t* buf) {
+    struct btrfs_header* header = (struct btrfs_header*)buf;
+    struct btrfs_item* entries = (struct btrfs_item*)(buf + sizeof(*header));
+    uint32_t i, payload;
+    bool adopted = false;
+
+    if (!parent || !parent->nonpaged || header->level || header->bytenr != address ||
+        (generation && header->generation != generation) ||
+        header->nritems > (Vcb->superblock.nodesize - sizeof(*header)) / sizeof(*entries))
+        return false;
+    payload = Vcb->superblock.nodesize - sizeof(*header);
+    for (i = 0; i < header->nritems; i++) {
+        if (entries[i].offset > payload || entries[i].size > payload - entries[i].offset ||
+            entries[i].size > payload - sizeof(*entries))
+            return false;
+    }
+
+    ExAcquireFastMutex(&parent->nonpaged->mutex);
+    if (!holder->tree && holder->address == address && holder->generation == generation &&
+        NT_SUCCESS(do_load_tree2(Vcb, holder, buf, r, parent, item)))
+        adopted = true;
+    ExReleaseFastMutex(&parent->nonpaged->mutex);
+    return adopted;
 }
 

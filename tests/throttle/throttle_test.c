@@ -386,6 +386,9 @@ static void free_trees(device_extension* Vcb) {
     (void)Vcb;
 }
 
+/* The prepass runs under the existing exclusive volume lock. Its reader and
+ * publication behavior is exercised separately by metadata-prefetch tests. */
+static void preload_checksum_trees(device_extension* Vcb) { (void)Vcb; }
 #include "throttle.inc"
 
 /* After fast I/O declines, the I/O manager sends an IRP: write_file2 calls CcCanIWrite

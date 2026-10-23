@@ -17,6 +17,7 @@
 
 #include "btrfs_drv.h"
 #include "trim.h"
+#include "metadata-prefetch.h"
 
 uint32_t get_num_of_processors() {
     KAFFINITY p = KeQueryActiveProcessors();
@@ -115,9 +116,10 @@ static void do_flush(device_extension* Vcb) {
 
     ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
 
-    if (Vcb->need_write && !Vcb->readonly)
+    if (Vcb->need_write && !Vcb->readonly) {
+        preload_checksum_trees(Vcb);
         Status = do_write(Vcb, NULL);
-    else
+    } else
         Status = STATUS_SUCCESS;
 
     free_trees(Vcb);

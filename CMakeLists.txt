@@ -143,6 +143,9 @@ set(SRC_FILES src/balance.c
     src/send.c
     src/sha256.c
     src/threads.c
+    src/metadata-prefetch.c
+    src/metadata-prefetch-plan.c
+    src/metadata-prefetch-read.c
     src/tree-search.c
     src/tree-balance.c
     src/tree-write.c
