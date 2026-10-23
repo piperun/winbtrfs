@@ -121,6 +121,12 @@ static tree* discover_internal(prefetch_context* ctx, tree_holder* holder, tree*
     status = do_load_tree(Vcb, holder, Vcb->checksum_root, parent, item, NULL);
     if (!NT_SUCCESS(status))
         return NULL;
+    // Lookup skips an already loaded empty child backward, whereas an unopened
+    // empty child returns NOT_FOUND after loading. Preserve the demand state.
+    if (IsListEmpty(&holder->tree->itemlist)) {
+        free_tree(holder->tree);
+        return NULL;
+    }
     ctx->tree_bytes += prefetch_tree_bytes(Vcb->superblock.nodesize, holder->tree->header.nritems, holder->tree->header.level);
     return holder->tree;
 }

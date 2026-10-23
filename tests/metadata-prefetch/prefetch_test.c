@@ -22,6 +22,8 @@ static unsigned total, reads, worker_reads, active, maximum, first_completed_at,
 static unsigned leaf_items = 1, bad_header, first_ordinal;
 static bool discovery;
 static unsigned scenarios;
+static unsigned empty_index;
+static bool empty_internal;
 static bool gate;
 static pthread_mutex_t read_lock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t read_cond=PTHREAD_COND_INITIALIZER;
@@ -49,10 +51,11 @@ NTSTATUS read_data(device_extension* v, uint64_t address, uint32_t bytes, void* 
     }
     if(!first_completed_at) { first_completed_at=reads; first_ordinal=ordinal; }
     active--; pthread_mutex_unlock(&read_lock);
-    if(ordinal==fail_read)return STATUS_CRC_ERROR;
+    if(fail_read && address==0x100000+(uint64_t)(fail_read-1)*bytes)return STATUS_CRC_ERROR;
     memset(buf,0,bytes);
     struct btrfs_header* h=(void*)buf;
     h->bytenr=address; h->generation=11; h->nritems=leaf_items;
+    if((address-0x100000)/bytes==empty_index)h->nritems=0;
     struct btrfs_item* item=(void*)(buf+sizeof(*h));
     item->key=(struct btrfs_key){BTRFS_EXTENT_CSUM_OBJECTID,BTRFS_EXTENT_CSUM_KEY,((address-0x100000)/bytes)*65536};
     item->offset=bytes-sizeof(*h)-16; item->size=16;
@@ -64,7 +67,7 @@ NTSTATUS read_data(device_extension* v, uint64_t address, uint32_t bytes, void* 
     if(bad_header==5)item->offset=bytes;
     if(discovery && address==0x80000) {
         CHECK(!worker);
-        h->level=1; h->nritems=total;
+        h->level=1; h->nritems=empty_internal ? 0 : total;
         struct btrfs_key_ptr* pointers=(void*)(buf+sizeof(*h));
         for(unsigned i=0;i<total;i++) {
             pointers[i].key=children[i].key;
@@ -93,6 +96,7 @@ static void setup(unsigned leaves, unsigned nodesize) {
     total=leaves; reads=worker_reads=active=maximum=first_completed_at=fail_read=0;
     creates=joins=closes=fail_create=alive=0; allocations=releases=allocation_attempts=fail_at=0; peak_bytes=0; CHECK(!live_bytes);
     gate=discovery=false; leaf_items=1; bad_header=first_ordinal=0;
+    empty_index=UINT32_MAX; empty_internal=false;
     vcb.superblock.nodesize=nodesize; vcb.need_write=true; vcb.log_to_phys_loaded=true; vcb.sector_shift=12;
     InitializeListHead(&vcb.trees); InitializeListHead(&vcb.trees_hash); InitializeListHead(&vcb.dirty_fcbs);
     ExInitializeFastMutex(&vcb.trees_list_mutex); ExInitializeFastMutex(&parent_np.mutex);
@@ -275,9 +279,47 @@ static void demand_controls(void) {
         CHECK(reads==64); finish();
     }
 }
+static void empty_child_controls(bool internal_empty) {
+    for(unsigned preload=0;preload<2;preload++) {
+        setup(internal_empty ? 128 : 64,16384);
+        tree_data branches[2]={0}; tree first={0}; tree_nonpaged first_np;
+        uint64_t target=65536;
+        if(internal_empty) {
+            discovery=empty_internal=true; target=64*65536;
+            first.nonpaged=&first_np; ExInitializeFastMutex(&first_np.mutex);
+            first.header.level=1; first.header.nritems=64; first.root=&checksum;
+            first.parent=&parent; first.paritem=&branches[0];
+            InitializeListHead(&first.itemlist);
+            for(unsigned i=0;i<64;i++) {
+                RemoveEntryList(&children[i].list_entry);
+                InsertTailList(&first.itemlist,&children[i].list_entry);
+            }
+            branches[0].key=children[0].key; branches[0].treeholder.tree=&first;
+            branches[1].key=(struct btrfs_key){BTRFS_EXTENT_CSUM_OBJECTID,BTRFS_EXTENT_CSUM_KEY,target};
+            branches[1].treeholder=(tree_holder){0x80000,11,NULL};
+            InitializeListHead(&parent.itemlist);
+            InsertTailList(&parent.itemlist,&branches[0].list_entry);
+            InsertTailList(&parent.itemlist,&branches[1].list_entry);
+            parent.header.level=2; parent.header.nritems=2;
+        } else empty_index=1;
+        if(preload)run_preload();
+        struct btrfs_key key={BTRFS_EXTENT_CSUM_OBJECTID,BTRFS_EXTENT_CSUM_KEY,target};
+        traverse_ptr result={0};
+        NTSTATUS status=find_item(&vcb,&checksum,&result,&key,false,NULL);
+        printf("empty %s preload=%u status=%08x\n",internal_empty ? "internal" : "leaf",preload,(unsigned)status); fflush(stdout);
+        CHECK(status==STATUS_NOT_FOUND);
+        finish();
+        if(internal_empty)pthread_mutex_destroy(&first_np.mutex.lock);
+    }
+}
 #endif
 int main(int argc, char** argv) {
+#if HAVE_PREFETCH
+    if(argc>1 && !strcmp(argv[1],"empty-internal")) { empty_child_controls(true); return 0; }
+    if(argc>1 && !strcmp(argv[1],"empty-leaf")) { empty_child_controls(false); return 0; }
+#else
     (void)argv;
+#endif
     setup(64,16384); gate=true; do_flush(&vcb);
     printf("{\"leaves\":64,\"reads_before_first_completion\":%u,\"maximum_reads\":%u,\"readers_created\":%u,\"joined\":%u,\"peak_requested_pool\":%zu}\n",first_completed_at,maximum,creates,joins,peak_bytes);
     fflush(stdout);
@@ -287,6 +329,7 @@ int main(int argc, char** argv) {
     failure_controls(); selection_controls(); profile_controls(); range_controls(); budget_control();
     publication_controls(); discovery_controls(); cap_controls();
     demand_controls();
+    empty_child_controls(false); empty_child_controls(true);
 #endif
     printf("%u production preload concurrency/ownership scenarios passed\n",scenarios);
 }

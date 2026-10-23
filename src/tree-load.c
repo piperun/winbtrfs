@@ -293,7 +293,7 @@ bool publish_prefetched_tree(device_extension* Vcb, tree_holder* holder, root* r
     uint32_t i, payload;
     bool adopted = false;
 
-    if (!parent || !parent->nonpaged || header->level || header->bytenr != address ||
+    if (!parent || !parent->nonpaged || header->level || !header->nritems || header->bytenr != address ||
         (generation && header->generation != generation) ||
         header->nritems > (Vcb->superblock.nodesize - sizeof(*header)) / sizeof(*entries))
         return false;

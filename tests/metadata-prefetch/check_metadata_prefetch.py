@@ -12,6 +12,7 @@ p.add_argument('--revision')
 p.add_argument('--sanitize', action='store_true')
 p.add_argument('--init', choices=['pattern', 'zero'], default='pattern')
 p.add_argument('--baseline', action='store_true')
+p.add_argument('--case')
 a = p.parse_args()
 repo, out = a.repo.resolve(), a.build_dir.resolve()
 out.mkdir(parents=True, exist_ok=True)
@@ -58,4 +59,4 @@ flags = ['-std=c11', '-D_POSIX_C_SOURCE=200809L', '-O1', '-g', '-pthread', '-Wal
 if a.sanitize: flags += ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-no-pie']
 binary = out / 'metadata-prefetch-test'
 subprocess.run(['gcc', *flags, '-I', str(out), '-I', str(here), str(here / 'prefetch_test.c'), '-o', str(binary)], check=True)
-subprocess.run([str(binary), *(['baseline'] if a.baseline else [])], check=True, timeout=90)
+subprocess.run([str(binary), *([a.case] if a.case else ['baseline'] if a.baseline else [])], check=True, timeout=90)
