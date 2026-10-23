@@ -14,6 +14,22 @@ ioctl=(repo/'src/btrfsioctl.h').read_text();end=ioctl.index('} btrfs_balance_opt
 balance=(repo/'src/balance-worker.c').read_text()
 (out/'balance.inc').write_text('\n'.join(function(balance,n) for n in ['static __inline uint64_t get_chunk_dup_type(','static uint16_t get_chunk_size_factor(','static bool should_balance_chunk(','static NTSTATUS regenerate_space_list(']))
 with (out/'balance.inc').open('a') as stream:stream.write(function((repo/'src/balance-device.c').read_text(),'static NTSTATUS check_device_removal('))
+removal=function((repo/'src/balance-device.c').read_text(),'NTSTATUS finish_removing_device(')
+removal=removal[removal.index('    if (Vcb->need_write)'):removal.index('    // remove entry in chunk tree')]
+startup=function(balance,'void __stdcall balance_thread(')
+startup=startup[startup.index('    InitializeListHead(&chunks);')+len('    InitializeListHead(&chunks);'):startup.index('    // FIXME - what are we supposed to do with limit_start?')]
+with (out/'balance.inc').open('a') as stream:
+ stream.write('static NTSTATUS removal_preamble(device_extension* Vcb,device* dev) {\nNTSTATUS Status;\n'+removal+'return Status;\n}\n')
+ stream.write('static NTSTATUS balance_start(device_extension* Vcb) {\nNTSTATUS Status=STATUS_SUCCESS;\n'+startup+'end:\nreturn Status;\n}\n')
+dismount=(repo/'src/volume-dismount.c').read_text()
+handoff=[function(dismount,n) for n in ['NTSTATUS pnp_remove_device(','NTSTATUS pnp_surprise_removal(','NTSTATUS dismount_volume(']]
+handoff.append('static NTSTATUS invalidate_handoff(device_extension* Vcb,PDEVICE_OBJECT devobj,PIRP Irp) {\nNTSTATUS Status=STATUS_SUCCESS;\n'+function(dismount,'if (Vcb->Vpb == devobj->Vpb)')+'end:\nreturn Status;\n}\n')
+handoff.append(function((repo/'src/volume-wakeup.c').read_text(),'void __stdcall check_after_wakeup('))
+uninit=function((repo/'src/volume-lifecycle.c').read_text(),'void uninit(')
+prefix=uninit[:uninit.index('    // FIXME - needs global_loading_lock')]
+prefix=prefix.replace('void uninit(', 'static void uninit_preamble(').replace('    NTSTATUS Status;\n','').replace('    LIST_ENTRY* le;\n','')
+handoff.append(prefix+'}\n')
+(out/'handoff.inc').write_text('\n'.join(handoff))
 source=(repo/'src/free-space.c').read_text()
 names=['static void order_space_entry(','static void place_space_entry(','static NTSTATUS space_list_add_from(','NTSTATUS space_list_add2(','static void order_space_entries(','NTSTATUS space_list_merge(','NTSTATUS space_list_subtract2(']
 (out/'spaces.inc').write_text('\n'.join(function(source,n) for n in names))

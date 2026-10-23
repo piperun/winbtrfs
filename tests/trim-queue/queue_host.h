@@ -8,7 +8,10 @@ typedef int32_t LONG;
 typedef uint32_t ULONG;typedef void* PVOID;
 typedef struct {unsigned held;} ERESOURCE;
 typedef struct {bool signaled;} KEVENT;
-typedef struct {unsigned refs,id,StackSize;} DEVICE_OBJECT,*PDEVICE_OBJECT,FILE_OBJECT,*PFILE_OBJECT;
+typedef struct DEVICE_OBJECT DEVICE_OBJECT,*PDEVICE_OBJECT,FILE_OBJECT,*PFILE_OBJECT;
+typedef struct {unsigned Flags,Type,Size;PDEVICE_OBJECT DeviceObject,RealDevice;} VPB,*PVPB;
+struct DEVICE_OBJECT {unsigned refs,id,StackSize;void* DeviceExtension;PVPB Vpb;};
+typedef struct {PDEVICE_OBJECT mounted_device;} volume_device_extension;
 typedef struct {NTSTATUS Status;uintptr_t Information;} IO_STATUS_BLOCK;
 typedef struct {int64_t StartingOffset;uint64_t LengthInBytes;} DEVICE_DATA_SET_RANGE;
 typedef struct {ULONG Size,Action,Flags,ParameterBlockOffset,ParameterBlockLength,DataSetRangesOffset,DataSetRangesLength;} DEVICE_MANAGE_DATA_SET_ATTRIBUTES;
@@ -20,7 +23,7 @@ typedef struct {LIST_ENTRY list_entry,space,trim_list;PDEVICE_OBJECT devobj;PFIL
 struct btrfs_chunk {uint64_t type,stripe_len,length;uint16_t num_stripes,sub_stripes;struct {uint64_t offset,devid;} stripe[4];};
 struct chunk {LIST_ENTRY list_entry,space,space_size,deleting,pending_trims,list_entry_balance;unsigned held;uint64_t offset,used;struct btrfs_chunk* chunk_item;device** devices;bool space_changed,reloc;};
 struct trim_state;
-typedef struct {LIST_ENTRY devices,chunks;ERESOURCE tree_lock,chunk_lock;bool trim,removing;struct{bool no_trim,no_barrier;}options;struct trim_state* trim_state;struct {btrfs_balance_opts opts[3];}balance;}device_extension;
+typedef struct {LIST_ENTRY devices,chunks,list_entry;ERESOURCE tree_lock,chunk_lock;bool trim,removing,locked,readonly,need_write,disallow_dismount;unsigned page_file_count,open_files;PDEVICE_OBJECT devobj;volume_device_extension* vde;PVPB Vpb;void* root_file;struct{uint64_t generation;}superblock;struct{bool no_trim,no_barrier;}options;struct trim_state* trim_state;struct {btrfs_balance_opts opts[3];NTSTATUS status;}balance;}device_extension;
 #define NonPagedPool 0
 #define NotificationEvent 0
 #define Executive 0
@@ -30,6 +33,14 @@ typedef struct {LIST_ENTRY devices,chunks;ERESOURCE tree_lock,chunk_lock;bool tr
 #define STATUS_IO_DEVICE_ERROR ((NTSTATUS)0xc0000185)
 #define STATUS_CANCELLED ((NTSTATUS)0xc0000120)
 #define STATUS_DEVICE_NOT_READY ((NTSTATUS)0xc00000a3)
+#define STATUS_ACCESS_DENIED ((NTSTATUS)0xc0000022)
+#define VPB_MOUNTED 1
+#define VPB_DIRECT_WRITES_ALLOWED 2
+#define VPB_REMOVE_PENDING 4
+#define IO_TYPE_VPB 10
+#define FSRTL_VOLUME_DISMOUNT 1
+#define FSRTL_VOLUME_FORCED_CLOSED 2
+#define _In_
 #define IRP_BUFFERED_IO 16
 #define IRP_MJ_DEVICE_CONTROL 14
 #define IOCTL_STORAGE_MANAGE_DATA_SET_ATTRIBUTES 0x2d9404
@@ -67,6 +78,7 @@ static void get_raid0_offset(uint64_t a,uint64_t b,uint16_t c,uint64_t* d,uint16
 
 static void poll_during_signal(void);
 static void balance_allocation_during_preparation(void);
+static void check_handoff_ownership(void);
 
 #define TRACE(...) ((void)0)
 

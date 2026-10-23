@@ -19,6 +19,7 @@
 #include "btrfs_drv.h"
 #include "volume-lock.h"
 #include "volume-dismount.h"
+#include "trim.h"
 
 extern LIST_ENTRY VcbList;
 extern ERESOURCE global_loading_lock;
@@ -116,6 +117,8 @@ NTSTATUS invalidate_volumes(PIRP Irp) {
                 flush_fcb_caches(Vcb);
 
                 ExReleaseResourceLite(&Vcb->tree_lock);
+
+                trim_drain(Vcb);
 
                 IoAcquireVpbSpinLock(&irql);
 
@@ -221,9 +224,15 @@ NTSTATUS dismount_volume(device_extension* Vcb, bool shutdown, PIRP Irp) {
 
     if (Vcb->vde) {
         update_volumes(Vcb);
-        Vcb->vde->mounted_device = NULL;
     }
 
+    ExReleaseResourceLite(&Vcb->tree_lock);
+
+    trim_drain(Vcb);
+
+    ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
+    if (Vcb->vde)
+        Vcb->vde->mounted_device = NULL;
     ExReleaseResourceLite(&Vcb->tree_lock);
 
     if (!open_files)
@@ -242,12 +251,13 @@ NTSTATUS pnp_remove_device(PDEVICE_OBJECT DeviceObject) {
             WARN("FsRtlNotifyVolumeEvent returned %08lx\n", Status);
         }
 
-        if (Vcb->vde)
-            Vcb->vde->mounted_device = NULL;
-
         ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
         Vcb->removing = true;
         ExReleaseResourceLite(&Vcb->tree_lock);
+
+        trim_drain(Vcb);
+        if (Vcb->vde)
+            Vcb->vde->mounted_device = NULL;
 
         if (Vcb->open_files == 0)
             uninit(Vcb);
@@ -266,11 +276,14 @@ NTSTATUS pnp_surprise_removal(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
     if (DeviceObject->Vpb->Flags & VPB_MOUNTED) {
         ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
 
-        if (Vcb->vde)
-            Vcb->vde->mounted_device = NULL;
-
         Vcb->removing = true;
 
+        ExReleaseResourceLite(&Vcb->tree_lock);
+
+        trim_drain(Vcb);
+        ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
+        if (Vcb->vde)
+            Vcb->vde->mounted_device = NULL;
         ExReleaseResourceLite(&Vcb->tree_lock);
 
         if (Vcb->open_files == 0)

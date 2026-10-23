@@ -330,7 +330,10 @@ void trim_drain(device_extension* Vcb) {
         batch = CONTAINING_RECORD(state->batches.Flink, trim_batch, list_entry);
         if (batch->submitted && !trim_batch_finished(batch)) {
             ExReleaseResourceLite(&Vcb->tree_lock);
-            KeWaitForSingleObject(&state->event, Executive, KernelMode, false, NULL);
+            // Another drainer or the worker can consume the work event before
+            // this wait starts. Once stopping, idle stays set after the active
+            // batch completes because no new request can clear it.
+            KeWaitForSingleObject(&state->idle, Executive, KernelMode, false, NULL);
             ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
             continue;
         }

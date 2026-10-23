@@ -1,6 +1,9 @@
 static size_t allocations,fail_at,pool_live,irp_live,references,submitted,waits;
 static bool inline_completion, preempt_on_signal, completion_lock_held;
 static bool inject_balance_allocation, balance_allocation_blocked;
+static bool enforce_handoff_ownership;
+static bool preempt_drain_wait;
+static ERESOURCE global_loading_lock;
 static NTSTATUS completion_status=STATUS_SUCCESS;
 static PIRP pending_irps[16];static unsigned pending_count;
 static void* ExAllocatePoolWithTag(unsigned pool,size_t n,unsigned tag) {
@@ -9,9 +12,9 @@ static void* ExAllocatePoolWithTag(unsigned pool,size_t n,unsigned tag) {
 }
 static void ExFreePool(void* p) {CHECK(p&&pool_live);for(unsigned i=0;i<pending_count;i++)CHECK(p!=pending_irps[i]->AssociatedIrp.SystemBuffer&&p!=pending_irps[i]->context);pool_live--;free(p);}
 static NTSTATUS add_rollback_space(LIST_ENTRY* r,bool a,LIST_ENTRY* l,LIST_ENTRY* z,uint64_t s,uint64_t n,chunk* c){(void)r;(void)a;(void)l;(void)z;(void)s;(void)n;(void)c;CHECK(false);return STATUS_INSUFFICIENT_RESOURCES;}
-static void ExAcquireResourceExclusiveLite(ERESOURCE* r,bool wait){CHECK(wait&&!r->held);r->held=1;}
+static void ExAcquireResourceExclusiveLite(ERESOURCE* r,bool wait){check_handoff_ownership();CHECK(wait&&!r->held);r->held=1;}
 static void ExAcquireResourceSharedLite(ERESOURCE* r,bool wait){ExAcquireResourceExclusiveLite(r,wait);}
-static void ExReleaseResourceLite(ERESOURCE* r){CHECK(r->held);r->held=0;}
+static void ExReleaseResourceLite(ERESOURCE* r){check_handoff_ownership();CHECK(r->held);r->held=0;}
 static void acquire_chunk_lock(chunk* c,device_extension* v){CHECK(v->chunk_lock.held&&!c->held);c->held=1;}
 static void release_chunk_lock(chunk* c,device_extension* v){CHECK(v->chunk_lock.held&&c->held);c->held=0;}
 static void ObReferenceObject(void* p){CHECK(p);((DEVICE_OBJECT*)p)->refs++;references++;}
@@ -34,7 +37,7 @@ static NTSTATUS IoCallDriver(PDEVICE_OBJECT d,PIRP p){
  p->submitted=true;submitted++;if(inline_completion){complete(p);return completion_status;}
  CHECK(pending_count<16);pending_irps[pending_count++]=p;return STATUS_PENDING;
 }
-static NTSTATUS KeWaitForSingleObject(KEVENT* e,int reason,int mode,bool alert,void* timeout){CHECK(!active->tree_lock.held&&!active->chunk_lock.held&&reason==Executive&&mode==KernelMode&&!alert&&!timeout);waits++;while(pending_count){PIRP p=pending_irps[--pending_count];complete(p);}CHECK(e->signaled);return STATUS_SUCCESS;}
+static NTSTATUS KeWaitForSingleObject(KEVENT* e,int reason,int mode,bool alert,void* timeout){CHECK(!active->tree_lock.held&&!active->chunk_lock.held&&reason==Executive&&mode==KernelMode&&!alert&&!timeout);waits++;while(pending_count){PIRP p=pending_irps[--pending_count];complete(p);}if(preempt_drain_wait){preempt_drain_wait=false;trim_process(active);}CHECK(e->signaled);return STATUS_SUCCESS;}
 static void free_spaces(LIST_ENTRY* list){while(!IsListEmpty(list))ExFreePool(CONTAINING_RECORD(RemoveHeadList(list),space,list_entry));}
 
 static void KeInitializeSpinLock(KSPIN_LOCK* lock){lock->held=false;}

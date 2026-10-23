@@ -18,6 +18,7 @@
 // Validate backing devices after sleep and invalidate stale mounts.
 #include "btrfs_drv.h"
 #include "volume-wakeup.h"
+#include "trim.h"
 
 extern ERESOURCE global_loading_lock;
 
@@ -106,6 +107,10 @@ void __stdcall check_after_wakeup(PDEVICE_OBJECT DeviceObject, PVOID con) {
                 newvpb->Flags = VPB_DIRECT_WRITES_ALLOWED;
 
                 Vcb->removing = true;
+
+                ExReleaseResourceLite(&Vcb->tree_lock);
+                trim_drain(Vcb);
+                ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
 
                 IoAcquireVpbSpinLock(&irql);
                 voldev->Vpb = newvpb;

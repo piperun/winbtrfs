@@ -31,6 +31,10 @@ void uninit(_In_ device_extension* Vcb) {
         ExReleaseResourceLite(&Vcb->tree_lock);
     }
 
+    // References keep request objects alive, but a raw writer can reuse their
+    // addresses as soon as this mount releases ownership.
+    trim_drain(Vcb);
+
     if (Vcb->vde && Vcb->vde->mounted_device == Vcb->devobj)
         Vcb->vde->mounted_device = NULL;
 

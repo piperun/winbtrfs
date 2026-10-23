@@ -7,7 +7,21 @@
 #include "queue.inc"
 #include "mapping.inc"
 #include "clean.inc"
+
+/* Boundaries unrelated to discard ownership retain their normal success path. */
+#define WARN(...) ((void)0)
+static void IoAcquireVpbSpinLock(KIRQL* irql){CHECK(!pending_count);*irql=0;}
+static void IoReleaseVpbSpinLock(KIRQL irql){CHECK(!irql);}
+static NTSTATUS FsRtlNotifyVolumeEvent(void* object,unsigned event){(void)object;(void)event;return STATUS_SUCCESS;}
+static NTSTATUS do_write(device_extension* v,PIRP irp){(void)v;(void)irp;return STATUS_SUCCESS;}
+static void free_trees(device_extension* v){(void)v;}
+static void flush_fcb_caches(device_extension* v){(void)v;}
+static void update_volumes(device_extension* v){(void)v;}
+static void CcWaitForCurrentLazyWriterActivity(void){}
+static void uninit(device_extension* v){(void)v;CHECK(!pending_count);}
+static bool device_still_valid(device* d,uint64_t generation){(void)d;(void)generation;return false;}
 #include "balance.inc"
+#include "handoff.inc"
 
 static device_extension volume;
 static chunk chunks[3];
@@ -15,6 +29,13 @@ static device devices[3];
 static DEVICE_OBJECT objects[3];
 static FILE_OBJECT files[3];
 static struct btrfs_chunk items[3];
+static void check_handoff_ownership(void) {
+    if(enforce_handoff_ownership&&pending_count){
+        CHECK(active->vde&&active->vde->mounted_device==active->devobj);
+        CHECK(active->Vpb->DeviceObject==active->devobj);
+        CHECK(!(active->Vpb->Flags&VPB_DIRECT_WRITES_ALLOWED));
+    }
+}
 static void range(LIST_ENTRY* head,uint64_t start,uint64_t length) {
     space* s=ExAllocatePoolWithTag(PagedPool,sizeof(*s),ALLOC_TAG);CHECK(s);
     s->address=start;s->size=length;InsertTailList(head,&s->list_entry);
@@ -171,6 +192,7 @@ static void physical_reclaim_after_shrink(bool crossing) {
     cleanup();
 }
 static void inflight_shutdown(void) {setup(1);commit();trim_process(&volume);cleanup();CHECK(waits==1);}
+static void drain_poller_consumes_work_event(void) {setup(1);commit();trim_process(&volume);preempt_drain_wait=true;cleanup();CHECK(waits==1&&!preempt_drain_wait);}
 static void physical_oom(unsigned slot) {
     setup(1);free_spaces(&chunks[0].deleting);range(&devices[0].space,0x100000,0x10000);range(&devices[0].trim_list,0x102000,0x1000);
     fail_at=allocations+slot;commit();fail_at=0;
@@ -222,7 +244,7 @@ static void balance_quiesces_before_selection(bool allocation_failure) {
     setup(1);volume.balance.opts[0].flags=BTRFS_BALANCE_OPTS_ENABLED;
     commit();trim_process(&volume);range(&chunks[0].deleting,0x14000,0x1000);commit();
     if(allocation_failure)fail_at=allocations+1;
-    NTSTATUS status=trim_quiesce(&volume);fail_at=0;
+    NTSTATUS status=balance_start(&volume);fail_at=0;
     CHECK(!pending_count&&submitted==1&&waits==1);
     CHECK(volume.trim_state->pauses==1);
     if(allocation_failure){CHECK(status==STATUS_INSUFFICIENT_RESOURCES&&trim_chunk_pending(&chunks[0]));}
@@ -231,16 +253,37 @@ static void balance_quiesces_before_selection(bool allocation_failure) {
 }
 static void removal_rejects_live_stripes(void) {
     setup(1);items[0].stripe[0].devid=devices[0].devitem.devid;
-    CHECK(check_device_removal(&volume,&devices[0])==STATUS_DEVICE_NOT_READY);
+    CHECK(removal_preamble(&volume,&devices[0])==STATUS_DEVICE_NOT_READY);
     commit();trim_process(&volume);
-    CHECK(check_device_removal(&volume,&devices[0])==STATUS_DEVICE_NOT_READY);
+    CHECK(removal_preamble(&volume,&devices[0])==STATUS_DEVICE_NOT_READY);
     finish_all(false);trim_process(&volume);
-    CHECK(check_device_removal(&volume,&devices[0])==STATUS_DEVICE_NOT_READY);
+    CHECK(removal_preamble(&volume,&devices[0])==STATUS_DEVICE_NOT_READY);
     items[0].stripe[0].devid=devices[0].devitem.devid+1;
-    CHECK(NT_SUCCESS(check_device_removal(&volume,&devices[0])));cleanup();
+    CHECK(NT_SUCCESS(removal_preamble(&volume,&devices[0])));cleanup();
+}
+static void ownership_handoff_drains(unsigned path) {
+    setup(1);VPB vpb={.Flags=VPB_MOUNTED,.DeviceObject=&objects[0]};
+    DEVICE_OBJECT real={.Vpb=&vpb};vpb.RealDevice=&real;
+    volume_device_extension vde={.mounted_device=&objects[0]};
+    volume.Vpb=&vpb;volume.devobj=&objects[0];volume.vde=&vde;volume.open_files=1;
+    InitializeListHead(&volume.list_entry);
+    objects[0].Vpb=&vpb;objects[0].DeviceExtension=&volume;
+    commit();trim_process(&volume);CHECK(pending_count==1);enforce_handoff_ownership=true;
+    switch(path){
+    case 0:CHECK(NT_SUCCESS(pnp_remove_device(&objects[0])));break;
+    case 1:CHECK(NT_SUCCESS(pnp_surprise_removal(&objects[0],NULL)));break;
+    case 2:CHECK(NT_SUCCESS(dismount_volume(&volume,false,NULL)));break;
+    case 3:check_after_wakeup(&objects[0],&volume);break;
+    case 4:uninit_preamble(&volume);break;
+    case 5:CHECK(NT_SUCCESS(invalidate_handoff(&volume,&real,NULL)));break;
+    }
+    CHECK(!pending_count&&waits==1);enforce_handoff_ownership=false;
+    if(real.Vpb!=&vpb)ExFreePool(real.Vpb);
+    cleanup();
 }
 int main(int argc,char** argv) {
     if(argc!=2)return 2;
+    if(!strcmp(argv[1],"drain-poller-consumes-work-event")){drain_poller_consumes_work_event();return 0;}
     if(!strcmp(argv[1],"physical-preparation-excludes-allocation")){physical_preparation_excludes_allocation();return 0;}
     if(!strcmp(argv[1],"regenerated-map-oom-preserves-reservations")){regenerated_map_failure_preserves_reservations();return 0;}
     if(!strcmp(argv[1],"physical-reclaim-crossing-shrink")){physical_reclaim_after_shrink(true);return 0;}
@@ -248,8 +291,9 @@ int main(int argc,char** argv) {
     if(!strcmp(argv[1],"balance-quiesces-before-selection")){balance_quiesces_before_selection(false);return 0;}
     if(!strcmp(argv[1],"balance-quiesce-reclaim-oom")){balance_quiesces_before_selection(true);return 0;}
     if(!strcmp(argv[1],"removal-rejects-live-stripes")){removal_rejects_live_stripes();return 0;}
+    unsigned handoff_path;if(sscanf(argv[1],"ownership-handoff-%u",&handoff_path)==1){CHECK(handoff_path<6);ownership_handoff_drains(handoff_path);return 0;}
     const char* names[]={"deferred-unrelated-open-and-allocation","multiple-commits-one-inflight","pending-cache-view","reclaim-oom-no-resubmit","physical-intersection-excludes-reused-range","queue-memory-ceiling","partial-reclaim-never-serializes-reused-space","removed-device-not-replacement","removal-before-submission","regenerated-device-map-excludes-reservations","queued-shutdown-no-discard","inflight-shutdown-drains-outside-lock","initialization-oom","completion-poll-before-wakeup","clean-queues-without-wait","merge-failure-first-chunk","merge-failure-second-chunk","balance-excludes-pending","relocating-chunk-not-queued","volume-lock-quiesces-discard"};
-    if(!strcmp(argv[1],"--list")) {puts("balance-quiesces-before-selection");puts("balance-quiesce-reclaim-oom");puts("removal-rejects-live-stripes");puts("physical-reclaim-crossing-shrink");puts("physical-reclaim-above-shrink");puts("regenerated-map-oom-preserves-reservations");puts("physical-preparation-excludes-allocation");for(unsigned i=0;i<20;i++)puts(names[i]);for(unsigned i=1;i<=40;i++)printf("preparation-oom-%u\n",i);for(unsigned i=1;i<=20;i++)printf("physical-oom-%u\n",i);for(unsigned m=0;m<3;m++)for(unsigned s=0;s<3;s++)printf("completion-%u-status-%u\n",m,s);return 0;}
+    if(!strcmp(argv[1],"--list")) {puts("drain-poller-consumes-work-event");for(unsigned i=0;i<6;i++)printf("ownership-handoff-%u\n",i);puts("balance-quiesces-before-selection");puts("balance-quiesce-reclaim-oom");puts("removal-rejects-live-stripes");puts("physical-reclaim-crossing-shrink");puts("physical-reclaim-above-shrink");puts("regenerated-map-oom-preserves-reservations");puts("physical-preparation-excludes-allocation");for(unsigned i=0;i<20;i++)puts(names[i]);for(unsigned i=1;i<=40;i++)printf("preparation-oom-%u\n",i);for(unsigned i=1;i<=20;i++)printf("physical-oom-%u\n",i);for(unsigned m=0;m<3;m++)for(unsigned s=0;s<3;s++)printf("completion-%u-status-%u\n",m,s);return 0;}
     for(unsigned i=0;i<20;i++)if(!strcmp(argv[1],names[i])){switch(i){case 0:deferred();break;case 1:repeated();break;case 2:cache_view();break;case 3:reclaim_failure();break;case 4:physical();break;case 5:ceiling();break;case 6:partial_reclaim();break;case 7:removed_device();break;case 8:removal_before_submission();break;case 9:regenerated_map();break;case 10:queued_shutdown();break;case 11:inflight_shutdown();break;case 12:initialization_oom();break;case 13:completion_poll_race();break;case 14:clean_queues_without_wait();break;case 15:clean_merge_failure(1);break;case 16:clean_merge_failure(2);break;case 17:balance_excludes_pending();break;case 18:relocating_chunk_not_queued();break;case 19:volume_lock_quiesces_discard();break;}return 0;}
     unsigned a,b;if(sscanf(argv[1],"preparation-oom-%u",&a)==1){preparation_failure(a);return 0;}
     if(sscanf(argv[1],"physical-oom-%u",&a)==1){physical_oom(a);return 0;}
