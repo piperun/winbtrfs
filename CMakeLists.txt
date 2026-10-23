@@ -117,6 +117,7 @@ set(SRC_FILES src/balance.c
     src/file-read.c
     src/flushthread.c
     src/free-space.c
+    src/space-list.c
     src/fsctl.c
     src/fsrtl.c
     src/galois.c

@@ -5,6 +5,7 @@ from pathlib import Path
 p=argparse.ArgumentParser();p.add_argument('repo',type=Path);p.add_argument('--build-dir',type=Path,required=True);p.add_argument('--init',choices=['zero','pattern'],default='pattern');p.add_argument('--sanitize',action='store_true');args=p.parse_args()
 repo=args.repo.resolve();out=args.build_dir.resolve();out.mkdir(parents=True,exist_ok=True)
 def function(source,name):
+ if name not in source and name.startswith('static '):name=name[7:]
  a=source.index(name);b=source.index('{',a);e=b+1;depth=1
  while depth:depth+=(source[e]=='{')-(source[e]=='}');e+=1
  return source[a:e]+'\n'
@@ -30,7 +31,7 @@ prefix=uninit[:uninit.index('    // FIXME - needs global_loading_lock')]
 prefix=prefix.replace('void uninit(', 'static void uninit_preamble(').replace('    NTSTATUS Status;\n','').replace('    LIST_ENTRY* le;\n','')
 handoff.append(prefix+'}\n')
 (out/'handoff.inc').write_text('\n'.join(handoff))
-source=(repo/'src/free-space.c').read_text()
+source=(repo/'src/free-space.c').read_text()+(repo/'src/space-list.c').read_text()
 names=['static void order_space_entry(','static void place_space_entry(','static NTSTATUS space_list_add_from(','NTSTATUS space_list_add2(','static void order_space_entries(','NTSTATUS space_list_merge(','NTSTATUS space_list_subtract2(']
 (out/'spaces.inc').write_text('\n'.join(function(source,n) for n in names))
 for src,dest in [('src/trim-state.h','queue-types.inc'),('src/trim-queue.c','queue.inc'),('src/trim-reservations.c','reservations.inc'),('src/trim-map-queue.c','mapping.inc')]:

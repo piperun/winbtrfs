@@ -44,7 +44,7 @@ header = read("src/btrfs_drv.h")
 end = header.index("} space;") + len("} space;")
 (out / "types.inc").write_text(header[header.rindex("typedef struct {", 0, end):end] + "\n")
 
-source = read("src/free-space.c") + read("src/cache-allocation.c", optional=True) + read("src/cache-write.c", optional=True)
+source = read("src/free-space.c") + read("src/space-list.c", optional=True) + read("src/cache-allocation.c", optional=True) + read("src/cache-write.c", optional=True)
 helper = "static NTSTATUS space_list_add_from(" in source
 # Marker, the counter for its list steps, and whether it must walk a list. The
 # helpers are absent before the one-pass merge. The loaders add entries with
@@ -71,7 +71,7 @@ hooks = {"static NTSTATUS space_list_add_from(": [
              (r"(?m)^( +)break;$", r"\1{ note_failure(&touched); break; }", 1)]}
 plain, counted = "", ""
 for marker, counter, walks in functions:
-    if marker not in source:
+    if marker not in source and not (marker.startswith("static ") and marker[7:] in source):
         continue
     text = function(source, marker)
     # Every cursor step through a list has the form `le = le->Flink`.
