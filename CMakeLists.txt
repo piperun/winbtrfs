@@ -147,6 +147,7 @@ set(SRC_FILES src/balance.c
     src/tree-balance.c
     src/tree-write.c
     src/root-create.c
+    src/tree-load.c
     src/treefuncs.c
     src/rollback.c
     src/trim-mapping.c
