@@ -105,7 +105,7 @@ NTSTATUS do_tree_writes(device_extension* Vcb, LIST_ENTRY* tree_writes, bool no_
     chunk* c;
     LIST_ENTRY* le;
     tree_write* tw;
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_SUCCESS;
     ULONG i, num_bits;
     write_data_context* wtc;
     ULONG bit_num = 0;
@@ -217,7 +217,8 @@ NTSTATUS do_tree_writes(device_extension* Vcb, LIST_ENTRY* tree_writes, bool no_
         if (!NT_SUCCESS(Status)) {
             ERR("write_data returned %08lx\n", Status);
 
-            for (i = 0; i < num_bits; i++) {
+            // write_data releases its own failed context.
+            for (i = 0; i < bit_num; i++) {
                 free_write_data_stripes(&wtc[i]);
             }
             ExFreePool(wtc);
@@ -258,7 +259,8 @@ NTSTATUS do_tree_writes(device_extension* Vcb, LIST_ENTRY* tree_writes, bool no_
             write_data_stripe* stripe = CONTAINING_RECORD(le, write_data_stripe, list_entry);
 
             if (stripe->status != WriteDataStatus_Ignore && !NT_SUCCESS(stripe->iosb.Status)) {
-                Status = stripe->iosb.Status;
+                if (NT_SUCCESS(Status))
+                    Status = stripe->iosb.Status;
                 log_device_error(Vcb, stripe->device, BTRFS_DEV_STAT_WRITE_ERRS);
                 break;
             }
@@ -286,17 +288,17 @@ NTSTATUS do_tree_writes(device_extension* Vcb, LIST_ENTRY* tree_writes, bool no_
                 while (!IsListEmpty(&c->partial_stripes)) {
                     partial_stripe* ps = CONTAINING_RECORD(RemoveHeadList(&c->partial_stripes), partial_stripe, list_entry);
 
-                    Status = flush_partial_stripe(Vcb, c, ps);
+                    NTSTATUS FlushStatus = flush_partial_stripe(Vcb, c, ps);
 
                     if (ps->bmparr)
                         ExFreePool(ps->bmparr);
 
                     ExFreePool(ps);
 
-                    if (!NT_SUCCESS(Status)) {
-                        ERR("flush_partial_stripe returned %08lx\n", Status);
+                    if (!NT_SUCCESS(FlushStatus)) {
+                        ERR("flush_partial_stripe returned %08lx\n", FlushStatus);
                         ExReleaseResourceLite(&c->partial_stripes_lock);
-                        return Status;
+                        return NT_SUCCESS(Status) ? FlushStatus : Status;
                     }
                 }
 
@@ -307,7 +309,7 @@ NTSTATUS do_tree_writes(device_extension* Vcb, LIST_ENTRY* tree_writes, bool no_
         }
     }
 
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 void calc_tree_checksum(device_extension* Vcb, struct btrfs_header* th) {
