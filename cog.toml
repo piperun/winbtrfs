@@ -1,4 +1,6 @@
 tag_prefix = "v"
+branch_whitelist = ["master"]
+ignore_merge_commits = true
 
 # Keep the CMake and Windows driver versions together in a release commit.
 pre_bump_hooks = ["python3 ci/set-version.py {{version}}"]
