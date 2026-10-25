@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 
-project(btrfs VERSION 1.10.0)
+project(btrfs VERSION 1.10.1)
 
 option(WITH_TEST "Compile test program" ON)
 option(WITH_RUST_RANGES "Use Rust for allocated-range clipping" OFF)

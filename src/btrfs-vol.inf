@@ -10,7 +10,7 @@ Signature   = "$Windows NT$"
 Class       = Volume
 ClassGuid   = {71a27cdd-812a-11d0-bec7-08002be2092f}
 Provider    = %Me%
-DriverVer   = 09/01/2026,1.10.0.0
+DriverVer   = 10/25/2026,1.10.1.0
 CatalogFile = btrfs.cat
 PnpLockdown = 1
 

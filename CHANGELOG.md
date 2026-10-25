@@ -1,0 +1,191 @@
+# Changelog
+All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
+
+- - -
+## v1.10.1 - 2026-10-25
+#### Features
+- add opt-in Rust allocated-range clipping - (96fe76d) - piperun
+#### Bug Fixes
+- preserve metadata write errors and cleanup ownership - (22f234a) - piperun
+- preserve demand lookup state for empty checksum children - (9b0d609) - piperun
+- release partially constructed metadata trees - (871620a) - piperun
+- keep tree write completion callback file private - (bbb06c1) - piperun
+- reclaim discard ranges with a forward merge - (2ec0d26) - piperun
+- drain discard before publishing volume ownership - (22bf8b9) - piperun
+- preserve discard reservations across device operations - (01f2cd1) - piperun
+- service discard without delaying periodic volume flushes - (d48a2c3) - piperun
+- reserve automatic discard ranges across transactions - (2bf5f14) - piperun
+- own asynchronous discard requests and reserved ranges - (e1da614) - piperun
+- honor parent case sensitivity when creating files - (15020a5) - piperun
+- provide file information flags for legacy WDK targets - (cbdf0b9) - piperun
+- release batch payloads when queueing fails - (c71c67a) - piperun
+- link generated batch extrefs only once - (12530e3) - piperun
+- reject consumed compressed inline extent ranges - (2bde2e6) - piperun
+- reject truncated outer LZO headers before subtracting - (7a1c3d3) - piperun
+- validate LZO segment spans before decoding - (f313048) - piperun
+- consume batch ownership on commit failure - (71befb1) - piperun
+- retain caller ownership when batch index splitting fails - (8af5606) - piperun
+- return failed batch extrefs to their lookaside - (924aa54) - piperun
+- reject inconsistent file extents on load - (c67f8ec) - piperun
+- free chunk device arrays when a mount device is missing - (54db8b1) - piperun
+- discard free-space cache mutations after mount failure - (4338708) - piperun
+- release notify synchronization after mount failure - (603ecef) - piperun
+- reap root filerefs without stream-file owners - (18ed581) - piperun
+- bound v1 free-space cache entries and bitmaps - (8173de2) - piperun
+- clear pending batches after mount commit failure - (704fc61) - piperun
+- free device space lists after failed mounts - (84ec221) - piperun
+- release add-device allocations on failure - (d506c73) - piperun
+- release dirty FCB reference when flushing cache - (b1fbde5) - piperun
+- skip optional extent merging when allocation fails - (9da8aa7) - piperun
+- discard unreadable v1 free-space caches - (96758c2) - piperun
+- remove the quadratic scans from rationalize_extents - (aa2e9a5) - piperun
+- reject v1 cache bitmaps that mark space outside their chunk - (5d52b54) - piperun
+- excise a discarded v1 cache's extents before deleting its header - (1248af4) - piperun
+- release the v1 cache file when loading a chunk fails - (7b66f48) - piperun
+- report a failed allocation for a v1 cache bitmap run - (13b8460) - piperun
+- free a chunk's loaded free space when loading it fails - (b79ed0b) - piperun
+- stop fast I/O and MDL writes extending files - (39e43c3) - piperun
+- round up the size a free space tree bitmap item needs - (ab7f945) - piperun
+- reject stored free space ranges outside their chunk - (29616b4) - piperun
+- stop fast writes sleeping in the throttle under tree_lock - (a118441) - piperun
+- regenerate a chunk's free space when stored ranges overlap - (469ce25) - piperun
+- free loaded entries when rejecting a free space tree bitmap - (872b041) - piperun
+- link add_space_entry entries at the last entry's address - (03af14b) - piperun
+- free update_chunk_cache_tree's copy when copying or merging fails - (550f234) - piperun
+- free the lists update_chunk_cache copies - (e6dba69) - piperun
+- merge freed extents into space lists in one pass - (5f3492d) - piperun
+- report out of memory when adding a device fails - (ff86d98) - piperun
+- reject LX symlinks too short for their header - (7bf9ea3) - piperun
+- free loaded metadata when mounting fails - (152d858) - piperun
+- free the new extent when a prealloc write fails - (a3f300c) - piperun
+- keep LZO segment skips inside the extent - (3ed30c3) - piperun
+- bound inline extent reads by the stored data - (b75eb48) - piperun
+- release the volume probe PnP name - (6ce0b09) - piperun
+- preserve PnP usage notification state - (a8e4e56) - piperun
+- enforce access and locking for fast network info - (cc0a0d2) - piperun
+- validate reparse identity before deletion - (ec32d39) - piperun
+- finish compressed reads before freeing input - (bffd0ce) - piperun
+- handle CRLF in release version hook - (5ed6211) - piperun
+- report volume protection and device presence - (1ac67cb) - piperun
+- preserve reparse deletion state and attributes - (12bfaf6) - piperun
+- bound zero-filled reads and release completed jobs - (d0e0ab5) - piperun
+- honor checksum output and allocated query bounds - (b79778c) - piperun
+- preserve directory query identities and scan state - (34fadb2) - piperun
+- report the full stream filename on suffix overflow - (5631c22) - piperun
+- release boot option registry allocations - (d5bf2f0) - piperun
+- preserve retrieval query exits in MinGW builds - (51b3db6) - piperun
+- return consistent file retrieval pointer runs - (a496f58) - piperun
+- stop NOCOW writes at the current extent boundary - (47487d2) - piperun
+- reap the dummy FCB when mounting fails - (333652f) - piperun
+- record pending build and cleanup corrections - (4a99d1c) - piperun
+- keep mount lookasides alive through FCB cleanup - (cdbdb92) - piperun
+- finish RAID56 runs and release resources on errors - (774da4b) - piperun
+- reset RAID56 batch ownership before preparing reads - (6e90218) - piperun
+- use physical offsets for RAID10 scrub repairs - (e104f35) - piperun
+- release deleted parents in hard-link notifications - (113f44b) - piperun
+- retain stream names for delayed notifications - (3760435) - piperun
+- return extent merge reference errors from flush - (78dd84d) - piperun
+- retire skipped TRIM requests after allocation failure - (ad9ecb6) - piperun
+- free the rename dispatcher's temporary UTF-8 name - (4a8bf1a) - piperun
+- release borrowed parents after same-directory renames - (57c97b1) - piperun
+- balance hard-link query references and buffer sizing - (e56845d) - piperun
+- bound stored EAs and preserve metadata on failed updates - (19432b2) - piperun
+- include the name terminator in packed EA offsets - (be98327) - piperun
+- unwind failed create contexts before returning - (23ebf47) - piperun
+- release uppercase lookup buffers on invalid names - (6318380) - piperun
+- free copied base filenames when stream creation is denied - (cd572f1) - piperun
+- compare full xattr names when reusing ADS FCBs - (862e0fd) - piperun
+- forward stream collisions with balanced parent references - (34559bd) - piperun
+- reopen cached streams after fileref reaping - (f5c4cc7) - piperun
+- release stream collision resources before returning - (09bb62c) - piperun
+- reject cached name collisions after fileref reaping - (bdc861b) - piperun
+- compare cached uppercase names when creating files - (e0435e1) - piperun
+- remove unowned parent references during creation - (f87278b) - piperun
+- balance mknod creation references and rollback - (4260d93) - piperun
+- initialize mknod type before assigning security - (7155523) - piperun
+- reap mknod FCBs after inode rejection - (3eed7ee) - piperun
+- preserve mknod inode and subvolume identity - (a4b0140) - piperun
+- join volume threads before mount cleanup - (1ee2ec2) - piperun
+#### Performance Improvements
+- preload checksum leaves before background commits - (0df1fc3) - piperun
+- sort metadata write descriptors once before submission - (09d67b5) - piperun
+- assemble metadata write runs in one copy pass - (69ab9c7) - piperun
+- index unchanged internal tree nodes during lookup - (f4566fd) - piperun
+- index pending extent changes with a stable AVL tree - (e1ee46c) - piperun
+#### Tests
+- model FCB reference release in batch producer checks - (9b0b588) - piperun
+- reject unoptimized changed extent benchmark inputs - (a19a610) - piperun
+- add statistical changed-extent replay benchmark - (283b4b5) - piperun
+- compare rationalize_extents with another revision - (517b4c2) - piperun
+- check clean_space_cache releases chunk_lock after a failed merge - (5c9895e) - piperun
+- check space-list merges against an interval oracle - (23c741d) - piperun
+- add controlled C and Rust range comparison - (09e29f8) - piperun
+- benchmark C and Rust byte-range helpers - (da5321e) - piperun
+- honor Windows directory query prerequisites - (be01e7d) - piperun
+#### Continuous Integration
+- get rid of PKCS11CERT and PKCS11KEY secrets - (9a677e6) - Mark Harmstone
+- get rid of CERTIFICATE secret - (be433b3) - Mark Harmstone
+- request RFC3161 counter-signing explicitly - (dd3f099) - Mark Harmstone
+#### Refactoring
+- isolate metadata tree loading - (f519d1f) - piperun
+- separate tree search and transaction topics - (10a92e8) - piperun
+- isolate ordered free-space list operations - (eb0eca8) - piperun
+- isolate dismount and wakeup ownership helpers - (58091fc) - piperun
+- isolate exclusive volume access helpers - (028c852) - piperun
+- isolate transaction free-space and volume workers - (0f0406b) - piperun
+- extract file information compatibility declarations - (c62fd5b) - piperun
+- separate data chunk relocation from balance policy - (763c2df) - piperun
+- isolate chunk and changed extent types - (74dff79) - piperun
+- isolate changed extent flushing - (0fa5da3) - piperun
+- isolate chunk allocation and stripe selection - (bf6fffd) - piperun
+- isolate transaction rollback application - (1949118) - piperun
+- extract pending extent reference changes - (35fad98) - piperun
+- extract batched tree updates and collision handling - (0c24c64) - piperun
+- extract file control block loading - (13b27e7) - piperun
+- extract volume mount flow and metadata loading - (3e6cac1) - piperun
+- separate compressed writes from compression codecs - (01c470e) - piperun
+- extract the add-device handler from fsctl - (25fb968) - piperun
+- move fsctl.c declarations into fsctl.h - (90ac8e2) - piperun
+- simplify checked Rust range clipping - (1a1f1f8) - piperun
+- extract allocated-range clipping into C helper - (a6ac973) - piperun
+- extract file reads and volume control handlers - (e5fba37) - piperun
+- extract file and directory query handlers - (ff36ca5) - piperun
+- extract writes to existing file extents - (df42c6c) - piperun
+- extract retrieval pointer queries from fsctl - (9c5b490) - piperun
+- extract failed-mount volume cleanup - (0a1d140) - piperun
+- extract RAID56 scrub batching and parity checks - (2f2306c) - piperun
+- extract RAID10 scrub verification and repair - (dfae8bb) - piperun
+- extract file change notification handling - (926ee9a) - piperun
+- extract physical extent range rationalization - (548b845) - piperun
+- extract queued TRIM submission from flush cleanup - (d8a498c) - piperun
+- extract rename dispatch from fileinfo - (29f4875) - piperun
+- extract hard-link query handlers from fileinfo - (8a938ba) - piperun
+- move EA request handlers into their own source file - (2a1fbbf) - piperun
+- move directory lookup into fileref opening - (5f24478) - piperun
+- extract file creation dispatch from create.c - (034c802) - piperun
+- extract child fileref opening from create dispatch - (9990866) - piperun
+- extract stream creation from create dispatch - (d8cbf41) - piperun
+- extract ordinary file creation routines - (5994bbb) - piperun
+- extract mknod filesystem control handler - (ed78017) - piperun
+- extract volume thread lifecycle - (6384d0e) - piperun
+#### Miscellaneous Chores
+- release fork builds from master - (1fd5407) - piperun
+- integrate Rust range optimization - (fccda69) - piperun
+- integrate unreadable cache cleanup - (c331e5b) - piperun
+- integrate free-space cache layout checks - (15ea3b0) - piperun
+- integrate free-space load validation - (42405fc) - piperun
+- integrate fast write fixes - (bd9d9b1) - piperun
+- integrate compressed read validation - (0854bfd) - piperun
+- integrate extent load validation - (d2bb5fc) - piperun
+- integrate add-device cleanup - (d42d1ac) - piperun
+- integrate batch ownership fixes - (392c64a) - piperun
+- remove redundant trailing blank lines - (e84dcda) - piperun
+- integrate completed mount ownership cleanup - (6392771) - piperun
+- integrate batch source extraction before extent indexing - (a63cb91) - piperun
+- integrate cache flush prerequisite for extent indexing - (4038574) - piperun
+- integrate mount cleanup prerequisites for extent indexing - (3205e3f) - piperun
+- configure Cocogitto version updates - (7516d83) - piperun
+
+- - -
+
+Changelog generated by [cocogitto](https://github.com/cocogitto/cocogitto).
